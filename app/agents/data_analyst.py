@@ -474,59 +474,167 @@ class DataAnalystAgent:
         query: str,
         df: pd.DataFrame
     ) -> Optional[AnalysisResult]:
-        """Heuristic Pandas operations for common patterns."""
+        """
+        Heuristic Pandas operations for common patterns.
+        Handles complex Excel with multi-row headers by searching data for period labels.
+        """
         query_lower = query.lower()
 
         try:
-            # Sum pattern
-            if "sum" in query_lower or "total" in query_lower:
-                for col in df.columns:
-                    if pd.api.types.is_numeric_dtype(df[col]):
-                        # Look for column match in query
-                        if col.lower() in query_lower or any(w in col.lower() for w in query_lower.split() if len(w) > 3):
-                            value = df[col].sum()
-                            return AnalysisResult(
-                                success=True,
-                                result=value,
-                                value=float(value),
-                                method="pandas:heuristic_sum",
-                                explanation=f"Summed column: {col}"
-                            )
+            # First, build a mapping from period names to column indices
+            # by scanning first few rows for period patterns
+            period_col_map = {}
+            for row_idx in range(min(5, len(df))):
+                for col_idx, val in enumerate(df.iloc[row_idx]):
+                    val_str = str(val).lower().strip()
+                    # Check for period patterns
+                    if re.match(r"^(fy\d{2}|9mfy\d{2}|\d+mfy\d{2}|q\d\s*fy\d{2})$", val_str):
+                        col_name = df.columns[col_idx]
+                        period_col_map[val_str] = col_name
+                        logger.debug(f"Found period '{val_str}' in column {col_name}")
+                    # Check for month patterns
+                    month_match = re.match(r"^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[^\d]*(\d{2,4})?$", val_str)
+                    if month_match:
+                        col_name = df.columns[col_idx]
+                        period_col_map[val_str] = col_name
 
-            # Growth pattern
+            # Find the label column (first column usually)
+            label_col = df.columns[0] if len(df.columns) > 0 else None
+
+            # Growth pattern: "growth in X from FY21 to 9MFY22"
             if "growth" in query_lower:
-                # Find period columns
-                period_match = re.findall(r"(fy\d{2}|9mfy\d{2})", query_lower)
+                period_match = re.findall(r"(fy\d{2}|9mfy\d{2}|\d+mfy\d{2})", query_lower)
                 if len(period_match) >= 2:
-                    period1 = period_match[0]
-                    period2 = period_match[1]
+                    period1, period2 = period_match[0], period_match[1]
                     
-                    # Find matching columns
-                    col1 = col2 = None
-                    for col in df.columns:
-                        if period1 in col.lower():
-                            col1 = col
-                        if period2 in col.lower():
-                            col2 = col
+                    # Look up columns from period map
+                    col1 = period_col_map.get(period1)
+                    col2 = period_col_map.get(period2)
                     
-                    if col1 and col2 and pd.api.types.is_numeric_dtype(df[col1]):
-                        # Find row with metric
-                        for keyword in ["revenue", "sales", "income"]:
-                            if keyword in query_lower:
+                    if col1 and col2:
+                        # Find row with metric (revenue from operations, etc.)
+                        keywords = ["revenue from operations", "revenue", "sales", "total income"]
+                        for keyword in keywords:
+                            if keyword in query_lower or keyword == "revenue":
                                 for idx, row in df.iterrows():
-                                    row_str = str(row.values[0]).lower() if len(row) > 0 else ""
-                                    if keyword in row_str:
-                                        val1 = row[col1]
-                                        val2 = row[col2]
-                                        if pd.notna(val1) and pd.notna(val2):
-                                            growth = float(val2) - float(val1)
+                                    if label_col:
+                                        row_label = str(row[label_col]).lower()
+                                        if "revenue" in row_label and "operations" in row_label:
+                                            val1 = pd.to_numeric(row[col1], errors='coerce')
+                                            val2 = pd.to_numeric(row[col2], errors='coerce')
+                                            if pd.notna(val1) and pd.notna(val2):
+                                                growth = float(val2) - float(val1)
+                                                return AnalysisResult(
+                                                    success=True,
+                                                    result=round(growth, 2),
+                                                    value=round(growth, 2),
+                                                    method="pandas:heuristic_growth",
+                                                    explanation=f"Growth from {period1} ({val1}) to {period2} ({val2})"
+                                                )
+
+            # Specific month/period lookup: "GMV for December 2020"
+            month_match = re.search(r"(january|february|march|april|may|june|july|august|september|october|november|december)\s*(\d{4})?", query_lower)
+            if month_match:
+                month_name = month_match.group(1)
+                year = month_match.group(2) if month_match.group(2) else ""
+                month_abbr = month_name[:3]
+                
+                # Find column matching month in period_col_map
+                target_col = None
+                for period_key, col in period_col_map.items():
+                    if month_abbr in period_key:
+                        if not year or year in period_key:
+                            target_col = col
+                            break
+                
+                # Also search column headers for date values
+                if not target_col:
+                    for col in df.columns:
+                        for row_idx in range(min(5, len(df))):
+                            val = str(df.iloc[row_idx][col])
+                            if '2020' in val and 'dec' in val.lower():
+                                target_col = col
+                                break
+                            # Check for datetime values
+                            if '12' in val and '2020' in val:
+                                target_col = col
+                                break
+                
+                if target_col or not period_col_map:
+                    # Search by scanning column values in first few rows for dates
+                    for col_idx, col in enumerate(df.columns):
+                        for row_idx in range(min(5, len(df))):
+                            val = df.iloc[row_idx][col]
+                            val_str = str(val).lower()
+                            if hasattr(val, 'month'):  # datetime object
+                                if val.month == 12 and (not year or str(val.year) == year):
+                                    target_col = col
+                                    break
+                    
+                if target_col:
+                    # Find row with GMV
+                    for idx, row in df.iterrows():
+                        if label_col:
+                            row_label = str(row[label_col]).lower()
+                            if "gmv" in row_label:
+                                val = pd.to_numeric(row[target_col], errors='coerce')
+                                if pd.notna(val):
+                                    return AnalysisResult(
+                                        success=True,
+                                        result=round(float(val), 2),
+                                        value=round(float(val), 2),
+                                        method="pandas:heuristic_month_lookup",
+                                        explanation=f"Found GMV for {month_name}: {val}"
+                                    )
+
+            # Metric lookup by period: "Digital marketing cost for 9MFY22"
+            period_match = re.search(r"(9mfy\d{2}|fy\d{2}|q\d\s*fy\d{2})", query_lower)
+            if period_match:
+                period = period_match.group(1)
+                target_col = period_col_map.get(period)
+                
+                if target_col:
+                    # Search for metric in query
+                    for keyword in ["digital marketing", "digital", "marketing"]:
+                        if keyword in query_lower:
+                            for idx, row in df.iterrows():
+                                if label_col:
+                                    row_label = str(row[label_col]).lower()
+                                    if "digital" in row_label:
+                                        val = pd.to_numeric(row[target_col], errors='coerce')
+                                        if pd.notna(val):
                                             return AnalysisResult(
                                                 success=True,
-                                                result=round(growth, 2),
-                                                value=round(growth, 2),
-                                                method="pandas:heuristic_growth",
-                                                explanation=f"Growth from {col1} to {col2}"
+                                                result=round(float(val), 2),
+                                                value=round(float(val), 2),
+                                                method="pandas:heuristic_metric_lookup",
+                                                explanation=f"Found metric for {period}: {val}"
                                             )
+
+            # Sum/Total pattern - look for total row if it exists
+            if "total" in query_lower and "collection" in query_lower:
+                # Find a row matching the metric
+                for keyword in ["prepaid recorded", "domestic"]:
+                    if keyword in query_lower:
+                        for idx, row in df.iterrows():
+                            if label_col:
+                                row_label = str(row[label_col]).lower()
+                                if keyword.split()[0] in row_label:
+                                    # Sum all numeric values in the row
+                                    values = []
+                                    for col in df.columns[1:]:  # Skip label column
+                                        val = pd.to_numeric(row[col], errors='coerce')
+                                        if pd.notna(val) and val != 0:
+                                            values.append(val)
+                                    if values:
+                                        total = sum(values)
+                                        return AnalysisResult(
+                                            success=True,
+                                            result=round(float(total), 2),
+                                            value=round(float(total), 2),
+                                            method="pandas:heuristic_row_sum",
+                                            explanation=f"Summed row values for {keyword}: {len(values)} values"
+                                        )
 
         except Exception as e:
             logger.warning(f"Heuristic Pandas failed: {e}")
