@@ -134,11 +134,17 @@ class DataAnalystAgent:
             "balance sheet": ["balance", "sheet", "assets"],
             "cashflow": ["cashflow", "cash_flow", "cash"],
             "cashburn": ["cashburn", "cash_burn", "burn"],
-            "unit economics": ["unit", "economics", "per_order"],
-            "gmv": ["gmv", "merchandise", "value"],
+            "unit economics": ["unit", "economics", "per_order", "per order", "cost_per"],
+            "cost per order": ["unit", "economics", "per_order"],  # Maps to unit economics
+            "digital marketing": ["unit", "economics", "marketing"],  # Maps to unit economics
+            "marketing cost": ["unit", "economics", "marketing"],
+            "gmv": ["gmv", "merchandise", "value", "cashburn"],
+            "december": ["cashburn", "monthly", "cash_burn"],  # Monthly data
             "revenue": ["income", "revenue", "statement"],
-            "collection": ["collection", "prepaid", "recorded"],
-            "variance": ["variance", "actual", "budget", "forecasting"],
+            "collection": ["collection", "prepaid", "recorded", "fy22"],
+            "variance": ["variance", "actual", "budget", "forecasting", "comp"],
+            "actual": ["comp", "variance", "model"],
+            "model": ["comp", "variance", "project"],
         }
 
         best_match = None
