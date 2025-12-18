@@ -374,10 +374,13 @@ Return ONLY the dataset_id of the best match, or "NONE" if no match found.
 
 # Tool placeholder descriptions for agent prompts
 TOOL_DESCRIPTIONS = {
-    "tool_benford": "benford_test: Runs Benford's Law test on numeric column to detect anomalies",
-    "tool_3way": "three_way_match: Compares invoice, PO, and ledger for discrepancies",
+    "tool_benford": "benford_test: Runs Benford's Law test on numeric column to detect anomalies/fraud",
+    "tool_3way": "three_way_match: Compares invoice, PO, and ledger for discrepancies (reconciliation)",
     "tool_cohort": "cohort_analysis: Builds cohort retention analysis from transaction data",
-    "tool_web_search": "web_search: Searches web for current tax rates, regulations, benchmarks",
+    "tool_web_search": "web_search: Multi-provider web search for current tax rates, regulations, benchmarks",
+    "tool_search_tax": "search_tax_rate: Specialized search for tax rates from official sources",
+    "tool_search_regulation": "search_regulation: Search for regulatory and compliance requirements",
+    "tool_search_benchmark": "search_benchmark: Search for industry benchmarks and market data",
     "tool_date_normalize": "date_normalize: Normalizes various date formats to standard format",
 }
 
@@ -387,11 +390,145 @@ def get_tool_description(tool_name: str) -> str:
     return TOOL_DESCRIPTIONS.get(tool_name, f"{tool_name}: No description available")
 
 
+def get_tool_selection_prompt(query: str, available_tools: str = "") -> str:
+    """
+    Generate prompt for LLM to select appropriate tool.
+    
+    Args:
+        query: User's question
+        available_tools: Optional list of available tools
+        
+    Returns:
+        Formatted prompt for tool selection
+    """
+    if not available_tools:
+        available_tools = "\n".join([
+            f"- {key}: {desc}" for key, desc in TOOL_DESCRIPTIONS.items()
+        ])
+    
+    template_str = _PROMPT_TEMPLATES.get("tool_selection", """
+{guardrails}
+
+USER QUERY: {query}
+
+AVAILABLE TOOLS:
+{tools}
+
+DETERMINE:
+1. Which tool is most appropriate for this query?
+2. What parameters are needed?
+3. Can this be answered without a tool (pure data query)?
+
+OUTPUT FORMAT:
+Return ONLY valid JSON:
+{{
+    "tool": "tool_name or null",
+    "parameters": {{"param1": "value1"}},
+    "reason": "Why this tool was selected"
+}}
+""")
+    
+    template = PromptTemplate(
+        input_variables=["guardrails", "query", "tools"],
+        template=template_str
+    )
+    return template.format(
+        guardrails=CA_SYSTEM_GUARDRAILS,
+        query=query,
+        tools=available_tools
+    )
+
+
+def get_fraud_analysis_prompt(results: str, column: str, dataset: str) -> str:
+    """
+    Generate prompt for fraud detection analysis interpretation.
+    
+    Args:
+        results: Benford test results
+        column: Column that was tested
+        dataset: Dataset ID
+        
+    Returns:
+        Formatted prompt for fraud analysis
+    """
+    template_str = _PROMPT_TEMPLATES.get("fraud_analysis", """
+{guardrails}
+
+BENFORD'S LAW TEST RESULTS:
+{results}
+
+TESTED COLUMN: {column}
+DATASET: {dataset}
+
+INTERPRET FINDINGS:
+1. PASS: Data follows expected Benford distribution - no immediate red flags.
+2. WARNING: Minor deviations detected - may warrant further investigation.
+3. FAIL: Significant deviation from Benford's Law - potential data manipulation or fraud.
+
+FOR FAILURES:
+- Identify which digits deviate most from expected distribution
+- Suggest specific line items or date ranges to investigate
+- Recommend additional audit procedures
+
+OUTPUT: Professional fraud analysis report suitable for audit committee.
+""")
+    
+    template = PromptTemplate(
+        input_variables=["guardrails", "results", "column", "dataset"],
+        template=template_str
+    )
+    return template.format(
+        guardrails=CA_SYSTEM_GUARDRAILS,
+        results=results,
+        column=column,
+        dataset=dataset
+    )
+
+
+def get_reconciliation_prompt(results: str) -> str:
+    """
+    Generate prompt for reconciliation summary interpretation.
+    
+    Args:
+        results: Three-way match results
+        
+    Returns:
+        Formatted prompt for reconciliation report
+    """
+    template_str = _PROMPT_TEMPLATES.get("reconciliation", """
+{guardrails}
+
+THREE-WAY MATCH RESULTS:
+{results}
+
+RECONCILIATION SUMMARY:
+- Matched: Transactions where Invoice, PO, and Ledger agree within tolerance
+- Unmatched: Discrepancies requiring investigation
+
+FOR DISCREPANCIES:
+1. Categorize by type (price variance, quantity variance, timing difference)
+2. Quantify the financial impact
+3. Suggest resolution steps
+4. Flag any that require management attention
+
+OUTPUT: Professional reconciliation report suitable for CFO review.
+""")
+    
+    template = PromptTemplate(
+        input_variables=["guardrails", "results"],
+        template=template_str
+    )
+    return template.format(
+        guardrails=CA_SYSTEM_GUARDRAILS,
+        results=results
+    )
+
+
 # Output schema definitions for validation
 OUTPUT_SCHEMAS = {
     "sql_response": {
         "sql": str,
-        "columns": list,
+        "columns_used": list,
         "explanation": str
     },
     "python_response": {
@@ -403,6 +540,18 @@ OUTPUT_SCHEMAS = {
         "method": str,
         "explain": str,
         "confidence": float
+    },
+    "tool_selection": {
+        "tool": str,
+        "parameters": dict,
+        "reason": str
+    },
+    "schema_analysis": {
+        "label_column": str,
+        "period_columns": dict,
+        "header_row": int,
+        "data_start_row": int,
+        "data_type": str
     }
 }
 
@@ -410,3 +559,63 @@ OUTPUT_SCHEMAS = {
 def get_output_schema(schema_name: str) -> Dict[str, Any]:
     """Get expected output schema by name."""
     return OUTPUT_SCHEMAS.get(schema_name, {})
+
+
+# ============================================================================
+# CONVENIENCE FUNCTIONS FOR TOOL INTEGRATION
+# ============================================================================
+
+def format_tool_response_prompt(
+    tool_name: str,
+    tool_output: Dict[str, Any],
+    original_query: str
+) -> str:
+    """
+    Format a tool's output into a professional response using LLM.
+    
+    Args:
+        tool_name: Name of the tool that was used
+        tool_output: Raw output from the tool
+        original_query: User's original question
+        
+    Returns:
+        Formatted prompt for response generation
+    """
+    import json
+    results_str = json.dumps(tool_output, indent=2, default=str)
+    
+    if tool_name in ("benford_test", "run_benford_test"):
+        return get_fraud_analysis_prompt(
+            results_str,
+            tool_output.get("column", "unknown"),
+            tool_output.get("dataset", "unknown")
+        )
+    elif tool_name == "three_way_match":
+        return get_reconciliation_prompt(results_str)
+    elif tool_name in ("web_search", "search_tax_rate", "search_regulation", "search_benchmark"):
+        return get_web_search_prompt(results_str, original_query)
+    else:
+        return get_ca_synthesis_prompt(results_str, original_query, tool_name)
+
+
+__all__ = [
+    "CA_SYSTEM_GUARDRAILS",
+    "TRACK_DATA",
+    "TRACK_DOC", 
+    "TRACK_WEB",
+    "get_router_prompt",
+    "get_data_analyst_sql_prompt",
+    "get_data_analyst_python_prompt",
+    "get_ca_synthesis_prompt",
+    "get_document_rag_prompt",
+    "get_web_search_prompt",
+    "get_dataset_match_prompt",
+    "get_tool_description",
+    "get_tool_selection_prompt",
+    "get_fraud_analysis_prompt",
+    "get_reconciliation_prompt",
+    "get_output_schema",
+    "format_tool_response_prompt",
+    "TOOL_DESCRIPTIONS",
+    "OUTPUT_SCHEMAS",
+]

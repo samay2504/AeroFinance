@@ -96,6 +96,15 @@ class DataAnalystAgent:
         except Exception as e:
             logger.warning(f"Semantic understanding unavailable: {e}")
 
+        # Initialize tool orchestrator for integrated tool execution
+        try:
+            from app.tools.orchestrator import get_tool_orchestrator
+            self._tool_orchestrator = get_tool_orchestrator(self._llm)
+            logger.info(f"Tool orchestrator initialized with {len(self._tool_orchestrator._tools)} tools")
+        except Exception as e:
+            logger.warning(f"Tool orchestrator unavailable: {e}")
+            self._tool_orchestrator = None
+
     def register_dataframe(
         self,
         dataset_id: str,

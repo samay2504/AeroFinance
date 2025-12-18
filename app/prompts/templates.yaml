@@ -1,8 +1,43 @@
 # AI-CA Prompt Templates
 # Override default prompts from app/core/prompts.py
 # Admin-editable YAML for prompt customization
+# Version: 2.0 - Production Grade with Tool Integration
+
+# Global settings
+settings:
+  version: "2.0"
+  default_currency: "INR"
+  precision: 2
+  strict_mode: true
+
+# Available tools for agent reference
+tools:
+  - name: web_search
+    description: "Multi-provider web search (DuckDuckGo/Brave/Bing) for real-time information"
+    use_for: "tax rates, regulations, market data, latest news"
+  - name: search_tax_rate
+    description: "Specialized tax rate lookup from official sources"
+    use_for: "GST rates, Income Tax, TDS, Corporate Tax"
+  - name: search_regulation
+    description: "Search regulatory and compliance requirements"
+    use_for: "compliance rules, filing requirements, penalties"
+  - name: search_benchmark
+    description: "Industry benchmark and market data search"
+    use_for: "gross margin, EBITDA, industry averages"
+  - name: benford_test
+    description: "Benford's Law fraud detection on numeric data"
+    use_for: "expense analysis, ledger scrutiny, fraud detection"
+  - name: cohort_analysis
+    description: "Customer retention and cohort analysis"
+    use_for: "customer lifetime value, churn analysis, retention"
+  - name: three_way_match
+    description: "Invoice/PO/Ledger reconciliation"
+    use_for: "accounts payable, vendor reconciliation, audit"
 
 templates:
+  # ============================================================================
+  # ROUTER - Intent Classification
+  # ============================================================================
   router: |
     {guardrails}
 
@@ -14,19 +49,23 @@ templates:
     CLASSIFY this query into exactly ONE track:
 
     TRACK_DATA: For trends, growth rates, specific numbers, ledger scrutiny, period comparisons,
-                aggregations, or any question requiring calculation from structured data.
-                Keywords: what was, growth, total, sum, average, compare, variance, percentage.
+                aggregations, calculations, Benford's Law tests, cohort analysis, or reconciliation.
+                Keywords: what was, growth, total, sum, average, compare, variance, percentage,
+                          fraud detection, anomaly, reconcile, retention, cohort.
 
     TRACK_DOC: For policy definitions, contract clauses, notes to accounts, legal terms,
                compliance requirements, or textual information lookup.
-               Keywords: what is the clause, policy, definition, terms, agreement.
+               Keywords: what is the clause, policy, definition, terms, agreement, schedule III.
 
     TRACK_WEB: For latest tax rates, budget news, external benchmarks, current regulations,
                or any information requiring real-time/external data.
-               Keywords: current rate, latest, 2024/2025, budget, external, benchmark.
+               Keywords: current rate, latest, 2024/2025, budget, external, benchmark, GST rate.
 
     OUTPUT FORMAT: Return ONLY the track code (TRACK_DATA, TRACK_DOC, or TRACK_WEB) with no explanation.
 
+  # ============================================================================
+  # SQL GENERATION - Production Grade
+  # ============================================================================
   data_analyst_sql: |
     {guardrails}
 
@@ -35,24 +74,38 @@ templates:
 
     {columns_section}
 
-    REQUIREMENTS:
-    1. Use standard SQL syntax compatible with DuckDB.
-    2. Handle NULL values: 'Na/p', 'N/A', '-', '' should be treated as NULL.
-    3. For numeric columns with commas/percentages, values are pre-cleaned.
-    4. Period columns (fy21, 9mfy22, q1fy23) are preserved as-is for grouping.
-    5. Use CAST() for type conversions when needed.
-    6. Aggregate results at highest precision (no rounding unless asked).
+    {data_sample_section}
+
+    {semantic_section}
+
+    CRITICAL DuckDB SQL RULES:
+    1. Use ONLY the exact column names shown above - they are lowercase with underscores.
+    2. ALL numeric operations MUST use explicit CAST: CAST(column AS DOUBLE) for calculations.
+    3. Handle mixed types: Use TRY_CAST(column AS DOUBLE) for columns that might have non-numeric values.
+    4. String comparisons are case-sensitive - use LOWER() for matching text.
+    5. For NULL-like values, the data is pre-cleaned but use COALESCE(col, 0) for safety.
+    6. The table name is the sanitized version shown in schema - use EXACTLY that name with double underscores.
+    7. NEVER use backticks (`) - DuckDB uses double quotes for identifiers if needed.
+
+    QUERY PATTERNS BY TYPE:
+    - GROWTH: (CAST(period2_col AS DOUBLE) - CAST(period1_col AS DOUBLE))
+    - SINGLE VALUE: SELECT col FROM table WHERE LOWER(label_col) LIKE '%keyword%'
+    - AGGREGATION: SUM(CAST(col AS DOUBLE)), AVG(CAST(col AS DOUBLE))
+    - VARIANCE: (actual_col - budget_col) or ((actual - budget) / budget * 100) for percentage
 
     USER QUERY: {query}
 
     OUTPUT FORMAT:
     Return ONLY valid JSON with this structure:
     {{
-        "sql": "SELECT ... FROM data ...",
-        "columns": ["col1", "col2"],
-        "explanation": "Brief explanation of the SQL approach"
+        "sql": "SELECT CAST(... AS DOUBLE) FROM table_name WHERE ...",
+        "columns_used": ["col1", "col2"],
+        "explanation": "What this query does and how it answers the question"
     }}
 
+  # ============================================================================
+  # PYTHON CODE GENERATION
+  # ============================================================================
   data_analyst_python: |
     {guardrails}
 
@@ -69,7 +122,12 @@ templates:
     2. Defines a function 'run(df)' that returns the result.
     3. Uses only: pandas, numpy, math, decimal (no other imports).
     4. Returns a JSON-serializable result (dict, list, number, or string).
-    5. Handles missing values gracefully.
+    5. Handles missing values gracefully with pd.notna() checks.
+    6. Uses .iloc for positional indexing, .loc for label-based.
+    7. Converts results to Python native types (float, int, str).
+
+    BLOCKED PATTERNS (will cause security error):
+    - __import__, exec, eval, compile, open, os, sys, subprocess
 
     OUTPUT FORMAT:
     Return ONLY valid JSON:
@@ -78,6 +136,42 @@ templates:
         "explanation": "Brief explanation of the approach"
     }}
 
+  # ============================================================================
+  # SCHEMA ANALYSIS - LLM-Powered Data Understanding
+  # ============================================================================
+  schema_analysis: |
+    {guardrails}
+
+    Analyze this DataFrame to understand its structure:
+
+    DATAFRAME INFO:
+    - Shape: {shape}
+    - Columns: {columns}
+    - Sample rows:
+    {sample_data}
+
+    IDENTIFY:
+    1. LABEL_COLUMN: Which column contains row labels/metric names? (usually first non-date column with text)
+    2. PERIOD_COLUMNS: Which columns represent time periods? Map them as: "column_name": "normalized_period"
+       - Patterns: FY21, FY22, 9MFY22, Q1FY23, Apr-21, 2021-04, etc.
+       - Normalize to: fy21, fy22, 9mfy22, q1fy23, apr21, 2021_04
+    3. HEADER_ROW: Which row index contains column headers? (0 if already parsed, or row with period headers)
+    4. DATA_START: Which row does actual data start? (after headers)
+    5. DATA_TYPE: What type of financial data? (income_statement, balance_sheet, cashflow, mis_report, ledger)
+
+    OUTPUT FORMAT:
+    Return ONLY valid JSON:
+    {{
+        "label_column": "column_name",
+        "period_columns": {{"col_name": "period_id"}},
+        "header_row": 0,
+        "data_start_row": 1,
+        "data_type": "income_statement"
+    }}
+
+  # ============================================================================
+  # SYNTHESIS - Professional CA Response
+  # ============================================================================
   synthesis: |
     {guardrails}
 
@@ -88,15 +182,25 @@ templates:
 
     INSTRUCTIONS:
     1. Summarize findings professionally and concisely.
-    2. If numeric, present with appropriate precision and units.
-    3. If variance/anomaly exists, explain in plain terms.
+    2. If numeric, present with appropriate precision (2 decimal places) and units (INR Mn/Cr/Lakhs as appropriate).
+    3. If variance/anomaly exists, explain the significance in business terms.
     4. Note the data source and calculation method used.
     5. Add a brief 'Note' if any assumptions were made.
+    6. For financial ratios, provide industry context if relevant.
+
+    RESPONSE STRUCTURE:
+    - Lead with the direct answer to the question
+    - Provide supporting details/breakdown if relevant
+    - Add methodology note
+    - Include any necessary disclaimers
 
     OUTPUT FORMAT:
     Provide a clear, professional response suitable for presentation to management.
     If result is uncertain, add a disclaimer.
 
+  # ============================================================================
+  # DOCUMENT RAG - Policy and Clause Lookup
+  # ============================================================================
   document_rag: |
     {guardrails}
 
@@ -107,24 +211,166 @@ templates:
 
     INSTRUCTIONS:
     1. Answer based ONLY on the provided context.
-    2. Quote relevant sections when appropriate.
+    2. Quote relevant sections when appropriate using "..." format.
     3. If the answer is not in the context, say "Information not found in available documents".
     4. For legal/compliance matters, recommend verification with original source.
+    5. Reference specific clause numbers, page numbers, or section headers when available.
+    6. For accounting standards, cite the specific AS/Ind AS/IFRS reference.
 
     OUTPUT: Provide a clear, accurate answer with source references.
 
+  # ============================================================================
+  # WEB SEARCH - Real-Time Information Synthesis
+  # ============================================================================
   web_search: |
     {guardrails}
 
     WEB SEARCH RESULTS:
     {results}
 
+    SEARCH PROVIDER: {provider}
+
     USER QUERY: {query}
 
     INSTRUCTIONS:
-    1. Synthesize information from credible sources.
-    2. Cite sources with URLs.
-    3. Note the date relevance of information.
-    4. For tax rates/regulations, recommend verification with official sources.
+    1. Synthesize information from most credible sources first (government sites > established publications).
+    2. Cite sources with URLs in [Source Name](URL) format.
+    3. Note the date relevance of information - tax rates and regulations change annually.
+    4. For tax rates/regulations, ALWAYS recommend verification with official sources.
+    5. If multiple conflicting sources, note the discrepancy.
+    6. Indicate if information may be outdated.
+
+    STANDARD DISCLAIMERS:
+    - Tax rates: "Please verify the current rate with the official government portal."
+    - Regulations: "This information is for general guidance. Consult official notifications for compliance."
 
     OUTPUT: Provide factual answer with sources. Add date caveat if time-sensitive.
+
+  # ============================================================================
+  # TOOL SELECTION - Choose Appropriate Tool
+  # ============================================================================
+  tool_selection: |
+    {guardrails}
+
+    USER QUERY: {query}
+
+    AVAILABLE TOOLS:
+    1. web_search: For real-time information, tax rates, market data
+    2. search_tax_rate: Specifically for tax rate queries (GST, Income Tax, TDS, Corporate)
+    3. search_regulation: For compliance and regulatory requirements
+    4. search_benchmark: For industry benchmarks and market comparisons
+    5. benford_test: For fraud detection on numeric data (requires dataset_id and column_name)
+    6. cohort_analysis: For retention and customer analysis (requires dataset_id, date_col, user_col)
+    7. three_way_match: For Invoice/PO/Ledger reconciliation (requires three dataset_ids)
+
+    DETERMINE:
+    1. Which tool is most appropriate for this query?
+    2. What parameters are needed?
+    3. Can this be answered without a tool (pure data query)?
+
+    OUTPUT FORMAT:
+    Return ONLY valid JSON:
+    {{
+        "tool": "tool_name or null",
+        "parameters": {{"param1": "value1"}},
+        "reason": "Why this tool was selected"
+    }}
+
+  # ============================================================================
+  # DATASET MATCHING - Find Best Dataset
+  # ============================================================================
+  dataset_match: |
+    You are a data matching assistant. Match the user's query to the most relevant dataset.
+
+    AVAILABLE DATASETS:
+    {datasets}
+
+    USER QUERY: {query}
+
+    MATCHING RULES:
+    1. Match based on column names, sheet names, and data descriptions.
+    2. Look for keywords in the query that match dataset content:
+       - "income", "revenue", "profit" → income_statement
+       - "balance", "assets", "liabilities" → balance_sheet
+       - "cashflow", "cash" → cashflow
+       - "prepaid", "collection", "FY22" → fy22 collections
+       - "unit economics", "per order", "cost per" → unit_economics
+       - "variance", "actual vs", "budget" → comp or forecasting
+       - "GMV", "December 2020" → cashburn_fy21
+    3. Consider time periods mentioned (FY21, FY22, 9MFY22, etc.) - match to appropriate dataset.
+    4. If multiple matches, prefer the one with more specific period match.
+
+    OUTPUT FORMAT:
+    Return ONLY the dataset_id of the best match, or "NONE" if no match found.
+
+  # ============================================================================
+  # FRAUD DETECTION RESPONSE
+  # ============================================================================
+  fraud_analysis: |
+    {guardrails}
+
+    BENFORD'S LAW TEST RESULTS:
+    {results}
+
+    TESTED COLUMN: {column}
+    DATASET: {dataset}
+
+    INTERPRET FINDINGS:
+    1. PASS: Data follows expected Benford distribution - no immediate red flags.
+    2. WARNING: Minor deviations detected - may warrant further investigation.
+    3. FAIL: Significant deviation from Benford's Law - potential data manipulation or fraud.
+
+    FOR FAILURES:
+    - Identify which digits deviate most from expected distribution
+    - Suggest specific line items or date ranges to investigate
+    - Recommend additional audit procedures
+
+    OUTPUT: Professional fraud analysis report suitable for audit committee.
+
+  # ============================================================================
+  # RECONCILIATION RESPONSE
+  # ============================================================================
+  reconciliation: |
+    {guardrails}
+
+    THREE-WAY MATCH RESULTS:
+    {results}
+
+    RECONCILIATION SUMMARY:
+    - Matched: Transactions where Invoice, PO, and Ledger agree within tolerance
+    - Unmatched: Discrepancies requiring investigation
+
+    FOR DISCREPANCIES:
+    1. Categorize by type (price variance, quantity variance, timing difference)
+    2. Quantify the financial impact
+    3. Suggest resolution steps
+    4. Flag any that require management attention
+
+    OUTPUT: Professional reconciliation report suitable for CFO review.
+
+# Validation rules for prompt outputs
+validation:
+  sql_response:
+    required_fields: ["sql", "columns_used", "explanation"]
+    sql_must_contain: ["SELECT", "FROM"]
+    sql_must_not_contain: ["`", "DROP", "DELETE", "UPDATE", "INSERT", "ALTER"]
+  
+  python_response:
+    required_fields: ["code", "explanation"]
+    code_must_contain: ["def run(df):", "return"]
+    code_must_not_contain: ["__import__", "exec", "eval", "open(", "os.", "sys."]
+
+  schema_analysis:
+    required_fields: ["label_column", "period_columns", "header_row"]
+
+# Security blocked patterns
+blocked_patterns:
+  - "__import__"
+  - "exec("
+  - "eval("
+  - "compile("
+  - "open("
+  - "os.system"
+  - "subprocess"
+  - "requests."
+  - "urllib"
