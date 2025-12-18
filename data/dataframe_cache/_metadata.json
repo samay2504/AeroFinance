@@ -1,0 +1,604 @@
+{
+  "test_client_ca:mis__report:comp": {
+    "preprocessing": {
+      "original_shape": [
+        38,
+        25
+      ],
+      "columns_normalized": [
+        {
+          "original": "As per model project",
+          "normalized": "as_per_model_project"
+        },
+        {
+          "original": "Unnamed: 1",
+          "normalized": "unnamed_1"
+        },
+        {
+          "original": "Unnamed: 2",
+          "normalized": "unnamed_2"
+        },
+        {
+          "original": "Unnamed: 3",
+          "normalized": "unnamed_3"
+        },
+        {
+          "original": "Unnamed: 4",
+          "normalized": "unnamed_4"
+        },
+        {
+          "original": "Unnamed: 5",
+          "normalized": "unnamed_5"
+        },
+        {
+          "original": "Unnamed: 6",
+          "normalized": "unnamed_6"
+        },
+        {
+          "original": "Unnamed: 7",
+          "normalized": "unnamed_7"
+        },
+        {
+          "original": "Unnamed: 8",
+          "normalized": "unnamed_8"
+        },
+        {
+          "original": "Unnamed: 9",
+          "normalized": "unnamed_9"
+        },
+        {
+          "original": "Unnamed: 10",
+          "normalized": "unnamed_10"
+        },
+        {
+          "original": "Unnamed: 11",
+          "normalized": "unnamed_11"
+        },
+        {
+          "original": "Unnamed: 12",
+          "normalized": "unnamed_12"
+        },
+        {
+          "original": "Unnamed: 13",
+          "normalized": "unnamed_13"
+        },
+        {
+          "original": "Unnamed: 14",
+          "normalized": "unnamed_14"
+        },
+        {
+          "original": "Unnamed: 15",
+          "normalized": "unnamed_15"
+        },
+        {
+          "original": "Unnamed: 16",
+          "normalized": "unnamed_16"
+        },
+        {
+          "original": "Unnamed: 17",
+          "normalized": "unnamed_17"
+        },
+        {
+          "original": "Unnamed: 18",
+          "normalized": "unnamed_18"
+        },
+        {
+          "original": "Unnamed: 19",
+          "normalized": "unnamed_19"
+        },
+        {
+          "original": "Unnamed: 20",
+          "normalized": "unnamed_20"
+        },
+        {
+          "original": "Unnamed: 21",
+          "normalized": "unnamed_21"
+        },
+        {
+          "original": "Unnamed: 22",
+          "normalized": "unnamed_22"
+        },
+        {
+          "original": "Unnamed: 23",
+          "normalized": "unnamed_23"
+        },
+        {
+          "original": "Unnamed: 24",
+          "normalized": "unnamed_24"
+        }
+      ],
+      "numeric_coerced": [],
+      "period_columns": [],
+      "na_replaced": 0,
+      "final_shape": [
+        38,
+        25
+      ],
+      "sheet_name": "Comp"
+    },
+    "dataset_id": "test_client_ca:mis__report:comp",
+    "client_id": "test_client_ca",
+    "rows": 38,
+    "columns": [
+      "as_per_model_project",
+      "unnamed_1",
+      "unnamed_2",
+      "unnamed_3",
+      "unnamed_4",
+      "unnamed_5",
+      "unnamed_6",
+      "unnamed_7",
+      "unnamed_8",
+      "unnamed_9",
+      "unnamed_10",
+      "unnamed_11",
+      "unnamed_12",
+      "unnamed_13",
+      "unnamed_14",
+      "unnamed_15",
+      "unnamed_16",
+      "unnamed_17",
+      "unnamed_18",
+      "unnamed_19",
+      "unnamed_20",
+      "unnamed_21",
+      "unnamed_22",
+      "unnamed_23",
+      "unnamed_24"
+    ],
+    "dtypes": {
+      "as_per_model_project": "object",
+      "unnamed_1": "object",
+      "unnamed_2": "object",
+      "unnamed_3": "object",
+      "unnamed_4": "object",
+      "unnamed_5": "object",
+      "unnamed_6": "object",
+      "unnamed_7": "object",
+      "unnamed_8": "object",
+      "unnamed_9": "object",
+      "unnamed_10": "object",
+      "unnamed_11": "object",
+      "unnamed_12": "object",
+      "unnamed_13": "object",
+      "unnamed_14": "object",
+      "unnamed_15": "object",
+      "unnamed_16": "object",
+      "unnamed_17": "object",
+      "unnamed_18": "object",
+      "unnamed_19": "object",
+      "unnamed_20": "object",
+      "unnamed_21": "object",
+      "unnamed_22": "object",
+      "unnamed_23": "object",
+      "unnamed_24": "object"
+    },
+    "registered_at": "2025-12-18T20:20:30.132071",
+    "parquet_path": "D:\\Projects2.0\\Valuenaire\\Re\\data\\dataframe_cache\\test_client_ca_mis__report_comp.parquet"
+  },
+  "test_client_ca:mis__report:cashburn_fy21": {
+    "preprocessing": {
+      "original_shape": [
+        42,
+        18
+      ],
+      "columns_normalized": [
+        {
+          "original": "Unnamed: 1",
+          "normalized": "unnamed_1"
+        },
+        {
+          "original": "Unnamed: 2",
+          "normalized": "unnamed_2"
+        },
+        {
+          "original": "Unnamed: 3",
+          "normalized": "unnamed_3"
+        },
+        {
+          "original": "Unnamed: 4",
+          "normalized": "unnamed_4"
+        },
+        {
+          "original": "Unnamed: 5",
+          "normalized": "unnamed_5"
+        },
+        {
+          "original": "Unnamed: 6",
+          "normalized": "unnamed_6"
+        },
+        {
+          "original": "Unnamed: 7",
+          "normalized": "unnamed_7"
+        },
+        {
+          "original": "Unnamed: 8",
+          "normalized": "unnamed_8"
+        },
+        {
+          "original": "Unnamed: 9",
+          "normalized": "unnamed_9"
+        },
+        {
+          "original": "Unnamed: 10",
+          "normalized": "unnamed_10"
+        },
+        {
+          "original": "Unnamed: 11",
+          "normalized": "unnamed_11"
+        },
+        {
+          "original": "Unnamed: 12",
+          "normalized": "unnamed_12"
+        },
+        {
+          "original": "Unnamed: 13",
+          "normalized": "unnamed_13"
+        },
+        {
+          "original": "Unnamed: 14",
+          "normalized": "unnamed_14"
+        },
+        {
+          "original": "Unnamed: 15",
+          "normalized": "unnamed_15"
+        },
+        {
+          "original": "Unnamed: 16",
+          "normalized": "unnamed_16"
+        },
+        {
+          "original": "Unnamed: 17",
+          "normalized": "unnamed_17"
+        }
+      ],
+      "numeric_coerced": [
+        "unnamed_14"
+      ],
+      "period_columns": [],
+      "na_replaced": "5",
+      "final_shape": [
+        40,
+        17
+      ],
+      "sheet_name": "Cashburn_FY21"
+    },
+    "dataset_id": "test_client_ca:mis__report:cashburn_fy21",
+    "client_id": "test_client_ca",
+    "rows": 40,
+    "columns": [
+      "unnamed_1",
+      "unnamed_2",
+      "unnamed_3",
+      "unnamed_4",
+      "unnamed_5",
+      "unnamed_6",
+      "unnamed_7",
+      "unnamed_8",
+      "unnamed_9",
+      "unnamed_10",
+      "unnamed_11",
+      "unnamed_12",
+      "unnamed_13",
+      "unnamed_14",
+      "unnamed_15",
+      "unnamed_16",
+      "unnamed_17"
+    ],
+    "dtypes": {
+      "unnamed_1": "object",
+      "unnamed_2": "object",
+      "unnamed_3": "object",
+      "unnamed_4": "object",
+      "unnamed_5": "object",
+      "unnamed_6": "object",
+      "unnamed_7": "object",
+      "unnamed_8": "object",
+      "unnamed_9": "object",
+      "unnamed_10": "object",
+      "unnamed_11": "object",
+      "unnamed_12": "object",
+      "unnamed_13": "object",
+      "unnamed_14": "float64",
+      "unnamed_15": "object",
+      "unnamed_16": "object",
+      "unnamed_17": "object"
+    },
+    "registered_at": "2025-12-18T20:20:30.645445",
+    "parquet_path": "D:\\Projects2.0\\Valuenaire\\Re\\data\\dataframe_cache\\test_client_ca_mis__report_cashburn_fy21.parquet"
+  },
+  "test_client_ca:mis__report:unit_economics": {
+    "preprocessing": {
+      "original_shape": [
+        28,
+        12
+      ],
+      "columns_normalized": [
+        {
+          "original": "Project Rapid",
+          "normalized": "project_rapid"
+        },
+        {
+          "original": "Unnamed: 2",
+          "normalized": "unnamed_2"
+        },
+        {
+          "original": "Unnamed: 3",
+          "normalized": "unnamed_3"
+        },
+        {
+          "original": "12950.666666666666",
+          "normalized": "12950_666666666666"
+        },
+        {
+          "original": "30633.88888888889",
+          "normalized": "30633_88888888889"
+        },
+        {
+          "original": "Unnamed: 8",
+          "normalized": "unnamed_8"
+        },
+        {
+          "original": "Unnamed: 10",
+          "normalized": "unnamed_10"
+        },
+        {
+          "original": "Unnamed: 11",
+          "normalized": "unnamed_11"
+        }
+      ],
+      "numeric_coerced": [],
+      "period_columns": [],
+      "na_replaced": 0,
+      "final_shape": [
+        28,
+        8
+      ],
+      "sheet_name": "Unit economics"
+    },
+    "dataset_id": "test_client_ca:mis__report:unit_economics",
+    "client_id": "test_client_ca",
+    "rows": 28,
+    "columns": [
+      "project_rapid",
+      "unnamed_2",
+      "unnamed_3",
+      "12950_666666666666",
+      "30633_88888888889",
+      "unnamed_8",
+      "unnamed_10",
+      "unnamed_11"
+    ],
+    "dtypes": {
+      "project_rapid": "object",
+      "unnamed_2": "object",
+      "unnamed_3": "object",
+      "12950_666666666666": "object",
+      "30633_88888888889": "object",
+      "unnamed_8": "object",
+      "unnamed_10": "object",
+      "unnamed_11": "object"
+    },
+    "registered_at": "2025-12-18T20:20:31.091725",
+    "parquet_path": "D:\\Projects2.0\\Valuenaire\\Re\\data\\dataframe_cache\\test_client_ca_mis__report_unit_economics.parquet"
+  },
+  "test_client_ca:mis__report:income_statement___ppt": {
+    "preprocessing": {
+      "original_shape": [
+        34,
+        12
+      ],
+      "columns_normalized": [
+        {
+          "original": "Project Rapid",
+          "normalized": "project_rapid"
+        },
+        {
+          "original": "Unnamed: 2",
+          "normalized": "unnamed_2"
+        },
+        {
+          "original": "Unnamed: 3",
+          "normalized": "unnamed_3"
+        },
+        {
+          "original": "Unnamed: 4",
+          "normalized": "unnamed_4"
+        },
+        {
+          "original": "Unnamed: 6",
+          "normalized": "unnamed_6"
+        },
+        {
+          "original": "Unnamed: 7",
+          "normalized": "unnamed_7"
+        },
+        {
+          "original": "Unnamed: 8",
+          "normalized": "unnamed_8"
+        },
+        {
+          "original": "Unnamed: 10",
+          "normalized": "unnamed_10"
+        },
+        {
+          "original": "Unnamed: 11",
+          "normalized": "unnamed_11"
+        }
+      ],
+      "numeric_coerced": [],
+      "period_columns": [],
+      "na_replaced": 0,
+      "final_shape": [
+        32,
+        9
+      ],
+      "sheet_name": "Income statement | PPT"
+    },
+    "dataset_id": "test_client_ca:mis__report:income_statement___ppt",
+    "client_id": "test_client_ca",
+    "rows": 32,
+    "columns": [
+      "project_rapid",
+      "unnamed_2",
+      "unnamed_3",
+      "unnamed_4",
+      "unnamed_6",
+      "unnamed_7",
+      "unnamed_8",
+      "unnamed_10",
+      "unnamed_11"
+    ],
+    "dtypes": {
+      "project_rapid": "object",
+      "unnamed_2": "object",
+      "unnamed_3": "object",
+      "unnamed_4": "object",
+      "unnamed_6": "object",
+      "unnamed_7": "object",
+      "unnamed_8": "object",
+      "unnamed_10": "object",
+      "unnamed_11": "object"
+    },
+    "registered_at": "2025-12-18T20:20:31.658603",
+    "parquet_path": "D:\\Projects2.0\\Valuenaire\\Re\\data\\dataframe_cache\\test_client_ca_mis__report_income_statement___ppt.parquet"
+  },
+  "test_client_ca:mis__report:fy22": {
+    "preprocessing": {
+      "original_shape": [
+        76,
+        20
+      ],
+      "columns_normalized": [
+        {
+          "original": "Unnamed: 0",
+          "normalized": "unnamed_0"
+        },
+        {
+          "original": "Unnamed: 1",
+          "normalized": "unnamed_1"
+        },
+        {
+          "original": "Unnamed: 2",
+          "normalized": "unnamed_2"
+        },
+        {
+          "original": "Unnamed: 3",
+          "normalized": "unnamed_3"
+        },
+        {
+          "original": "Unnamed: 4",
+          "normalized": "unnamed_4"
+        },
+        {
+          "original": "Unnamed: 5",
+          "normalized": "unnamed_5"
+        },
+        {
+          "original": "Unnamed: 6",
+          "normalized": "unnamed_6"
+        },
+        {
+          "original": "Unnamed: 7",
+          "normalized": "unnamed_7"
+        },
+        {
+          "original": "Unnamed: 8",
+          "normalized": "unnamed_8"
+        },
+        {
+          "original": "Unnamed: 9",
+          "normalized": "unnamed_9"
+        },
+        {
+          "original": "Unnamed: 10",
+          "normalized": "unnamed_10"
+        },
+        {
+          "original": "Unnamed: 11",
+          "normalized": "unnamed_11"
+        },
+        {
+          "original": "Unnamed: 12",
+          "normalized": "unnamed_12"
+        },
+        {
+          "original": "Unnamed: 13",
+          "normalized": "unnamed_13"
+        },
+        {
+          "original": "Unnamed: 15",
+          "normalized": "unnamed_15"
+        },
+        {
+          "original": "Unnamed: 16",
+          "normalized": "unnamed_16"
+        },
+        {
+          "original": "Unnamed: 17",
+          "normalized": "unnamed_17"
+        },
+        {
+          "original": "Unnamed: 19",
+          "normalized": "unnamed_19"
+        }
+      ],
+      "numeric_coerced": [
+        "unnamed_17",
+        "unnamed_19"
+      ],
+      "period_columns": [],
+      "na_replaced": 0,
+      "final_shape": [
+        63,
+        18
+      ],
+      "sheet_name": "FY22"
+    },
+    "dataset_id": "test_client_ca:mis__report:fy22",
+    "client_id": "test_client_ca",
+    "rows": 63,
+    "columns": [
+      "unnamed_0",
+      "unnamed_1",
+      "unnamed_2",
+      "unnamed_3",
+      "unnamed_4",
+      "unnamed_5",
+      "unnamed_6",
+      "unnamed_7",
+      "unnamed_8",
+      "unnamed_9",
+      "unnamed_10",
+      "unnamed_11",
+      "unnamed_12",
+      "unnamed_13",
+      "unnamed_15",
+      "unnamed_16",
+      "unnamed_17",
+      "unnamed_19"
+    ],
+    "dtypes": {
+      "unnamed_0": "object",
+      "unnamed_1": "object",
+      "unnamed_2": "object",
+      "unnamed_3": "object",
+      "unnamed_4": "object",
+      "unnamed_5": "object",
+      "unnamed_6": "object",
+      "unnamed_7": "object",
+      "unnamed_8": "object",
+      "unnamed_9": "object",
+      "unnamed_10": "object",
+      "unnamed_11": "object",
+      "unnamed_12": "object",
+      "unnamed_13": "object",
+      "unnamed_15": "object",
+      "unnamed_16": "object",
+      "unnamed_17": "float64",
+      "unnamed_19": "float64"
+    },
+    "registered_at": "2025-12-18T20:20:32.116629",
+    "parquet_path": "D:\\Projects2.0\\Valuenaire\\Re\\data\\dataframe_cache\\test_client_ca_mis__report_fy22.parquet"
+  }
+}

@@ -1,0 +1,59 @@
+# AI-CA Configuration
+# Environment-driven overrides available via AICA_* prefix
+
+app_name: AI-CA
+debug: false
+log_level: INFO
+host: 0.0.0.0
+port: 8000
+
+llm:
+  provider_preference:
+    - groq
+    - google_genai
+    - ollama
+    - openrouter
+    - openai
+    - fallback
+  temperature: 0.1
+  max_retries: 3
+  retry_delay: 1.0
+  provider_cooldown: 60
+  
+  # Ollama settings
+  ollama_enabled: false
+  ollama_model: llama3.2
+  ollama_auto_pull: false
+  
+  # OpenRouter settings
+  openrouter_enabled: false
+  openrouter_model: gpt-4o-mini
+
+vectordb:
+  primary: qdrant
+  qdrant_url: http://localhost:6333
+  qdrant_collection: ai_ca_docs
+  embedding_model: all-MiniLM-L6-v2
+
+cache:
+  redis_enabled: false
+  redis_url: redis://localhost:6379/0
+  ttl_query: 1800
+  ttl_embedding: 86400
+  lru_max_size: 10
+
+storage:
+  max_lru_dataframes: 10
+
+duckdb:
+  memory_limit: 2GB
+  threads: 4
+  enable_progress_bar: false
+
+sandbox:
+  timeout_seconds: 30
+  max_memory_mb: 512
+
+zmq:
+  enabled: false
+  socket_path: ipc:///tmp/ai_ca.sock

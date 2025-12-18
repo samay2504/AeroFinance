@@ -1,0 +1,130 @@
+# AI-CA Prompt Templates
+# Override default prompts from app/core/prompts.py
+# Admin-editable YAML for prompt customization
+
+templates:
+  router: |
+    {guardrails}
+
+    CLIENT CONTEXT:
+    {context}
+
+    USER QUERY: {query}
+
+    CLASSIFY this query into exactly ONE track:
+
+    TRACK_DATA: For trends, growth rates, specific numbers, ledger scrutiny, period comparisons,
+                aggregations, or any question requiring calculation from structured data.
+                Keywords: what was, growth, total, sum, average, compare, variance, percentage.
+
+    TRACK_DOC: For policy definitions, contract clauses, notes to accounts, legal terms,
+               compliance requirements, or textual information lookup.
+               Keywords: what is the clause, policy, definition, terms, agreement.
+
+    TRACK_WEB: For latest tax rates, budget news, external benchmarks, current regulations,
+               or any information requiring real-time/external data.
+               Keywords: current rate, latest, 2024/2025, budget, external, benchmark.
+
+    OUTPUT FORMAT: Return ONLY the track code (TRACK_DATA, TRACK_DOC, or TRACK_WEB) with no explanation.
+
+  data_analyst_sql: |
+    {guardrails}
+
+    DATABASE SCHEMA (DuckDB SQL):
+    {schema}
+
+    {columns_section}
+
+    REQUIREMENTS:
+    1. Use standard SQL syntax compatible with DuckDB.
+    2. Handle NULL values: 'Na/p', 'N/A', '-', '' should be treated as NULL.
+    3. For numeric columns with commas/percentages, values are pre-cleaned.
+    4. Period columns (fy21, 9mfy22, q1fy23) are preserved as-is for grouping.
+    5. Use CAST() for type conversions when needed.
+    6. Aggregate results at highest precision (no rounding unless asked).
+
+    USER QUERY: {query}
+
+    OUTPUT FORMAT:
+    Return ONLY valid JSON with this structure:
+    {{
+        "sql": "SELECT ... FROM data ...",
+        "columns": ["col1", "col2"],
+        "explanation": "Brief explanation of the SQL approach"
+    }}
+
+  data_analyst_python: |
+    {guardrails}
+
+    DATAFRAME SCHEMA:
+    {schema}
+
+    SAMPLE DATA:
+    {sample}
+
+    USER QUERY: {query}
+
+    Generate Python code that:
+    1. Works with a pandas DataFrame named 'df' (already loaded).
+    2. Defines a function 'run(df)' that returns the result.
+    3. Uses only: pandas, numpy, math, decimal (no other imports).
+    4. Returns a JSON-serializable result (dict, list, number, or string).
+    5. Handles missing values gracefully.
+
+    OUTPUT FORMAT:
+    Return ONLY valid JSON:
+    {{
+        "code": "def run(df):\n    # your code here\n    return result",
+        "explanation": "Brief explanation of the approach"
+    }}
+
+  synthesis: |
+    {guardrails}
+
+    RAW RESULTS FROM {method}:
+    {results}
+
+    ORIGINAL QUERY: {query}
+
+    INSTRUCTIONS:
+    1. Summarize findings professionally and concisely.
+    2. If numeric, present with appropriate precision and units.
+    3. If variance/anomaly exists, explain in plain terms.
+    4. Note the data source and calculation method used.
+    5. Add a brief 'Note' if any assumptions were made.
+
+    OUTPUT FORMAT:
+    Provide a clear, professional response suitable for presentation to management.
+    If result is uncertain, add a disclaimer.
+
+  document_rag: |
+    {guardrails}
+
+    DOCUMENT CONTEXT:
+    {context}
+
+    USER QUERY: {query}
+
+    INSTRUCTIONS:
+    1. Answer based ONLY on the provided context.
+    2. Quote relevant sections when appropriate.
+    3. If the answer is not in the context, say "Information not found in available documents".
+    4. For legal/compliance matters, recommend verification with original source.
+
+    OUTPUT: Provide a clear, accurate answer with source references.
+
+  web_search: |
+    {guardrails}
+
+    WEB SEARCH RESULTS:
+    {results}
+
+    USER QUERY: {query}
+
+    INSTRUCTIONS:
+    1. Synthesize information from credible sources.
+    2. Cite sources with URLs.
+    3. Note the date relevance of information.
+    4. For tax rates/regulations, recommend verification with official sources.
+
+    OUTPUT: Provide factual answer with sources. Add date caveat if time-sensitive.
