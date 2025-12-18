@@ -145,7 +145,7 @@ class DataAnalystAgent:
 
         query_lower = query.lower()
         
-        # Keyword mapping to sheet types
+        # Keyword mapping to sheet types - uses semantic matching principles
         keyword_map = {
             "income statement": ["income", "statement", "p_l", "pnl"],
             "balance sheet": ["balance", "sheet", "assets"],
@@ -159,6 +159,10 @@ class DataAnalystAgent:
             "december": ["cashburn", "monthly", "cash_burn"],  # Monthly data
             "revenue": ["income", "revenue", "statement"],
             "collection": ["collection", "prepaid", "recorded", "fy22"],
+            "prepaid": ["fy22", "prepaid", "recorded", "lectures"],  # Maps to fy22 sheet
+            "recorded": ["fy22", "prepaid", "recorded"],  # Maps to fy22 sheet
+            "lectures": ["fy22", "prepaid", "recorded", "lectures"],  # Maps to fy22 sheet
+            "fy22": ["fy22"],  # Direct period match
             "variance": ["variance", "actual", "budget", "forecasting", "comp"],
             "actual": ["comp", "variance", "model"],
             "model": ["comp", "variance", "project"],
@@ -602,24 +606,27 @@ class DataAnalystAgent:
             if self._query_understanding:
                 query_info = self._query_understanding.parse_query(query)
             
-            # Analyze data structure
+            # Analyze data structure using semantic understanding
             period_col_map = {}
             label_col = None
-            label_col_idx = 0
+            structure_label_col = None
             
             if self._structure_detector:
                 label_col_idx = self._structure_detector.detect_label_column(df)
                 header_row = self._structure_detector.detect_header_row(df)
                 period_col_map = self._structure_detector.extract_period_columns(df, header_row)
-                label_col = df.columns[label_col_idx] if label_col_idx < len(df.columns) else None
+                structure_label_col = df.columns[label_col_idx] if label_col_idx < len(df.columns) else None
+                label_col = structure_label_col
             
-            # Fallback to schema analyzer
+            # Add schema analyzer periods (but don't override label col if structure detector found better one)
             schema = None
             if self._schema_analyzer and df_id:
                 schema = self._schema_analyzer.analyze(df, df_id, context=df_id)
                 if schema:
+                    # Merge period columns
                     period_col_map.update(schema.period_columns)
-                    if schema.label_column:
+                    # Only use schema label if structure detector didn't find one
+                    if not structure_label_col and schema.label_column:
                         label_col = schema.label_column
             
             # Last resort: first column
