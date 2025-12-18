@@ -173,7 +173,7 @@
       "unnamed_23": "object",
       "unnamed_24": "object"
     },
-    "registered_at": "2025-12-18T21:47:50.088764",
+    "registered_at": "2025-12-18T21:57:35.998137",
     "parquet_path": "D:\\Projects2.0\\Valuenaire\\Re\\data\\dataframe_cache\\test_client_ca_mis__report_comp.parquet"
   },
   "test_client_ca:mis__report:cashburn_fy21": {
@@ -304,7 +304,7 @@
       "unnamed_16": "object",
       "unnamed_17": "object"
     },
-    "registered_at": "2025-12-18T21:47:50.620523",
+    "registered_at": "2025-12-18T21:57:36.440259",
     "parquet_path": "D:\\Projects2.0\\Valuenaire\\Re\\data\\dataframe_cache\\test_client_ca_mis__report_cashburn_fy21.parquet"
   },
   "test_client_ca:mis__report:unit_economics": {
@@ -379,7 +379,7 @@
       "unnamed_10": "object",
       "unnamed_11": "object"
     },
-    "registered_at": "2025-12-18T21:47:51.056467",
+    "registered_at": "2025-12-18T21:57:36.793041",
     "parquet_path": "D:\\Projects2.0\\Valuenaire\\Re\\data\\dataframe_cache\\test_client_ca_mis__report_unit_economics.parquet"
   },
   "test_client_ca:mis__report:income_statement___ppt": {
@@ -460,7 +460,7 @@
       "unnamed_10": "object",
       "unnamed_11": "object"
     },
-    "registered_at": "2025-12-18T21:47:51.662430",
+    "registered_at": "2025-12-18T21:57:37.308638",
     "parquet_path": "D:\\Projects2.0\\Valuenaire\\Re\\data\\dataframe_cache\\test_client_ca_mis__report_income_statement___ppt.parquet"
   },
   "test_client_ca:mis__report:fy22": {
@@ -598,7 +598,7 @@
       "unnamed_17": "float64",
       "unnamed_19": "float64"
     },
-    "registered_at": "2025-12-18T21:47:52.265120",
+    "registered_at": "2025-12-18T21:57:37.679184",
     "parquet_path": "D:\\Projects2.0\\Valuenaire\\Re\\data\\dataframe_cache\\test_client_ca_mis__report_fy22.parquet"
   }
 }
