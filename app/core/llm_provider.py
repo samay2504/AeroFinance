@@ -107,7 +107,7 @@ class LLMProvider:
         """Setup LLM with fallback chain based on configuration."""
         provider_preference = self.config.get(
             "provider_preference",
-            ["groq", "google_genai", "ollama", "openrouter", "openai", "huggingface", "fallback"]
+            ["google_genai", "groq", "openrouter", "ollama", "openai", "huggingface", "fallback"]
         )
 
         provider_map = {
@@ -197,7 +197,7 @@ class LLMProvider:
         if not api_key:
             raise ValueError("GOOGLE_API_KEY not set")
 
-        model = self.config.get("google_model", "gemini-2.0-flash")
+        model = self.config.get("google_model", "gemini-2.5-flash")
         
         try:
             llm = ChatGoogleGenerativeAI(
