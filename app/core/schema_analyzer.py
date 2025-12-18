@@ -129,25 +129,57 @@ class SchemaAnalyzer:
             schema.label_column = df.columns[0]
             schema.columns[0].semantic_type = "metric_label"
 
-        # Scan first few rows for period patterns
+        # Scan first few rows for period patterns and date strings
         period_patterns = [
             r'^fy\d{2}$',
             r'^\d{1,2}mfy\d{2}$',
             r'^q\d\s*fy\d{2}$',
             r'^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)',
         ]
+        
+        # Date patterns to detect
+        date_pattern = r'^(\d{4})-(\d{2})-(\d{2})'  # YYYY-MM-DD
+        month_names = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec']
 
         for row_idx in range(min(5, len(df))):
             for col_idx, val in enumerate(df.iloc[row_idx]):
                 val_str = str(val).lower().strip()
+                col_name = df.columns[col_idx]
+                
+                # Check period patterns
+                matched = False
                 for pattern in period_patterns:
                     if re.match(pattern, val_str):
-                        col_name = df.columns[col_idx]
                         schema.period_columns[val_str] = col_name
                         if col_idx < len(schema.columns):
                             schema.columns[col_idx].semantic_type = "period"
                             schema.columns[col_idx].period_value = val_str
+                        matched = True
                         break
+                
+                if matched:
+                    continue
+                
+                # Check for date strings (YYYY-MM-DD format)
+                date_match = re.match(date_pattern, val_str)
+                if date_match:
+                    year = date_match.group(1)
+                    month = int(date_match.group(2))
+                    
+                    # Create normalized date key (e.g., "december 2020", "dec_2020")
+                    month_name = month_names[month - 1]
+                    date_key = f"{month_name}_{year}"
+                    full_key = f"{month_name} {year}"
+                    
+                    schema.period_columns[date_key] = col_name
+                    schema.period_columns[full_key] = col_name
+                    # Also store with just month name for flexible matching
+                    schema.date_columns.append(col_name)
+                    
+                    if col_idx < len(schema.columns):
+                        schema.columns[col_idx].semantic_type = "date"
+                        schema.columns[col_idx].period_value = date_key
+                        schema.columns[col_idx].description = f"Date: {year}-{month:02d}"
 
         return schema
 

@@ -217,7 +217,7 @@ class DataAnalystAgent:
         Pipeline:
         1. Try deterministic SQL templates
         2. Try LLM SQL generation
-        3. Fall back to Pandas/Python
+        3. Fall back to LLM SQL/Python
         """
         df = self._get_dataframe(df_id, client_id)
         if df is None:
@@ -239,28 +239,35 @@ class DataAnalystAgent:
         if template_result and template_result.success:
             return template_result
 
-        # Step 2: Try LLM SQL generation
-        if self._llm:
-            llm_result = self._try_llm_sql(query, df, df_id, schema)
-            if llm_result and llm_result.success:
-                return llm_result
-
-        # Step 3: Try LLM Python code generation
-        if self._llm and self._sandbox:
-            python_result = self._try_llm_python(query, df, df_id, schema)
-            if python_result and python_result.success:
-                return python_result
-
-        # Step 4: Semantic Pandas fallback
+        # Step 2: Try semantic Pandas (fast, deterministic, schema-based)
+        # This is more reliable than LLM for structured patterns
         heuristic_result = self._try_heuristic_pandas(query, df, df_id)
         if heuristic_result and heuristic_result.success:
             return heuristic_result
+
+        # Step 3: Try LLM SQL generation
+        if self._llm:
+            llm_result = self._try_llm_sql(query, df, df_id, schema)
+            if llm_result and llm_result.success:
+                # Filter out "Data not found" type results
+                result_str = str(llm_result.result).lower()
+                if "not found" not in result_str and "no data" not in result_str:
+                    return llm_result
+
+        # Step 4: Try LLM Python code generation
+        if self._llm and self._sandbox:
+            python_result = self._try_llm_python(query, df, df_id, schema)
+            if python_result and python_result.success:
+                # Filter out "Data not found" type results
+                result_str = str(python_result.result).lower()
+                if "not found" not in result_str and "no data" not in result_str:
+                    return python_result
 
         return AnalysisResult(
             success=False,
             error="Could not process query with any available method",
             method="exhausted",
-            explanation="Tried: template SQL, LLM SQL, LLM Python, heuristic Pandas"
+            explanation="Tried: template SQL, semantic Pandas, LLM SQL, LLM Python"
         )
 
     def _handle_metadata_query(
@@ -650,25 +657,44 @@ class DataAnalystAgent:
                 year = month_match.group(2) or ""
                 month_abbr = month_name[:3]
                 
-                # Find column with this month
+                # Try to find column from schema period_columns first
+                # (schema now includes date columns with normalized keys like "dec_2020")
                 target_col = None
-                for row_idx in range(min(5, len(df))):
-                    for col_idx, val in enumerate(df.iloc[row_idx]):
-                        val_str = str(val).lower()
-                        # Check for datetime
-                        if hasattr(val, 'month'):
-                            month_num = {'january': 1, 'february': 2, 'march': 3, 'april': 4,
-                                        'may': 5, 'june': 6, 'july': 7, 'august': 8,
-                                        'september': 9, 'october': 10, 'november': 11, 'december': 12}
-                            if val.month == month_num.get(month_name, 0):
-                                if not year or str(val.year) == year:
+                
+                # Try various key formats that might be in period_col_map
+                possible_keys = [
+                    f"{month_abbr}_{year}",        # dec_2020
+                    f"{month_abbr} {year}",        # dec 2020
+                    f"{month_name}_{year}",        # december_2020
+                    f"{month_name} {year}",        # december 2020
+                ]
+                
+                for key in possible_keys:
+                    if key in period_col_map:
+                        target_col = period_col_map[key]
+                        break
+                
+                # Fallback: scan rows for date patterns
+                if not target_col:
+                    for row_idx in range(min(5, len(df))):
+                        for col_idx, val in enumerate(df.iloc[row_idx]):
+                            val_str = str(val).lower()
+                            # Check for YYYY-MM-DD format with matching month
+                            date_match = re.match(r'^(\d{4})-(\d{2})-', val_str)
+                            if date_match:
+                                if year and date_match.group(1) == year:
+                                    month_num = int(date_match.group(2))
+                                    expected_month = {'january': 1, 'february': 2, 'march': 3, 'april': 4,
+                                                     'may': 5, 'june': 6, 'july': 7, 'august': 8,
+                                                     'september': 9, 'october': 10, 'november': 11, 'december': 12}
+                                    if month_num == expected_month.get(month_name, 0):
+                                        target_col = df.columns[col_idx]
+                                        break
+                            # Check for text match
+                            if month_abbr in val_str:
+                                if not year or year in val_str:
                                     target_col = df.columns[col_idx]
                                     break
-                        # Check for text match
-                        if month_abbr in val_str:
-                            if not year or year in val_str:
-                                target_col = df.columns[col_idx]
-                                break
                 
                 if target_col and label_col:
                     # Find the metric row
