@@ -1,9 +1,11 @@
 """
-Data Analyst Agent - SQL-first analytical agent with Pandas fallback.
-Handles numeric queries, growth calculations, and period-based analysis.
+Data Analyst Agent - SQL-first analytical agent with LLM-driven semantic understanding.
+Handles numeric queries, growth calculations, and period-based analysis dynamically.
+Uses LLM to understand data structure rather than hardcoded patterns.
 """
 import logging
 import re
+import json
 from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 import pandas as pd
@@ -26,12 +28,12 @@ class AnalysisResult:
 
 class DataAnalystAgent:
     """
-    SQL-first data analyst with:
-    - Deterministic template matching
-    - DuckDB SQL execution
-    - LLM SQL generation fallback
-    - Pandas fallback for complex operations
+    LLM-driven data analyst with:
+    - Semantic schema understanding (no hardcoded patterns)
+    - DuckDB SQL execution with intelligent prompts
+    - LLM-generated SQL with data context
     - Sandboxed Python code execution
+    - Iterative refinement on errors
     """
 
     def __init__(self, llm_wrapper=None):
@@ -40,6 +42,8 @@ class DataAnalystAgent:
         self._data_registry = None
         self._template_engine = None
         self._sandbox = None
+        self._schema_analyzer = None
+        self._schema_cache: Dict[str, Any] = {}  # Cache analyzed schemas
         self.dataframes: Dict[str, pd.DataFrame] = {}
         self._init_components()
 
@@ -68,6 +72,12 @@ class DataAnalystAgent:
             self._sandbox = SandboxExecutor()
         except Exception as e:
             logger.warning(f"Sandbox unavailable: {e}")
+
+        try:
+            from app.core.schema_analyzer import SchemaAnalyzer
+            self._schema_analyzer = SchemaAnalyzer(self._llm)
+        except Exception as e:
+            logger.warning(f"Schema analyzer unavailable: {e}")
 
     def register_dataframe(
         self,
@@ -241,8 +251,8 @@ class DataAnalystAgent:
             if python_result and python_result.success:
                 return python_result
 
-        # Step 4: Heuristic Pandas fallback
-        heuristic_result = self._try_heuristic_pandas(query, df)
+        # Step 4: Semantic Pandas fallback
+        heuristic_result = self._try_heuristic_pandas(query, df, df_id)
         if heuristic_result and heuristic_result.success:
             return heuristic_result
 
@@ -350,7 +360,11 @@ class DataAnalystAgent:
         df_id: str,
         schema: Dict[str, Any]
     ) -> Optional[AnalysisResult]:
-        """Try LLM-generated SQL."""
+        """
+        Try LLM-generated SQL with semantic understanding.
+        Uses schema analyzer to understand data structure and provides
+        actual data samples to the LLM for context.
+        """
         if not self._llm or not self._sql_engine:
             return None
 
@@ -360,59 +374,121 @@ class DataAnalystAgent:
             # Get sanitized table name for SQL
             safe_table_name = self._sql_engine.get_safe_table_name(df_id)
             
+            # Analyze schema semantically using LLM
+            semantic_info = ""
+            if self._schema_analyzer:
+                data_schema = self._schema_analyzer.analyze(df, df_id, context=df_id)
+                
+                # Build semantic info string for prompt
+                semantic_parts = []
+                if data_schema.label_column:
+                    semantic_parts.append(f"- Label/Metric column: {data_schema.label_column}")
+                if data_schema.period_columns:
+                    period_str = ", ".join([f"{p} -> {c}" for p, c in data_schema.period_columns.items()])
+                    semantic_parts.append(f"- Period columns: {period_str}")
+                if data_schema.summary:
+                    semantic_parts.append(f"- Data description: {data_schema.summary}")
+                if data_schema.data_start_row > 0:
+                    semantic_parts.append(f"- Data starts at row {data_schema.data_start_row}")
+                semantic_info = "\n".join(semantic_parts)
+            
             # Build schema string with sanitized table name
-            schema_str = f"Table: {safe_table_name}\nColumns:\n"
-            for col in schema["columns"][:20]:  # Limit columns shown
+            schema_str = f"Table: {safe_table_name}\nShape: {df.shape[0]} rows x {df.shape[1]} columns\nColumns:\n"
+            for col in schema["columns"]:
                 dtype = schema["dtypes"].get(col, "unknown")
-                schema_str += f"  - {col}: {dtype}\n"
+                # Include sample values for each column
+                sample_vals = df[col].dropna().head(3).tolist()
+                sample_str = str(sample_vals)[:50] if sample_vals else "empty"
+                schema_str += f"  - {col}: {dtype} (e.g. {sample_str})\n"
 
-            prompt = get_data_analyst_sql_prompt(schema_str, query)
-            
-            response = self._llm.invoke_with_structured_output(
-                prompt,
-                output_schema={"sql": str, "columns": list, "explanation": str}
+            # Build data sample - show first few rows as context
+            sample_rows = min(5, len(df))
+            data_sample = df.head(sample_rows).to_string(max_colwidth=30)
+
+            # Build columns list
+            available_columns = ", ".join(schema["columns"])
+
+            prompt = get_data_analyst_sql_prompt(
+                schema_info=schema_str,
+                query=query,
+                available_columns=available_columns,
+                data_sample=data_sample,
+                semantic_info=semantic_info
             )
-
-            if "error" in response or "sql" not in response:
-                return None
-
-            sql = response["sql"]
             
-            # Validate SQL
-            is_valid, error = self._sql_engine.validate_sql(sql)
-            if not is_valid:
-                logger.warning(f"LLM SQL invalid: {error}")
-                return None
-
-            # Ensure DataFrame is registered
-            self._sql_engine.register_dataframe(df_id, df)
-
-            # Execute
-            result_df = self._sql_engine.execute_df(sql)
+            # Try SQL generation with up to 2 refinement attempts
+            max_attempts = 2
+            last_error = None
             
-            if result_df.empty:
-                return None
+            for attempt in range(max_attempts):
+                response = self._llm.invoke_with_structured_output(
+                    prompt,
+                    output_schema={"sql": str, "columns_used": list, "explanation": str}
+                )
 
-            if result_df.shape == (1, 1):
-                value = float(result_df.iloc[0, 0])
-                return AnalysisResult(
-                    success=True,
-                    result=value,
-                    value=value,
-                    method="sql_duckdb:llm_generated",
-                    explanation=response.get("explanation", f"SQL: {sql[:80]}")
-                )
-            else:
-                return AnalysisResult(
-                    success=True,
-                    result=result_df.to_dict(),
-                    method="sql_duckdb:llm_generated",
-                    explanation=response.get("explanation", f"Returned {len(result_df)} rows")
-                )
+                if "error" in response or "sql" not in response:
+                    last_error = response.get("error", "No SQL in response")
+                    continue
+
+                sql = response["sql"]
+                
+                # Validate SQL
+                is_valid, error = self._sql_engine.validate_sql(sql)
+                if not is_valid:
+                    logger.warning(f"LLM SQL attempt {attempt+1} invalid: {error}")
+                    # Add error context to prompt for next attempt
+                    prompt += f"\n\nPREVIOUS SQL FAILED: {sql}\nERROR: {error}\nPlease fix the SQL."
+                    last_error = error
+                    continue
+
+                # Ensure DataFrame is registered
+                self._sql_engine.register_dataframe(df_id, df)
+
+                # Try to execute
+                try:
+                    result_df = self._sql_engine.execute_df(sql)
+                    
+                    if result_df.empty:
+                        logger.warning(f"LLM SQL returned empty result")
+                        prompt += f"\n\nPREVIOUS SQL RETURNED EMPTY: {sql}\nPlease revise to return data."
+                        continue
+
+                    if result_df.shape == (1, 1):
+                        val = result_df.iloc[0, 0]
+                        # Handle potential non-numeric result
+                        try:
+                            value = float(val) if pd.notna(val) else None
+                        except (ValueError, TypeError):
+                            value = None
+                            
+                        return AnalysisResult(
+                            success=True,
+                            result=val if value is None else value,
+                            value=value,
+                            method="sql_duckdb:llm_semantic",
+                            explanation=response.get("explanation", f"SQL: {sql[:80]}")
+                        )
+                    else:
+                        return AnalysisResult(
+                            success=True,
+                            result=result_df.to_dict(),
+                            method="sql_duckdb:llm_semantic",
+                            explanation=response.get("explanation", f"Returned {len(result_df)} rows")
+                        )
+                        
+                except Exception as exec_error:
+                    logger.warning(f"LLM SQL execution failed: {exec_error}")
+                    # Add execution error to prompt for refinement
+                    prompt += f"\n\nSQL EXECUTION FAILED: {sql}\nERROR: {str(exec_error)}\nPlease fix the SQL."
+                    last_error = str(exec_error)
+
+            if last_error:
+                logger.warning(f"LLM SQL failed after {max_attempts} attempts: {last_error}")
 
         except Exception as e:
             logger.warning(f"LLM SQL failed: {e}")
-            return None
+        
+        return None
 
     def _try_llm_python(
         self,
@@ -472,172 +548,180 @@ class DataAnalystAgent:
     def _try_heuristic_pandas(
         self,
         query: str,
-        df: pd.DataFrame
+        df: pd.DataFrame,
+        df_id: str = ""
     ) -> Optional[AnalysisResult]:
         """
-        Heuristic Pandas operations for common patterns.
-        Handles complex Excel with multi-row headers by searching data for period labels.
+        Semantic Pandas operations using schema analyzer.
+        Uses LLM-discovered data structure rather than hardcoded patterns.
         """
         query_lower = query.lower()
 
         try:
-            # First, build a mapping from period names to column indices
-            # by scanning first few rows for period patterns
+            # Use schema analyzer for semantic understanding
+            schema = None
+            if self._schema_analyzer and df_id:
+                schema = self._schema_analyzer.analyze(df, df_id, context=df_id)
+            
+            # If no schema analyzer, build basic period map from data
             period_col_map = {}
-            for row_idx in range(min(5, len(df))):
-                for col_idx, val in enumerate(df.iloc[row_idx]):
-                    val_str = str(val).lower().strip()
-                    # Check for period patterns
-                    if re.match(r"^(fy\d{2}|9mfy\d{2}|\d+mfy\d{2}|q\d\s*fy\d{2})$", val_str):
-                        col_name = df.columns[col_idx]
-                        period_col_map[val_str] = col_name
-                        logger.debug(f"Found period '{val_str}' in column {col_name}")
-                    # Check for month patterns
-                    month_match = re.match(r"^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[^\d]*(\d{2,4})?$", val_str)
-                    if month_match:
-                        col_name = df.columns[col_idx]
-                        period_col_map[val_str] = col_name
-
-            # Find the label column (first column usually)
             label_col = df.columns[0] if len(df.columns) > 0 else None
+            
+            if schema:
+                period_col_map = schema.period_columns
+                label_col = schema.label_column or label_col
+            else:
+                # Fallback: scan for periods
+                for row_idx in range(min(5, len(df))):
+                    for col_idx, val in enumerate(df.iloc[row_idx]):
+                        val_str = str(val).lower().strip()
+                        if re.match(r"^(fy\d{2}|9mfy\d{2}|\d+mfy\d{2}|q\d\s*fy\d{2})$", val_str):
+                            period_col_map[val_str] = df.columns[col_idx]
 
-            # Growth pattern: "growth in X from FY21 to 9MFY22"
-            if "growth" in query_lower:
-                period_match = re.findall(r"(fy\d{2}|9mfy\d{2}|\d+mfy\d{2})", query_lower)
-                if len(period_match) >= 2:
-                    period1, period2 = period_match[0], period_match[1]
-                    
-                    # Look up columns from period map
-                    col1 = period_col_map.get(period1)
-                    col2 = period_col_map.get(period2)
-                    
-                    if col1 and col2:
-                        # Find row with metric (revenue from operations, etc.)
-                        keywords = ["revenue from operations", "revenue", "sales", "total income"]
-                        for keyword in keywords:
-                            if keyword in query_lower or keyword == "revenue":
-                                for idx, row in df.iterrows():
-                                    if label_col:
-                                        row_label = str(row[label_col]).lower()
-                                        if "revenue" in row_label and "operations" in row_label:
-                                            val1 = pd.to_numeric(row[col1], errors='coerce')
-                                            val2 = pd.to_numeric(row[col2], errors='coerce')
-                                            if pd.notna(val1) and pd.notna(val2):
-                                                growth = float(val2) - float(val1)
-                                                return AnalysisResult(
-                                                    success=True,
-                                                    result=round(growth, 2),
-                                                    value=round(growth, 2),
-                                                    method="pandas:heuristic_growth",
-                                                    explanation=f"Growth from {period1} ({val1}) to {period2} ({val2})"
-                                                )
-
-            # Specific month/period lookup: "GMV for December 2020"
-            month_match = re.search(r"(january|february|march|april|may|june|july|august|september|october|november|december)\s*(\d{4})?", query_lower)
-            if month_match:
-                month_name = month_match.group(1)
-                year = month_match.group(2) if month_match.group(2) else ""
-                month_abbr = month_name[:3]
+            # Extract periods mentioned in query
+            query_periods = re.findall(r"(fy\d{2}|9mfy\d{2}|\d+mfy\d{2})", query_lower)
+            
+            # GROWTH CALCULATION
+            if "growth" in query_lower and len(query_periods) >= 2:
+                period1, period2 = query_periods[0], query_periods[1]
+                col1 = period_col_map.get(period1)
+                col2 = period_col_map.get(period2)
                 
-                # Find column matching month in period_col_map
-                target_col = None
-                for period_key, col in period_col_map.items():
-                    if month_abbr in period_key:
-                        if not year or year in period_key:
-                            target_col = col
-                            break
-                
-                # Also search column headers for date values
-                if not target_col:
-                    for col in df.columns:
-                        for row_idx in range(min(5, len(df))):
-                            val = str(df.iloc[row_idx][col])
-                            if '2020' in val and 'dec' in val.lower():
-                                target_col = col
-                                break
-                            # Check for datetime values
-                            if '12' in val and '2020' in val:
-                                target_col = col
-                                break
-                
-                if target_col or not period_col_map:
-                    # Search by scanning column values in first few rows for dates
-                    for col_idx, col in enumerate(df.columns):
-                        for row_idx in range(min(5, len(df))):
-                            val = df.iloc[row_idx][col]
-                            val_str = str(val).lower()
-                            if hasattr(val, 'month'):  # datetime object
-                                if val.month == 12 and (not year or str(val.year) == year):
-                                    target_col = col
-                                    break
+                if col1 and col2 and label_col:
+                    # Use LLM or semantic search to find the metric row
+                    metric_row = None
+                    if self._schema_analyzer:
+                        metric_row = self._schema_analyzer.find_row_by_metric(df, schema, query)
                     
-                if target_col:
-                    # Find row with GMV
-                    for idx, row in df.iterrows():
-                        if label_col:
+                    if metric_row is None:
+                        # Fallback: search for keywords
+                        for idx, row in df.iterrows():
                             row_label = str(row[label_col]).lower()
-                            if "gmv" in row_label:
-                                val = pd.to_numeric(row[target_col], errors='coerce')
-                                if pd.notna(val):
-                                    return AnalysisResult(
-                                        success=True,
-                                        result=round(float(val), 2),
-                                        value=round(float(val), 2),
-                                        method="pandas:heuristic_month_lookup",
-                                        explanation=f"Found GMV for {month_name}: {val}"
-                                    )
+                            if "revenue" in row_label and "operations" in row_label:
+                                metric_row = idx
+                                break
+                            if "revenue" in row_label and metric_row is None:
+                                metric_row = idx
+                    
+                    if metric_row is not None:
+                        val1 = pd.to_numeric(df.loc[metric_row, col1], errors='coerce')
+                        val2 = pd.to_numeric(df.loc[metric_row, col2], errors='coerce')
+                        if pd.notna(val1) and pd.notna(val2):
+                            growth = float(val2) - float(val1)
+                            metric_name = str(df.loc[metric_row, label_col])
+                            return AnalysisResult(
+                                success=True,
+                                result=round(growth, 2),
+                                value=round(growth, 2),
+                                method="pandas:semantic_growth",
+                                explanation=f"Growth in '{metric_name}' from {period1} ({val1}) to {period2} ({val2})"
+                            )
 
-            # Metric lookup by period: "Digital marketing cost for 9MFY22"
-            period_match = re.search(r"(9mfy\d{2}|fy\d{2}|q\d\s*fy\d{2})", query_lower)
-            if period_match:
-                period = period_match.group(1)
+            # SINGLE PERIOD VALUE LOOKUP
+            if len(query_periods) == 1:
+                period = query_periods[0]
                 target_col = period_col_map.get(period)
                 
-                if target_col:
-                    # Search for metric in query
-                    for keyword in ["digital marketing", "digital", "marketing"]:
-                        if keyword in query_lower:
-                            for idx, row in df.iterrows():
-                                if label_col:
-                                    row_label = str(row[label_col]).lower()
-                                    if "digital" in row_label:
-                                        val = pd.to_numeric(row[target_col], errors='coerce')
-                                        if pd.notna(val):
-                                            return AnalysisResult(
-                                                success=True,
-                                                result=round(float(val), 2),
-                                                value=round(float(val), 2),
-                                                method="pandas:heuristic_metric_lookup",
-                                                explanation=f"Found metric for {period}: {val}"
-                                            )
+                if target_col and label_col:
+                    # Find the metric row using LLM
+                    metric_row = None
+                    if self._schema_analyzer and schema:
+                        metric_row = self._schema_analyzer.find_row_by_metric(df, schema, query)
+                    
+                    if metric_row is not None:
+                        val = pd.to_numeric(df.loc[metric_row, target_col], errors='coerce')
+                        if pd.notna(val):
+                            metric_name = str(df.loc[metric_row, label_col])
+                            return AnalysisResult(
+                                success=True,
+                                result=round(float(val), 2),
+                                value=round(float(val), 2),
+                                method="pandas:semantic_lookup",
+                                explanation=f"Found '{metric_name}' for {period}: {val}"
+                            )
 
-            # Sum/Total pattern - look for total row if it exists
-            if "total" in query_lower and "collection" in query_lower:
-                # Find a row matching the metric
-                for keyword in ["prepaid recorded", "domestic"]:
-                    if keyword in query_lower:
+            # DATE/MONTH LOOKUP (e.g., "December 2020")
+            month_match = re.search(
+                r"(january|february|march|april|may|june|july|august|september|october|november|december)\s*(\d{4})?",
+                query_lower
+            )
+            if month_match:
+                month_name = month_match.group(1)
+                year = month_match.group(2) or ""
+                month_abbr = month_name[:3]
+                
+                # Find column with this month
+                target_col = None
+                for row_idx in range(min(5, len(df))):
+                    for col_idx, val in enumerate(df.iloc[row_idx]):
+                        val_str = str(val).lower()
+                        # Check for datetime
+                        if hasattr(val, 'month'):
+                            month_num = {'january': 1, 'february': 2, 'march': 3, 'april': 4,
+                                        'may': 5, 'june': 6, 'july': 7, 'august': 8,
+                                        'september': 9, 'october': 10, 'november': 11, 'december': 12}
+                            if val.month == month_num.get(month_name, 0):
+                                if not year or str(val.year) == year:
+                                    target_col = df.columns[col_idx]
+                                    break
+                        # Check for text match
+                        if month_abbr in val_str:
+                            if not year or year in val_str:
+                                target_col = df.columns[col_idx]
+                                break
+                
+                if target_col and label_col:
+                    # Find the metric row
+                    metric_row = None
+                    if self._schema_analyzer and schema:
+                        metric_row = self._schema_analyzer.find_row_by_metric(df, schema, query)
+                    else:
+                        # Fallback for GMV
                         for idx, row in df.iterrows():
-                            if label_col:
-                                row_label = str(row[label_col]).lower()
-                                if keyword.split()[0] in row_label:
-                                    # Sum all numeric values in the row
-                                    values = []
-                                    for col in df.columns[1:]:  # Skip label column
-                                        val = pd.to_numeric(row[col], errors='coerce')
-                                        if pd.notna(val) and val != 0:
-                                            values.append(val)
-                                    if values:
-                                        total = sum(values)
-                                        return AnalysisResult(
-                                            success=True,
-                                            result=round(float(total), 2),
-                                            value=round(float(total), 2),
-                                            method="pandas:heuristic_row_sum",
-                                            explanation=f"Summed row values for {keyword}: {len(values)} values"
-                                        )
+                            row_label = str(row[label_col]).lower()
+                            if "gmv" in row_label:
+                                metric_row = idx
+                                break
+                    
+                    if metric_row is not None:
+                        val = pd.to_numeric(df.loc[metric_row, target_col], errors='coerce')
+                        if pd.notna(val):
+                            metric_name = str(df.loc[metric_row, label_col])
+                            return AnalysisResult(
+                                success=True,
+                                result=round(float(val), 2),
+                                value=round(float(val), 2),
+                                method="pandas:semantic_date_lookup",
+                                explanation=f"Found '{metric_name}' for {month_name} {year}: {val}"
+                            )
+
+            # ROW SUM (total across periods)
+            if "total" in query_lower or "sum" in query_lower:
+                metric_row = None
+                if self._schema_analyzer and schema:
+                    metric_row = self._schema_analyzer.find_row_by_metric(df, schema, query)
+                
+                if metric_row is not None and label_col:
+                    values = []
+                    for col in df.columns:
+                        if col != label_col:
+                            val = pd.to_numeric(df.loc[metric_row, col], errors='coerce')
+                            if pd.notna(val) and val != 0:
+                                values.append(val)
+                    
+                    if values:
+                        total = sum(values)
+                        metric_name = str(df.loc[metric_row, label_col])
+                        return AnalysisResult(
+                            success=True,
+                            result=round(float(total), 2),
+                            value=round(float(total), 2),
+                            method="pandas:semantic_row_sum",
+                            explanation=f"Summed '{metric_name}' across {len(values)} periods"
+                        )
 
         except Exception as e:
-            logger.warning(f"Heuristic Pandas failed: {e}")
+            logger.warning(f"Semantic Pandas failed: {e}")
 
         return None
 

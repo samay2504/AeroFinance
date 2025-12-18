@@ -96,14 +96,16 @@ OUTPUT FORMAT: Return ONLY the track code (TRACK_DATA, TRACK_DOC, or TRACK_WEB) 
     return template.format(guardrails=CA_SYSTEM_GUARDRAILS, query=query, context=client_context)
 
 
-def get_data_analyst_sql_prompt(schema_info: str, query: str, available_columns: str = "") -> str:
+def get_data_analyst_sql_prompt(schema_info: str, query: str, available_columns: str = "", data_sample: str = "", semantic_info: str = "") -> str:
     """
-    Generates DuckDB SQL for data analysis queries.
+    Generates DuckDB SQL for data analysis queries using semantic data understanding.
     
     Args:
         schema_info: Database schema information
         query: User's analytical question
         available_columns: Optional list of available columns
+        data_sample: Sample rows from the actual data
+        semantic_info: Semantic understanding of the data (period columns, label column, etc.)
         
     Returns:
         Formatted prompt for SQL generation
@@ -116,36 +118,50 @@ DATABASE SCHEMA (DuckDB SQL):
 
 {columns_section}
 
-REQUIREMENTS:
-1. Use standard SQL syntax compatible with DuckDB.
-2. Handle NULL values: 'Na/p', 'N/A', '-', '' should be treated as NULL.
-3. For numeric columns with commas/percentages, values are pre-cleaned.
-4. Period columns (fy21, 9mfy22, q1fy23) are preserved as-is for grouping.
-5. Use CAST() for type conversions when needed.
-6. Aggregate results at highest precision (no rounding unless asked).
+{data_sample_section}
+
+{semantic_section}
+
+CRITICAL DuckDB SQL RULES:
+1. Use ONLY the exact column names shown above - they are lowercase with underscores.
+2. ALL numeric operations MUST use explicit CAST: CAST(column AS DOUBLE) for calculations.
+3. Handle mixed types: Use TRY_CAST(column AS DOUBLE) for columns that might have non-numeric values.
+4. String comparisons are case-sensitive - use LOWER() for matching text.
+5. For NULL-like values, the data is pre-cleaned but use COALESCE(col, 0) for safety.
+6. The table name is the sanitized version shown in schema - use EXACTLY that name.
+
+QUERY PATTERNS:
+- For "growth from X to Y": Calculate (Y_value - X_value) using the appropriate columns
+- For "value in period Z": Select the value from column matching period Z
+- For aggregations: Use SUM(), AVG(), COUNT() with explicit CAST to DOUBLE
+- For row filtering: Use WHERE with the label column to find specific metrics
 
 USER QUERY: {query}
 
 OUTPUT FORMAT:
 Return ONLY valid JSON with this structure:
 {{
-    "sql": "SELECT ... FROM data ...",
-    "columns": ["col1", "col2"],
-    "explanation": "Brief explanation of the SQL approach"
+    "sql": "SELECT CAST(... AS DOUBLE) FROM table_name WHERE ...",
+    "columns_used": ["col1", "col2"],
+    "explanation": "What this query does and how it answers the question"
 }}
 """)
     
     columns_section = f"AVAILABLE COLUMNS:\n{available_columns}" if available_columns else ""
+    data_sample_section = f"DATA SAMPLE (first few rows for context):\n{data_sample}" if data_sample else ""
+    semantic_section = f"DATA STRUCTURE UNDERSTANDING:\n{semantic_info}" if semantic_info else ""
     
     template = PromptTemplate(
-        input_variables=["guardrails", "schema", "query", "columns_section"],
+        input_variables=["guardrails", "schema", "query", "columns_section", "data_sample_section", "semantic_section"],
         template=template_str
     )
     return template.format(
         guardrails=CA_SYSTEM_GUARDRAILS,
         schema=schema_info,
         query=query,
-        columns_section=columns_section
+        columns_section=columns_section,
+        data_sample_section=data_sample_section,
+        semantic_section=semantic_section
     )
 
 
