@@ -445,6 +445,16 @@ class DataAnalystAgent:
 
                 sql = response["sql"]
                 
+                # Fix common LLM errors: wrong table name (missing double underscore)
+                # Replace single underscore variants with the correct sanitized name
+                if safe_table_name not in sql:
+                    # Try to find and fix table name variations
+                    wrong_name = safe_table_name.replace("__", "_")
+                    if wrong_name in sql:
+                        sql = sql.replace(wrong_name, safe_table_name)
+                    # Remove backticks which DuckDB doesn't use
+                    sql = sql.replace("`", "")
+                
                 # Validate SQL
                 is_valid, error = self._sql_engine.validate_sql(sql)
                 if not is_valid:
