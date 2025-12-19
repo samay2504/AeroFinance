@@ -105,6 +105,15 @@ class DataAnalystAgent:
             logger.warning(f"Tool orchestrator unavailable: {e}")
             self._tool_orchestrator = None
 
+        # Initialize prompt compressor for token-efficient LLM queries
+        self._prompt_compressor = None
+        try:
+            from app.core.prompt_compression import get_prompt_compressor
+            self._prompt_compressor = get_prompt_compressor(max_tokens=3000)
+            logger.debug("Prompt compressor initialized")
+        except Exception as e:
+            logger.debug(f"Prompt compressor unavailable: {e}")
+
     def register_dataframe(
         self,
         dataset_id: str,

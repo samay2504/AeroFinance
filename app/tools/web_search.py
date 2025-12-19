@@ -37,21 +37,113 @@ except ImportError:
 # HELPER FUNCTIONS
 # ============================================================================
 
-def _contains_cjk(text: str) -> bool:
-    """Check if text contains CJK (Chinese/Japanese/Korean) characters."""
+def _contains_non_english(text: str) -> bool:
+    """
+    Check if text contains significant non-English characters.
+    Uses Unicode range detection for: CJK, Arabic, Cyrillic, Thai, Hebrew, etc.
+    """
+    non_english_count = 0
+    total_alpha = 0
+    
     for char in text:
         code = ord(char)
-        # CJK Unified Ideographs and extensions
-        if (0x4E00 <= code <= 0x9FFF or  # CJK Unified
-            0x3400 <= code <= 0x4DBF or  # CJK Extension A
-            0x20000 <= code <= 0x2A6DF or  # CJK Extension B
-            0x2A700 <= code <= 0x2B73F or  # CJK Extension C
-            0x2B740 <= code <= 0x2B81F or  # CJK Extension D
-            0x3040 <= code <= 0x309F or  # Hiragana
-            0x30A0 <= code <= 0x30FF or  # Katakana
-            0xAC00 <= code <= 0xD7AF):  # Hangul
-            return True
+        if char.isalpha():
+            total_alpha += 1
+            # CJK Unified Ideographs
+            if 0x4E00 <= code <= 0x9FFF:
+                non_english_count += 1
+            # CJK Extensions
+            elif 0x3400 <= code <= 0x4DBF or 0x20000 <= code <= 0x2B81F:
+                non_english_count += 1
+            # Japanese Hiragana/Katakana
+            elif 0x3040 <= code <= 0x30FF:
+                non_english_count += 1
+            # Korean Hangul
+            elif 0xAC00 <= code <= 0xD7AF:
+                non_english_count += 1
+            # Arabic
+            elif 0x0600 <= code <= 0x06FF or 0x0750 <= code <= 0x077F:
+                non_english_count += 1
+            # Cyrillic
+            elif 0x0400 <= code <= 0x04FF or 0x0500 <= code <= 0x052F:
+                non_english_count += 1
+            # Thai
+            elif 0x0E00 <= code <= 0x0E7F:
+                non_english_count += 1
+            # Hebrew
+            elif 0x0590 <= code <= 0x05FF:
+                non_english_count += 1
+            # Devanagari (Hindi)
+            elif 0x0900 <= code <= 0x097F:
+                non_english_count += 1
+    
+    # If more than 10% of alphabetic chars are non-English, filter it
+    if total_alpha > 0 and (non_english_count / total_alpha) > 0.10:
+        return True
     return False
+
+
+def _calculate_relevancy_score(text: str, query: str) -> float:
+    """
+    Calculate relevancy score between search result and query.
+    Uses keyword overlap with IDF-like weighting.
+    Returns 0.0-1.0 score.
+    """
+    # Normalize
+    text_lower = text.lower()
+    query_lower = query.lower()
+    
+    # Extract query keywords (remove stopwords)
+    stopwords = {'what', 'is', 'the', 'for', 'in', 'a', 'an', 'and', 'or', 'of', 'to', 'with', 'how', 'why'}
+    query_words = set(query_lower.split()) - stopwords
+    
+    if not query_words:
+        return 0.5  # Neutral score if no keywords
+    
+    # Count keyword matches
+    matches = 0
+    for word in query_words:
+        if len(word) >= 3 and word in text_lower:  # Only count words 3+ chars
+            matches += 1
+    
+    return matches / len(query_words) if query_words else 0.0
+
+
+def _filter_relevant_results(
+    results: List[Dict[str, str]], 
+    query: str, 
+    min_score: float = 0.2,
+    max_results: int = 3
+) -> List[Dict[str, str]]:
+    """
+    Filter and rank results by relevancy.
+    Removes non-English and low-relevancy results.
+    """
+    scored_results = []
+    
+    for result in results:
+        combined_text = f"{result.get('title', '')} {result.get('snippet', '')}"
+        
+        # Skip non-English
+        if _contains_non_english(combined_text):
+            continue
+        
+        # Calculate relevancy
+        score = _calculate_relevancy_score(combined_text, query)
+        
+        # Only include if meets threshold
+        if score >= min_score:
+            result['_relevancy_score'] = score
+            scored_results.append(result)
+    
+    # Sort by relevancy and limit
+    scored_results.sort(key=lambda x: x.get('_relevancy_score', 0), reverse=True)
+    
+    # Remove internal score before returning
+    for r in scored_results:
+        r.pop('_relevancy_score', None)
+    
+    return scored_results[:max_results]
 
 
 # ============================================================================
@@ -80,8 +172,8 @@ def _search_duckduckgo(query: str, num_results: int = 3) -> List[Dict[str, str]]
             soup = BeautifulSoup(response.text, "lxml")
             results = []
             
-            # Get more results to filter out non-English
-            for div in soup.find_all("div", class_="result")[:num_results * 2]:
+            # Collect all results - filtering happens centrally in _web_search_impl
+            for div in soup.find_all("div", class_="result")[:num_results]:
                 try:
                     title_elem = div.find("a", class_="result__a")
                     if not title_elem:
@@ -101,11 +193,6 @@ def _search_duckduckgo(query: str, num_results: int = 3) -> List[Dict[str, str]]
                     snippet_elem = div.find("a", class_="result__snippet")
                     snippet = snippet_elem.get_text(strip=True) if snippet_elem else ""
                     
-                    # Skip non-English results (CJK characters)
-                    combined_text = title + snippet
-                    if _contains_cjk(combined_text):
-                        continue
-                    
                     if title and result_url:
                         results.append({
                             "title": title,
@@ -113,9 +200,6 @@ def _search_duckduckgo(query: str, num_results: int = 3) -> List[Dict[str, str]]
                             "snippet": snippet[:300],
                             "source": "duckduckgo"
                         })
-                        
-                        if len(results) >= num_results:
-                            break
                 except Exception:
                     continue
             
@@ -191,7 +275,8 @@ def _search_bing_scrape(query: str, num_results: int = 3) -> List[Dict[str, str]
             soup = BeautifulSoup(response.text, "lxml")
             results = []
             
-            for li in soup.select("li.b_algo")[:num_results * 2]:  # Get extra to filter
+            # Collect all results - filtering happens centrally in _web_search_impl
+            for li in soup.select("li.b_algo")[:num_results]:
                 try:
                     title_elem = li.find("h2")
                     if not title_elem:
@@ -207,11 +292,6 @@ def _search_bing_scrape(query: str, num_results: int = 3) -> List[Dict[str, str]
                     snippet_elem = li.find("p")
                     snippet = snippet_elem.get_text(strip=True) if snippet_elem else ""
                     
-                    # Skip results that are clearly non-English (contain CJK characters)
-                    combined_text = title + snippet
-                    if _contains_cjk(combined_text):
-                        continue
-                    
                     if title and href:
                         results.append({
                             "title": title,
@@ -219,9 +299,6 @@ def _search_bing_scrape(query: str, num_results: int = 3) -> List[Dict[str, str]
                             "snippet": snippet[:300],
                             "source": "bing"
                         })
-                        
-                        if len(results) >= num_results:
-                            break
                 except Exception:
                     continue
             
@@ -230,23 +307,6 @@ def _search_bing_scrape(query: str, num_results: int = 3) -> List[Dict[str, str]
     except Exception as e:
         logger.warning(f"Bing scrape failed: {e}")
         return []
-
-
-def _contains_cjk(text: str) -> bool:
-    """Check if text contains CJK (Chinese/Japanese/Korean) characters."""
-    for char in text:
-        code = ord(char)
-        # CJK Unified Ideographs and extensions
-        if (0x4E00 <= code <= 0x9FFF or  # CJK Unified
-            0x3400 <= code <= 0x4DBF or  # CJK Extension A
-            0x20000 <= code <= 0x2A6DF or  # CJK Extension B
-            0x2A700 <= code <= 0x2B73F or  # CJK Extension C
-            0x2B740 <= code <= 0x2B81F or  # CJK Extension D
-            0x3040 <= code <= 0x309F or  # Hiragana
-            0x30A0 <= code <= 0x30FF or  # Katakana
-            0xAC00 <= code <= 0xD7AF):  # Hangul
-            return True
-    return False
 
 
 # ============================================================================
@@ -265,6 +325,8 @@ def _web_search_impl(
     1. DuckDuckGo (primary - no API key needed)
     2. Brave Search (fallback - needs BRAVE_SEARCH_API_KEY)
     3. Bing Scrape (emergency fallback)
+    
+    Uses relevancy filtering to ensure quality results.
     """
     if not HTTPX_AVAILABLE or not BS4_AVAILABLE:
         return {
@@ -277,40 +339,66 @@ def _web_search_impl(
     if site_filter:
         search_query = f"site:{site_filter} {query}"
 
-    results = []
+    raw_results = []
     provider_used = None
     
+    # Get more results than needed to allow for filtering
+    fetch_count = num_results * 3
+    
     # Try DuckDuckGo first (no API key needed)
-    results = _search_duckduckgo(search_query, num_results)
-    if results:
+    raw_results = _search_duckduckgo(search_query, fetch_count)
+    if raw_results:
         provider_used = "duckduckgo"
     
     # Fallback to Brave Search
-    if not results:
-        results = _search_brave(search_query, num_results)
-        if results:
+    if not raw_results:
+        raw_results = _search_brave(search_query, fetch_count)
+        if raw_results:
             provider_used = "brave"
     
     # Emergency fallback to Bing scraping
-    if not results:
-        results = _search_bing_scrape(search_query, num_results)
-        if results:
+    if not raw_results:
+        raw_results = _search_bing_scrape(search_query, fetch_count)
+        if raw_results:
             provider_used = "bing"
     
-    if not results:
+    if not raw_results:
         return {
             "result": "no_results",
             "query": query,
             "explain": "No results found from any search provider"
         }
+    
+    # Apply relevancy filtering
+    filtered_results = _filter_relevant_results(
+        raw_results, 
+        query, 
+        min_score=0.15,  # Lower threshold to be more inclusive
+        max_results=num_results
+    )
+    
+    # If filtering was too strict, fall back to at least some results
+    if not filtered_results and raw_results:
+        # Just remove non-English without relevancy check
+        filtered_results = [
+            r for r in raw_results 
+            if not _contains_non_english(f"{r.get('title', '')} {r.get('snippet', '')}")
+        ][:num_results]
+    
+    if not filtered_results:
+        return {
+            "result": "no_relevant_results",
+            "query": query,
+            "explain": "Search results were filtered as irrelevant or non-English"
+        }
 
     return {
         "result": "success",
         "query": query,
-        "results": results,
-        "num_results": len(results),
+        "results": filtered_results,
+        "num_results": len(filtered_results),
         "provider": provider_used,
-        "explain": f"Found {len(results)} results via {provider_used} for '{query}'"
+        "explain": f"Found {len(filtered_results)} relevant results via {provider_used}"
     }
 
 

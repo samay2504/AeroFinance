@@ -417,15 +417,269 @@ def get_document_ingestor() -> DocumentIngestor:
     global _doc_ingestor
     
     if _doc_ingestor is None:
-        from app.config import settings
-        _doc_ingestor = DocumentIngestor(
-            qdrant_url=settings.vectordb.qdrant_url,
-            collection_name=settings.vectordb.qdrant_collection,
-            chroma_persist_dir=settings.vectordb.chroma_persist_dir,
-            embedding_model=settings.vectordb.embedding_model
-        )
+        try:
+            from app.config import settings
+            _doc_ingestor = DocumentIngestor(
+                qdrant_url=settings.vectordb.qdrant_url,
+                collection_name=settings.vectordb.qdrant_collection,
+                chroma_persist_dir=settings.vectordb.chroma_persist_dir,
+                embedding_model=settings.vectordb.embedding_model
+            )
+        except Exception as e:
+            logger.warning(f"Using default config for DocumentIngestor: {e}")
+            _doc_ingestor = DocumentIngestor()
     
     return _doc_ingestor
 
 
-__all__ = ["DocumentIngestor", "SmartChunker", "get_document_ingestor"]
+# ============================================================================
+# RAG PIPELINE
+# ============================================================================
+
+class RAGPipeline:
+    """
+    Retrieval-Augmented Generation pipeline for document Q&A.
+    
+    Features:
+    - Semantic search over ingested documents
+    - Context assembly for LLM prompting  
+    - Token-efficient context compression
+    """
+    
+    def __init__(self, llm_wrapper=None):
+        self._ingestor = get_document_ingestor()
+        self._llm = llm_wrapper
+        self._max_context_tokens = 2000  # Token budget for context
+    
+    @property
+    def is_available(self) -> bool:
+        """Check if RAG pipeline is operational."""
+        return self._ingestor._active_store is not None
+    
+    def ingest_document(
+        self,
+        text: str,
+        client_id: str,
+        doc_id: str,
+        metadata: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """Ingest document into vector store."""
+        return self._ingestor.ingest_text(text, client_id, doc_id, metadata)
+    
+    def query(
+        self,
+        question: str,
+        client_id: str,
+        top_k: int = 3,
+        score_threshold: float = 0.4
+    ) -> Dict[str, Any]:
+        """
+        Query documents and optionally generate answer.
+        
+        Returns relevant chunks. If LLM is available, also generates answer.
+        """
+        if not self.is_available:
+            return {
+                "success": False,
+                "error": "RAG pipeline not available - no vector store configured",
+                "contexts": []
+            }
+        
+        # Retrieve relevant chunks
+        results = self._ingestor.search(
+            query=question,
+            client_id=client_id,
+            top_k=top_k,
+            score_threshold=score_threshold
+        )
+        
+        if not results:
+            return {
+                "success": True,
+                "answer": "No relevant documents found for your query.",
+                "contexts": [],
+                "method": "rag:no_match"
+            }
+        
+        # Assemble context with token budget
+        context_parts = []
+        total_chars = 0
+        char_budget = self._max_context_tokens * 4  # ~4 chars per token
+        
+        for r in results:
+            content = r.get("content", "")
+            if total_chars + len(content) <= char_budget:
+                context_parts.append({
+                    "text": content,
+                    "score": r.get("score", 0),
+                    "source": r.get("metadata", {}).get("dataset_id", "unknown")
+                })
+                total_chars += len(content)
+        
+        # If LLM available, generate answer
+        answer = None
+        if self._llm and context_parts:
+            try:
+                context_text = "\n\n---\n\n".join([c["text"] for c in context_parts])
+                prompt = f"""Based on the following document excerpts, answer the question.
+
+DOCUMENT EXCERPTS:
+{context_text}
+
+QUESTION: {question}
+
+Provide a concise, accurate answer based only on the information provided. If the answer is not in the documents, say so."""
+
+                response = self._llm.invoke(prompt)
+                answer = str(response.content) if hasattr(response, 'content') else str(response)
+            except Exception as e:
+                logger.warning(f"LLM answer generation failed: {e}")
+                answer = f"Found {len(context_parts)} relevant document sections."
+        else:
+            answer = f"Found {len(context_parts)} relevant document sections."
+        
+        return {
+            "success": True,
+            "answer": answer,
+            "contexts": context_parts,
+            "num_contexts": len(context_parts),
+            "method": "rag:semantic_search"
+        }
+    
+    def summarize_document(
+        self,
+        client_id: str,
+        doc_id: Optional[str] = None,
+        max_chunks: int = 10
+    ) -> Dict[str, Any]:
+        """
+        Generate a summary of ingested documents.
+        
+        Args:
+            client_id: Client ID to filter documents
+            doc_id: Optional specific document ID to summarize
+            max_chunks: Maximum chunks to include in summary context
+            
+        Returns:
+            Summary of the document(s)
+        """
+        if not self.is_available:
+            return {
+                "success": False,
+                "error": "RAG pipeline not available - no vector store configured",
+                "summary": None
+            }
+        
+        # Use a generic query to retrieve document content
+        query = "summarize main topics key points financial data"
+        
+        results = self._ingestor.search(
+            query=query,
+            client_id=client_id,
+            top_k=max_chunks,
+            score_threshold=0.1  # Lower threshold to get more content for summarization
+        )
+        
+        if not results:
+            return {
+                "success": True,
+                "summary": "No documents found for this client.",
+                "chunks_used": 0,
+                "method": "rag:no_content"
+            }
+        
+        # Filter by specific doc_id if provided
+        if doc_id:
+            results = [r for r in results if r.get("metadata", {}).get("dataset_id") == doc_id]
+        
+        if not results:
+            return {
+                "success": True,
+                "summary": f"No content found for document: {doc_id}",
+                "chunks_used": 0,
+                "method": "rag:no_match"
+            }
+        
+        # Assemble content for summarization
+        content_parts = []
+        total_chars = 0
+        char_budget = 8000  # ~2000 tokens
+        
+        for r in results:
+            content = r.get("content", "")
+            if total_chars + len(content) <= char_budget:
+                content_parts.append(content)
+                total_chars += len(content)
+        
+        combined_content = "\n\n".join(content_parts)
+        
+        # Generate summary with LLM
+        if self._llm:
+            try:
+                prompt = f"""Summarize the following document content. Provide a concise overview highlighting:
+1. Main topics and themes
+2. Key data points and figures
+3. Important conclusions or insights
+
+DOCUMENT CONTENT:
+{combined_content}
+
+SUMMARY:"""
+                
+                response = self._llm.invoke(prompt)
+                summary = str(response.content) if hasattr(response, 'content') else str(response)
+                
+                return {
+                    "success": True,
+                    "summary": summary,
+                    "chunks_used": len(content_parts),
+                    "total_chars": total_chars,
+                    "method": "rag:llm_summary"
+                }
+            except Exception as e:
+                logger.warning(f"LLM summarization failed: {e}")
+        
+        # Fallback: return first few chunks as preview
+        preview = combined_content[:500] + "..." if len(combined_content) > 500 else combined_content
+        return {
+            "success": True,
+            "summary": f"Document preview ({len(content_parts)} chunks):\n{preview}",
+            "chunks_used": len(content_parts),
+            "method": "rag:preview"
+        }
+    
+    def get_status(self) -> Dict[str, Any]:
+        """Get RAG pipeline status and statistics."""
+        return {
+            "available": self.is_available,
+            "vector_store": self._ingestor._active_store,
+            "embedding_model": getattr(self._ingestor, '_embedding_model', 'unknown'),
+            "collection": self._ingestor.collection_name,
+            "llm_available": self._llm is not None
+        }
+
+
+# Singleton RAG pipeline
+_rag_pipeline: Optional[RAGPipeline] = None
+
+
+def get_rag_pipeline(llm_wrapper=None) -> RAGPipeline:
+    """Get or create singleton RAG pipeline."""
+    global _rag_pipeline
+    
+    if _rag_pipeline is None:
+        _rag_pipeline = RAGPipeline(llm_wrapper)
+    elif llm_wrapper and _rag_pipeline._llm is None:
+        _rag_pipeline._llm = llm_wrapper
+    
+    return _rag_pipeline
+
+
+__all__ = [
+    "DocumentIngestor", 
+    "SmartChunker", 
+    "get_document_ingestor",
+    "RAGPipeline",
+    "get_rag_pipeline"
+]
+

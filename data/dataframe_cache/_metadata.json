@@ -775,7 +775,7 @@
       "unnamed_23": "object",
       "unnamed_24": "object"
     },
-    "registered_at": "2025-12-19T19:00:20.341751",
+    "registered_at": "2025-12-19T19:29:55.637079",
     "parquet_path": "D:\\Projects2.0\\Valuenaire\\Re\\data\\dataframe_cache\\stress_test_client_mis__report_comp.parquet"
   },
   "stress_test_client:mis__report:cashburn_fy21": {
@@ -906,7 +906,7 @@
       "unnamed_16": "object",
       "unnamed_17": "object"
     },
-    "registered_at": "2025-12-19T19:00:20.780400",
+    "registered_at": "2025-12-19T19:29:56.087942",
     "parquet_path": "D:\\Projects2.0\\Valuenaire\\Re\\data\\dataframe_cache\\stress_test_client_mis__report_cashburn_fy21.parquet"
   },
   "stress_test_client:mis__report:unit_economics": {
@@ -981,7 +981,7 @@
       "unnamed_10": "object",
       "unnamed_11": "object"
     },
-    "registered_at": "2025-12-19T19:00:21.217301",
+    "registered_at": "2025-12-19T19:29:56.527084",
     "parquet_path": "D:\\Projects2.0\\Valuenaire\\Re\\data\\dataframe_cache\\stress_test_client_mis__report_unit_economics.parquet"
   },
   "stress_test_client:mis__report:income_statement___ppt": {
@@ -1062,7 +1062,7 @@
       "unnamed_10": "object",
       "unnamed_11": "object"
     },
-    "registered_at": "2025-12-19T19:00:21.780646",
+    "registered_at": "2025-12-19T19:29:57.054917",
     "parquet_path": "D:\\Projects2.0\\Valuenaire\\Re\\data\\dataframe_cache\\stress_test_client_mis__report_income_statement___ppt.parquet"
   },
   "stress_test_client:mis__report:fy22": {
@@ -1200,7 +1200,7 @@
       "unnamed_17": "float64",
       "unnamed_19": "float64"
     },
-    "registered_at": "2025-12-19T19:00:22.303622",
+    "registered_at": "2025-12-19T19:29:57.553904",
     "parquet_path": "D:\\Projects2.0\\Valuenaire\\Re\\data\\dataframe_cache\\stress_test_client_mis__report_fy22.parquet"
   },
   "stress_test_client:innovist_mis_july_2025:tb": {
@@ -2219,7 +2219,7 @@
       "unnamed_163": "object",
       "unnamed_164": "object"
     },
-    "registered_at": "2025-12-19T19:00:24.927634",
+    "registered_at": "2025-12-19T19:30:00.183232",
     "parquet_path": "D:\\Projects2.0\\Valuenaire\\Re\\data\\dataframe_cache\\stress_test_client_innovist_mis_july_2025_tb.parquet"
   },
   "stress_test_client:innovist_mis_july_2025:classification": {
@@ -2600,7 +2600,7 @@
       "unnamed_57": "object",
       "unnamed_58": "object"
     },
-    "registered_at": "2025-12-19T19:00:25.800115",
+    "registered_at": "2025-12-19T19:30:00.975186",
     "parquet_path": "D:\\Projects2.0\\Valuenaire\\Re\\data\\dataframe_cache\\stress_test_client_innovist_mis_july_2025_classification.parquet"
   },
   "stress_test_client:innovist_mis_july_2025:pl_consolidated": {
@@ -2969,7 +2969,7 @@
       "unnamed_55": "object",
       "unnamed_56": "object"
     },
-    "registered_at": "2025-12-19T19:00:26.255382",
+    "registered_at": "2025-12-19T19:30:01.310756",
     "parquet_path": "D:\\Projects2.0\\Valuenaire\\Re\\data\\dataframe_cache\\stress_test_client_innovist_mis_july_2025_pl_consolidated.parquet"
   },
   "stress_test_client:innovist_mis_july_2025:bs": {
@@ -3326,7 +3326,7 @@
       "unnamed_53": "object",
       "unnamed_54": "object"
     },
-    "registered_at": "2025-12-19T19:00:26.615247",
+    "registered_at": "2025-12-19T19:30:01.607445",
     "parquet_path": "D:\\Projects2.0\\Valuenaire\\Re\\data\\dataframe_cache\\stress_test_client_innovist_mis_july_2025_bs.parquet"
   },
   "stress_test_client:innovist_mis_july_2025:working_tb": {
@@ -3575,7 +3575,7 @@
       "108": "object",
       "109": "object"
     },
-    "registered_at": "2025-12-19T19:00:27.431509",
+    "registered_at": "2025-12-19T19:30:02.405006",
     "parquet_path": "D:\\Projects2.0\\Valuenaire\\Re\\data\\dataframe_cache\\stress_test_client_innovist_mis_july_2025_working_tb.parquet"
   },
   "stress_test_client:innovist_mis_july_2025:cf": {
@@ -3926,7 +3926,7 @@
       "unnamed_52": "object",
       "unnamed_53": "object"
     },
-    "registered_at": "2025-12-19T19:00:27.755308",
+    "registered_at": "2025-12-19T19:30:02.732322",
     "parquet_path": "D:\\Projects2.0\\Valuenaire\\Re\\data\\dataframe_cache\\stress_test_client_innovist_mis_july_2025_cf.parquet"
   }
 }
