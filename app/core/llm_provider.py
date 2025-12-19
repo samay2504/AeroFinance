@@ -336,7 +336,8 @@ class LLMProvider:
             raise ImportError("OpenRouter not enabled")
 
         api_key = os.getenv("OPENROUTER_API_KEY") or self.config.get("openrouter_api_key")
-        model = os.getenv("OPENROUTER_MODEL") or self.config.get("openrouter_model", "gpt-4o-mini")
+        # Use free models: mistralai/devstral-2512:free or google/gemini-2.0-flash-exp:free
+        model = os.getenv("OPENROUTER_MODEL") or self.config.get("openrouter_model", "mistralai/devstral-2512:free")
 
         if not api_key:
             raise ValueError("OPENROUTER_API_KEY not set")

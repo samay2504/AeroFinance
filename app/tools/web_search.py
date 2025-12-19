@@ -34,19 +34,42 @@ except ImportError:
 
 
 # ============================================================================
+# HELPER FUNCTIONS
+# ============================================================================
+
+def _contains_cjk(text: str) -> bool:
+    """Check if text contains CJK (Chinese/Japanese/Korean) characters."""
+    for char in text:
+        code = ord(char)
+        # CJK Unified Ideographs and extensions
+        if (0x4E00 <= code <= 0x9FFF or  # CJK Unified
+            0x3400 <= code <= 0x4DBF or  # CJK Extension A
+            0x20000 <= code <= 0x2A6DF or  # CJK Extension B
+            0x2A700 <= code <= 0x2B73F or  # CJK Extension C
+            0x2B740 <= code <= 0x2B81F or  # CJK Extension D
+            0x3040 <= code <= 0x309F or  # Hiragana
+            0x30A0 <= code <= 0x30FF or  # Katakana
+            0xAC00 <= code <= 0xD7AF):  # Hangul
+            return True
+    return False
+
+
+# ============================================================================
 # SEARCH PROVIDERS
 # ============================================================================
 
 def _search_duckduckgo(query: str, num_results: int = 3) -> List[Dict[str, str]]:
-    """Search DuckDuckGo HTML results."""
+    """Search DuckDuckGo HTML results with English language preference."""
     if not HTTPX_AVAILABLE or not BS4_AVAILABLE:
         return []
     
     encoded_query = quote_plus(query)
-    url = f"https://html.duckduckgo.com/html/?q={encoded_query}"
+    # Add kl=en-in for English (India) region
+    url = f"https://html.duckduckgo.com/html/?q={encoded_query}&kl=en-in"
     
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9",
     }
 
     try:
@@ -57,7 +80,8 @@ def _search_duckduckgo(query: str, num_results: int = 3) -> List[Dict[str, str]]
             soup = BeautifulSoup(response.text, "lxml")
             results = []
             
-            for div in soup.find_all("div", class_="result")[:num_results]:
+            # Get more results to filter out non-English
+            for div in soup.find_all("div", class_="result")[:num_results * 2]:
                 try:
                     title_elem = div.find("a", class_="result__a")
                     if not title_elem:
@@ -70,20 +94,28 @@ def _search_duckduckgo(query: str, num_results: int = 3) -> List[Dict[str, str]]
                     if "uddg=" in href:
                         import urllib.parse
                         parsed = urllib.parse.parse_qs(urllib.parse.urlparse(href).query)
-                        url = parsed.get("uddg", [href])[0]
+                        result_url = parsed.get("uddg", [href])[0]
                     else:
-                        url = href
+                        result_url = href
                     
                     snippet_elem = div.find("a", class_="result__snippet")
                     snippet = snippet_elem.get_text(strip=True) if snippet_elem else ""
                     
-                    if title and url:
+                    # Skip non-English results (CJK characters)
+                    combined_text = title + snippet
+                    if _contains_cjk(combined_text):
+                        continue
+                    
+                    if title and result_url:
                         results.append({
                             "title": title,
-                            "url": url,
+                            "url": result_url,
                             "snippet": snippet[:300],
                             "source": "duckduckgo"
                         })
+                        
+                        if len(results) >= num_results:
+                            break
                 except Exception:
                     continue
             
@@ -138,13 +170,14 @@ def _search_brave(query: str, num_results: int = 3) -> List[Dict[str, str]]:
 
 
 def _search_bing_scrape(query: str, num_results: int = 3) -> List[Dict[str, str]]:
-    """Fallback: Scrape Bing search results."""
+    """Fallback: Scrape Bing search results with English language preference."""
     if not HTTPX_AVAILABLE or not BS4_AVAILABLE:
         return []
     
     try:
         encoded_query = quote_plus(query)
-        url = f"https://www.bing.com/search?q={encoded_query}"
+        # Add setlang=en and mkt=en-IN for English results from India
+        url = f"https://www.bing.com/search?q={encoded_query}&setlang=en&mkt=en-IN"
         
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -158,7 +191,7 @@ def _search_bing_scrape(query: str, num_results: int = 3) -> List[Dict[str, str]
             soup = BeautifulSoup(response.text, "lxml")
             results = []
             
-            for li in soup.select("li.b_algo")[:num_results]:
+            for li in soup.select("li.b_algo")[:num_results * 2]:  # Get extra to filter
                 try:
                     title_elem = li.find("h2")
                     if not title_elem:
@@ -174,6 +207,11 @@ def _search_bing_scrape(query: str, num_results: int = 3) -> List[Dict[str, str]
                     snippet_elem = li.find("p")
                     snippet = snippet_elem.get_text(strip=True) if snippet_elem else ""
                     
+                    # Skip results that are clearly non-English (contain CJK characters)
+                    combined_text = title + snippet
+                    if _contains_cjk(combined_text):
+                        continue
+                    
                     if title and href:
                         results.append({
                             "title": title,
@@ -181,6 +219,9 @@ def _search_bing_scrape(query: str, num_results: int = 3) -> List[Dict[str, str]
                             "snippet": snippet[:300],
                             "source": "bing"
                         })
+                        
+                        if len(results) >= num_results:
+                            break
                 except Exception:
                     continue
             
@@ -189,6 +230,23 @@ def _search_bing_scrape(query: str, num_results: int = 3) -> List[Dict[str, str]
     except Exception as e:
         logger.warning(f"Bing scrape failed: {e}")
         return []
+
+
+def _contains_cjk(text: str) -> bool:
+    """Check if text contains CJK (Chinese/Japanese/Korean) characters."""
+    for char in text:
+        code = ord(char)
+        # CJK Unified Ideographs and extensions
+        if (0x4E00 <= code <= 0x9FFF or  # CJK Unified
+            0x3400 <= code <= 0x4DBF or  # CJK Extension A
+            0x20000 <= code <= 0x2A6DF or  # CJK Extension B
+            0x2A700 <= code <= 0x2B73F or  # CJK Extension C
+            0x2B740 <= code <= 0x2B81F or  # CJK Extension D
+            0x3040 <= code <= 0x309F or  # Hiragana
+            0x30A0 <= code <= 0x30FF or  # Katakana
+            0xAC00 <= code <= 0xD7AF):  # Hangul
+            return True
+    return False
 
 
 # ============================================================================
