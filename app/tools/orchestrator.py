@@ -393,7 +393,8 @@ def get_tool_orchestrator(llm_wrapper=None) -> ToolOrchestrator:
 def search_and_respond(query: str, llm_wrapper=None) -> Dict[str, Any]:
     """Quick search with LLM-enhanced response."""
     orchestrator = get_tool_orchestrator(llm_wrapper)
-    return orchestrator.execute_with_llm_response(query, tool_name="web_search", query=query, num_results=3)
+    # Note: web_search uses 'query' as parameter, which matches our first arg
+    return orchestrator.execute_tool("web_search", query=query, num_results=3)
 
 
 def check_tax_rate(tax_type: str, country: str = "India", year: int = 2024, llm_wrapper=None) -> Dict[str, Any]:

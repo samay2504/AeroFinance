@@ -600,5 +600,3333 @@
     },
     "registered_at": "2025-12-18T21:57:37.679184",
     "parquet_path": "D:\\Projects2.0\\Valuenaire\\Re\\data\\dataframe_cache\\test_client_ca_mis__report_fy22.parquet"
+  },
+  "stress_test_client:mis__report:comp": {
+    "preprocessing": {
+      "original_shape": [
+        38,
+        25
+      ],
+      "columns_normalized": [
+        {
+          "original": "As per model project",
+          "normalized": "as_per_model_project"
+        },
+        {
+          "original": "Unnamed: 1",
+          "normalized": "unnamed_1"
+        },
+        {
+          "original": "Unnamed: 2",
+          "normalized": "unnamed_2"
+        },
+        {
+          "original": "Unnamed: 3",
+          "normalized": "unnamed_3"
+        },
+        {
+          "original": "Unnamed: 4",
+          "normalized": "unnamed_4"
+        },
+        {
+          "original": "Unnamed: 5",
+          "normalized": "unnamed_5"
+        },
+        {
+          "original": "Unnamed: 6",
+          "normalized": "unnamed_6"
+        },
+        {
+          "original": "Unnamed: 7",
+          "normalized": "unnamed_7"
+        },
+        {
+          "original": "Unnamed: 8",
+          "normalized": "unnamed_8"
+        },
+        {
+          "original": "Unnamed: 9",
+          "normalized": "unnamed_9"
+        },
+        {
+          "original": "Unnamed: 10",
+          "normalized": "unnamed_10"
+        },
+        {
+          "original": "Unnamed: 11",
+          "normalized": "unnamed_11"
+        },
+        {
+          "original": "Unnamed: 12",
+          "normalized": "unnamed_12"
+        },
+        {
+          "original": "Unnamed: 13",
+          "normalized": "unnamed_13"
+        },
+        {
+          "original": "Unnamed: 14",
+          "normalized": "unnamed_14"
+        },
+        {
+          "original": "Unnamed: 15",
+          "normalized": "unnamed_15"
+        },
+        {
+          "original": "Unnamed: 16",
+          "normalized": "unnamed_16"
+        },
+        {
+          "original": "Unnamed: 17",
+          "normalized": "unnamed_17"
+        },
+        {
+          "original": "Unnamed: 18",
+          "normalized": "unnamed_18"
+        },
+        {
+          "original": "Unnamed: 19",
+          "normalized": "unnamed_19"
+        },
+        {
+          "original": "Unnamed: 20",
+          "normalized": "unnamed_20"
+        },
+        {
+          "original": "Unnamed: 21",
+          "normalized": "unnamed_21"
+        },
+        {
+          "original": "Unnamed: 22",
+          "normalized": "unnamed_22"
+        },
+        {
+          "original": "Unnamed: 23",
+          "normalized": "unnamed_23"
+        },
+        {
+          "original": "Unnamed: 24",
+          "normalized": "unnamed_24"
+        }
+      ],
+      "numeric_coerced": [],
+      "period_columns": [],
+      "na_replaced": 0,
+      "final_shape": [
+        38,
+        25
+      ],
+      "sheet_name": "Comp"
+    },
+    "dataset_id": "stress_test_client:mis__report:comp",
+    "client_id": "stress_test_client",
+    "rows": 38,
+    "columns": [
+      "as_per_model_project",
+      "unnamed_1",
+      "unnamed_2",
+      "unnamed_3",
+      "unnamed_4",
+      "unnamed_5",
+      "unnamed_6",
+      "unnamed_7",
+      "unnamed_8",
+      "unnamed_9",
+      "unnamed_10",
+      "unnamed_11",
+      "unnamed_12",
+      "unnamed_13",
+      "unnamed_14",
+      "unnamed_15",
+      "unnamed_16",
+      "unnamed_17",
+      "unnamed_18",
+      "unnamed_19",
+      "unnamed_20",
+      "unnamed_21",
+      "unnamed_22",
+      "unnamed_23",
+      "unnamed_24"
+    ],
+    "dtypes": {
+      "as_per_model_project": "object",
+      "unnamed_1": "object",
+      "unnamed_2": "object",
+      "unnamed_3": "object",
+      "unnamed_4": "object",
+      "unnamed_5": "object",
+      "unnamed_6": "object",
+      "unnamed_7": "object",
+      "unnamed_8": "object",
+      "unnamed_9": "object",
+      "unnamed_10": "object",
+      "unnamed_11": "object",
+      "unnamed_12": "object",
+      "unnamed_13": "object",
+      "unnamed_14": "object",
+      "unnamed_15": "object",
+      "unnamed_16": "object",
+      "unnamed_17": "object",
+      "unnamed_18": "object",
+      "unnamed_19": "object",
+      "unnamed_20": "object",
+      "unnamed_21": "object",
+      "unnamed_22": "object",
+      "unnamed_23": "object",
+      "unnamed_24": "object"
+    },
+    "registered_at": "2025-12-19T18:39:37.699889",
+    "parquet_path": "D:\\Projects2.0\\Valuenaire\\Re\\data\\dataframe_cache\\stress_test_client_mis__report_comp.parquet"
+  },
+  "stress_test_client:mis__report:cashburn_fy21": {
+    "preprocessing": {
+      "original_shape": [
+        42,
+        18
+      ],
+      "columns_normalized": [
+        {
+          "original": "Unnamed: 1",
+          "normalized": "unnamed_1"
+        },
+        {
+          "original": "Unnamed: 2",
+          "normalized": "unnamed_2"
+        },
+        {
+          "original": "Unnamed: 3",
+          "normalized": "unnamed_3"
+        },
+        {
+          "original": "Unnamed: 4",
+          "normalized": "unnamed_4"
+        },
+        {
+          "original": "Unnamed: 5",
+          "normalized": "unnamed_5"
+        },
+        {
+          "original": "Unnamed: 6",
+          "normalized": "unnamed_6"
+        },
+        {
+          "original": "Unnamed: 7",
+          "normalized": "unnamed_7"
+        },
+        {
+          "original": "Unnamed: 8",
+          "normalized": "unnamed_8"
+        },
+        {
+          "original": "Unnamed: 9",
+          "normalized": "unnamed_9"
+        },
+        {
+          "original": "Unnamed: 10",
+          "normalized": "unnamed_10"
+        },
+        {
+          "original": "Unnamed: 11",
+          "normalized": "unnamed_11"
+        },
+        {
+          "original": "Unnamed: 12",
+          "normalized": "unnamed_12"
+        },
+        {
+          "original": "Unnamed: 13",
+          "normalized": "unnamed_13"
+        },
+        {
+          "original": "Unnamed: 14",
+          "normalized": "unnamed_14"
+        },
+        {
+          "original": "Unnamed: 15",
+          "normalized": "unnamed_15"
+        },
+        {
+          "original": "Unnamed: 16",
+          "normalized": "unnamed_16"
+        },
+        {
+          "original": "Unnamed: 17",
+          "normalized": "unnamed_17"
+        }
+      ],
+      "numeric_coerced": [
+        "unnamed_14"
+      ],
+      "period_columns": [],
+      "na_replaced": "5",
+      "final_shape": [
+        40,
+        17
+      ],
+      "sheet_name": "Cashburn_FY21"
+    },
+    "dataset_id": "stress_test_client:mis__report:cashburn_fy21",
+    "client_id": "stress_test_client",
+    "rows": 40,
+    "columns": [
+      "unnamed_1",
+      "unnamed_2",
+      "unnamed_3",
+      "unnamed_4",
+      "unnamed_5",
+      "unnamed_6",
+      "unnamed_7",
+      "unnamed_8",
+      "unnamed_9",
+      "unnamed_10",
+      "unnamed_11",
+      "unnamed_12",
+      "unnamed_13",
+      "unnamed_14",
+      "unnamed_15",
+      "unnamed_16",
+      "unnamed_17"
+    ],
+    "dtypes": {
+      "unnamed_1": "object",
+      "unnamed_2": "object",
+      "unnamed_3": "object",
+      "unnamed_4": "object",
+      "unnamed_5": "object",
+      "unnamed_6": "object",
+      "unnamed_7": "object",
+      "unnamed_8": "object",
+      "unnamed_9": "object",
+      "unnamed_10": "object",
+      "unnamed_11": "object",
+      "unnamed_12": "object",
+      "unnamed_13": "object",
+      "unnamed_14": "float64",
+      "unnamed_15": "object",
+      "unnamed_16": "object",
+      "unnamed_17": "object"
+    },
+    "registered_at": "2025-12-19T18:39:38.079017",
+    "parquet_path": "D:\\Projects2.0\\Valuenaire\\Re\\data\\dataframe_cache\\stress_test_client_mis__report_cashburn_fy21.parquet"
+  },
+  "stress_test_client:mis__report:unit_economics": {
+    "preprocessing": {
+      "original_shape": [
+        28,
+        12
+      ],
+      "columns_normalized": [
+        {
+          "original": "Project Rapid",
+          "normalized": "project_rapid"
+        },
+        {
+          "original": "Unnamed: 2",
+          "normalized": "unnamed_2"
+        },
+        {
+          "original": "Unnamed: 3",
+          "normalized": "unnamed_3"
+        },
+        {
+          "original": "12950.666666666666",
+          "normalized": "12950_666666666666"
+        },
+        {
+          "original": "30633.88888888889",
+          "normalized": "30633_88888888889"
+        },
+        {
+          "original": "Unnamed: 8",
+          "normalized": "unnamed_8"
+        },
+        {
+          "original": "Unnamed: 10",
+          "normalized": "unnamed_10"
+        },
+        {
+          "original": "Unnamed: 11",
+          "normalized": "unnamed_11"
+        }
+      ],
+      "numeric_coerced": [],
+      "period_columns": [],
+      "na_replaced": 0,
+      "final_shape": [
+        28,
+        8
+      ],
+      "sheet_name": "Unit economics"
+    },
+    "dataset_id": "stress_test_client:mis__report:unit_economics",
+    "client_id": "stress_test_client",
+    "rows": 28,
+    "columns": [
+      "project_rapid",
+      "unnamed_2",
+      "unnamed_3",
+      "12950_666666666666",
+      "30633_88888888889",
+      "unnamed_8",
+      "unnamed_10",
+      "unnamed_11"
+    ],
+    "dtypes": {
+      "project_rapid": "object",
+      "unnamed_2": "object",
+      "unnamed_3": "object",
+      "12950_666666666666": "object",
+      "30633_88888888889": "object",
+      "unnamed_8": "object",
+      "unnamed_10": "object",
+      "unnamed_11": "object"
+    },
+    "registered_at": "2025-12-19T18:39:38.432394",
+    "parquet_path": "D:\\Projects2.0\\Valuenaire\\Re\\data\\dataframe_cache\\stress_test_client_mis__report_unit_economics.parquet"
+  },
+  "stress_test_client:mis__report:income_statement___ppt": {
+    "preprocessing": {
+      "original_shape": [
+        34,
+        12
+      ],
+      "columns_normalized": [
+        {
+          "original": "Project Rapid",
+          "normalized": "project_rapid"
+        },
+        {
+          "original": "Unnamed: 2",
+          "normalized": "unnamed_2"
+        },
+        {
+          "original": "Unnamed: 3",
+          "normalized": "unnamed_3"
+        },
+        {
+          "original": "Unnamed: 4",
+          "normalized": "unnamed_4"
+        },
+        {
+          "original": "Unnamed: 6",
+          "normalized": "unnamed_6"
+        },
+        {
+          "original": "Unnamed: 7",
+          "normalized": "unnamed_7"
+        },
+        {
+          "original": "Unnamed: 8",
+          "normalized": "unnamed_8"
+        },
+        {
+          "original": "Unnamed: 10",
+          "normalized": "unnamed_10"
+        },
+        {
+          "original": "Unnamed: 11",
+          "normalized": "unnamed_11"
+        }
+      ],
+      "numeric_coerced": [],
+      "period_columns": [],
+      "na_replaced": 0,
+      "final_shape": [
+        32,
+        9
+      ],
+      "sheet_name": "Income statement | PPT"
+    },
+    "dataset_id": "stress_test_client:mis__report:income_statement___ppt",
+    "client_id": "stress_test_client",
+    "rows": 32,
+    "columns": [
+      "project_rapid",
+      "unnamed_2",
+      "unnamed_3",
+      "unnamed_4",
+      "unnamed_6",
+      "unnamed_7",
+      "unnamed_8",
+      "unnamed_10",
+      "unnamed_11"
+    ],
+    "dtypes": {
+      "project_rapid": "object",
+      "unnamed_2": "object",
+      "unnamed_3": "object",
+      "unnamed_4": "object",
+      "unnamed_6": "object",
+      "unnamed_7": "object",
+      "unnamed_8": "object",
+      "unnamed_10": "object",
+      "unnamed_11": "object"
+    },
+    "registered_at": "2025-12-19T18:39:38.930931",
+    "parquet_path": "D:\\Projects2.0\\Valuenaire\\Re\\data\\dataframe_cache\\stress_test_client_mis__report_income_statement___ppt.parquet"
+  },
+  "stress_test_client:mis__report:fy22": {
+    "preprocessing": {
+      "original_shape": [
+        76,
+        20
+      ],
+      "columns_normalized": [
+        {
+          "original": "Unnamed: 0",
+          "normalized": "unnamed_0"
+        },
+        {
+          "original": "Unnamed: 1",
+          "normalized": "unnamed_1"
+        },
+        {
+          "original": "Unnamed: 2",
+          "normalized": "unnamed_2"
+        },
+        {
+          "original": "Unnamed: 3",
+          "normalized": "unnamed_3"
+        },
+        {
+          "original": "Unnamed: 4",
+          "normalized": "unnamed_4"
+        },
+        {
+          "original": "Unnamed: 5",
+          "normalized": "unnamed_5"
+        },
+        {
+          "original": "Unnamed: 6",
+          "normalized": "unnamed_6"
+        },
+        {
+          "original": "Unnamed: 7",
+          "normalized": "unnamed_7"
+        },
+        {
+          "original": "Unnamed: 8",
+          "normalized": "unnamed_8"
+        },
+        {
+          "original": "Unnamed: 9",
+          "normalized": "unnamed_9"
+        },
+        {
+          "original": "Unnamed: 10",
+          "normalized": "unnamed_10"
+        },
+        {
+          "original": "Unnamed: 11",
+          "normalized": "unnamed_11"
+        },
+        {
+          "original": "Unnamed: 12",
+          "normalized": "unnamed_12"
+        },
+        {
+          "original": "Unnamed: 13",
+          "normalized": "unnamed_13"
+        },
+        {
+          "original": "Unnamed: 15",
+          "normalized": "unnamed_15"
+        },
+        {
+          "original": "Unnamed: 16",
+          "normalized": "unnamed_16"
+        },
+        {
+          "original": "Unnamed: 17",
+          "normalized": "unnamed_17"
+        },
+        {
+          "original": "Unnamed: 19",
+          "normalized": "unnamed_19"
+        }
+      ],
+      "numeric_coerced": [
+        "unnamed_17",
+        "unnamed_19"
+      ],
+      "period_columns": [],
+      "na_replaced": 0,
+      "final_shape": [
+        63,
+        18
+      ],
+      "sheet_name": "FY22"
+    },
+    "dataset_id": "stress_test_client:mis__report:fy22",
+    "client_id": "stress_test_client",
+    "rows": 63,
+    "columns": [
+      "unnamed_0",
+      "unnamed_1",
+      "unnamed_2",
+      "unnamed_3",
+      "unnamed_4",
+      "unnamed_5",
+      "unnamed_6",
+      "unnamed_7",
+      "unnamed_8",
+      "unnamed_9",
+      "unnamed_10",
+      "unnamed_11",
+      "unnamed_12",
+      "unnamed_13",
+      "unnamed_15",
+      "unnamed_16",
+      "unnamed_17",
+      "unnamed_19"
+    ],
+    "dtypes": {
+      "unnamed_0": "object",
+      "unnamed_1": "object",
+      "unnamed_2": "object",
+      "unnamed_3": "object",
+      "unnamed_4": "object",
+      "unnamed_5": "object",
+      "unnamed_6": "object",
+      "unnamed_7": "object",
+      "unnamed_8": "object",
+      "unnamed_9": "object",
+      "unnamed_10": "object",
+      "unnamed_11": "object",
+      "unnamed_12": "object",
+      "unnamed_13": "object",
+      "unnamed_15": "object",
+      "unnamed_16": "object",
+      "unnamed_17": "float64",
+      "unnamed_19": "float64"
+    },
+    "registered_at": "2025-12-19T18:39:39.312502",
+    "parquet_path": "D:\\Projects2.0\\Valuenaire\\Re\\data\\dataframe_cache\\stress_test_client_mis__report_fy22.parquet"
+  },
+  "stress_test_client:innovist_mis_july_2025:tb": {
+    "preprocessing": {
+      "original_shape": [
+        373,
+        165
+      ],
+      "columns_normalized": [
+        {
+          "original": "Onesto Labs Private Limited",
+          "normalized": "onesto_labs_private_limited"
+        },
+        {
+          "original": "Unnamed: 1",
+          "normalized": "unnamed_1"
+        },
+        {
+          "original": "Unnamed: 2",
+          "normalized": "unnamed_2"
+        },
+        {
+          "original": "Unnamed: 3",
+          "normalized": "unnamed_3"
+        },
+        {
+          "original": "Unnamed: 4",
+          "normalized": "unnamed_4"
+        },
+        {
+          "original": "Unnamed: 5",
+          "normalized": "unnamed_5"
+        },
+        {
+          "original": "Unnamed: 6",
+          "normalized": "unnamed_6"
+        },
+        {
+          "original": "Unnamed: 7",
+          "normalized": "unnamed_7"
+        },
+        {
+          "original": "Unnamed: 8",
+          "normalized": "unnamed_8"
+        },
+        {
+          "original": "Unnamed: 9",
+          "normalized": "unnamed_9"
+        },
+        {
+          "original": "Unnamed: 10",
+          "normalized": "unnamed_10"
+        },
+        {
+          "original": "Unnamed: 11",
+          "normalized": "unnamed_11"
+        },
+        {
+          "original": "Unnamed: 12",
+          "normalized": "unnamed_12"
+        },
+        {
+          "original": "Unnamed: 13",
+          "normalized": "unnamed_13"
+        },
+        {
+          "original": "Unnamed: 14",
+          "normalized": "unnamed_14"
+        },
+        {
+          "original": "Unnamed: 15",
+          "normalized": "unnamed_15"
+        },
+        {
+          "original": "Unnamed: 16",
+          "normalized": "unnamed_16"
+        },
+        {
+          "original": "Unnamed: 17",
+          "normalized": "unnamed_17"
+        },
+        {
+          "original": "Unnamed: 18",
+          "normalized": "unnamed_18"
+        },
+        {
+          "original": "Unnamed: 19",
+          "normalized": "unnamed_19"
+        },
+        {
+          "original": "Unnamed: 20",
+          "normalized": "unnamed_20"
+        },
+        {
+          "original": "Unnamed: 21",
+          "normalized": "unnamed_21"
+        },
+        {
+          "original": "Unnamed: 22",
+          "normalized": "unnamed_22"
+        },
+        {
+          "original": "Unnamed: 23",
+          "normalized": "unnamed_23"
+        },
+        {
+          "original": "Unnamed: 24",
+          "normalized": "unnamed_24"
+        },
+        {
+          "original": "Unnamed: 25",
+          "normalized": "unnamed_25"
+        },
+        {
+          "original": "Unnamed: 26",
+          "normalized": "unnamed_26"
+        },
+        {
+          "original": "Unnamed: 27",
+          "normalized": "unnamed_27"
+        },
+        {
+          "original": "Unnamed: 28",
+          "normalized": "unnamed_28"
+        },
+        {
+          "original": "Unnamed: 29",
+          "normalized": "unnamed_29"
+        },
+        {
+          "original": "Unnamed: 30",
+          "normalized": "unnamed_30"
+        },
+        {
+          "original": "Unnamed: 31",
+          "normalized": "unnamed_31"
+        },
+        {
+          "original": "Unnamed: 32",
+          "normalized": "unnamed_32"
+        },
+        {
+          "original": "Unnamed: 33",
+          "normalized": "unnamed_33"
+        },
+        {
+          "original": "Unnamed: 34",
+          "normalized": "unnamed_34"
+        },
+        {
+          "original": "Unnamed: 35",
+          "normalized": "unnamed_35"
+        },
+        {
+          "original": "Unnamed: 36",
+          "normalized": "unnamed_36"
+        },
+        {
+          "original": "Unnamed: 37",
+          "normalized": "unnamed_37"
+        },
+        {
+          "original": "Unnamed: 38",
+          "normalized": "unnamed_38"
+        },
+        {
+          "original": "Unnamed: 39",
+          "normalized": "unnamed_39"
+        },
+        {
+          "original": "Unnamed: 40",
+          "normalized": "unnamed_40"
+        },
+        {
+          "original": "Unnamed: 41",
+          "normalized": "unnamed_41"
+        },
+        {
+          "original": "Unnamed: 42",
+          "normalized": "unnamed_42"
+        },
+        {
+          "original": "Unnamed: 43",
+          "normalized": "unnamed_43"
+        },
+        {
+          "original": "Unnamed: 44",
+          "normalized": "unnamed_44"
+        },
+        {
+          "original": "Unnamed: 45",
+          "normalized": "unnamed_45"
+        },
+        {
+          "original": "Unnamed: 46",
+          "normalized": "unnamed_46"
+        },
+        {
+          "original": "Unnamed: 47",
+          "normalized": "unnamed_47"
+        },
+        {
+          "original": "Unnamed: 48",
+          "normalized": "unnamed_48"
+        },
+        {
+          "original": "Unnamed: 49",
+          "normalized": "unnamed_49"
+        },
+        {
+          "original": "Unnamed: 50",
+          "normalized": "unnamed_50"
+        },
+        {
+          "original": "Unnamed: 51",
+          "normalized": "unnamed_51"
+        },
+        {
+          "original": "Unnamed: 52",
+          "normalized": "unnamed_52"
+        },
+        {
+          "original": "Unnamed: 53",
+          "normalized": "unnamed_53"
+        },
+        {
+          "original": "Unnamed: 54",
+          "normalized": "unnamed_54"
+        },
+        {
+          "original": "Unnamed: 55",
+          "normalized": "unnamed_55"
+        },
+        {
+          "original": "Unnamed: 56",
+          "normalized": "unnamed_56"
+        },
+        {
+          "original": "Unnamed: 57",
+          "normalized": "unnamed_57"
+        },
+        {
+          "original": "Unnamed: 58",
+          "normalized": "unnamed_58"
+        },
+        {
+          "original": "Unnamed: 59",
+          "normalized": "unnamed_59"
+        },
+        {
+          "original": "Unnamed: 60",
+          "normalized": "unnamed_60"
+        },
+        {
+          "original": "Unnamed: 61",
+          "normalized": "unnamed_61"
+        },
+        {
+          "original": "Unnamed: 62",
+          "normalized": "unnamed_62"
+        },
+        {
+          "original": "Unnamed: 63",
+          "normalized": "unnamed_63"
+        },
+        {
+          "original": "Unnamed: 64",
+          "normalized": "unnamed_64"
+        },
+        {
+          "original": "Unnamed: 65",
+          "normalized": "unnamed_65"
+        },
+        {
+          "original": "Unnamed: 66",
+          "normalized": "unnamed_66"
+        },
+        {
+          "original": "Unnamed: 67",
+          "normalized": "unnamed_67"
+        },
+        {
+          "original": "Unnamed: 68",
+          "normalized": "unnamed_68"
+        },
+        {
+          "original": "Unnamed: 69",
+          "normalized": "unnamed_69"
+        },
+        {
+          "original": "Unnamed: 70",
+          "normalized": "unnamed_70"
+        },
+        {
+          "original": "Unnamed: 71",
+          "normalized": "unnamed_71"
+        },
+        {
+          "original": "Unnamed: 72",
+          "normalized": "unnamed_72"
+        },
+        {
+          "original": "Unnamed: 73",
+          "normalized": "unnamed_73"
+        },
+        {
+          "original": "Unnamed: 74",
+          "normalized": "unnamed_74"
+        },
+        {
+          "original": "Unnamed: 75",
+          "normalized": "unnamed_75"
+        },
+        {
+          "original": "Unnamed: 76",
+          "normalized": "unnamed_76"
+        },
+        {
+          "original": "Unnamed: 77",
+          "normalized": "unnamed_77"
+        },
+        {
+          "original": "Unnamed: 78",
+          "normalized": "unnamed_78"
+        },
+        {
+          "original": "Unnamed: 79",
+          "normalized": "unnamed_79"
+        },
+        {
+          "original": "Unnamed: 80",
+          "normalized": "unnamed_80"
+        },
+        {
+          "original": "Unnamed: 81",
+          "normalized": "unnamed_81"
+        },
+        {
+          "original": "Unnamed: 82",
+          "normalized": "unnamed_82"
+        },
+        {
+          "original": "Unnamed: 83",
+          "normalized": "unnamed_83"
+        },
+        {
+          "original": "Unnamed: 84",
+          "normalized": "unnamed_84"
+        },
+        {
+          "original": "Unnamed: 85",
+          "normalized": "unnamed_85"
+        },
+        {
+          "original": "Unnamed: 86",
+          "normalized": "unnamed_86"
+        },
+        {
+          "original": "Unnamed: 87",
+          "normalized": "unnamed_87"
+        },
+        {
+          "original": "Unnamed: 88",
+          "normalized": "unnamed_88"
+        },
+        {
+          "original": "Unnamed: 89",
+          "normalized": "unnamed_89"
+        },
+        {
+          "original": "Unnamed: 90",
+          "normalized": "unnamed_90"
+        },
+        {
+          "original": "Unnamed: 91",
+          "normalized": "unnamed_91"
+        },
+        {
+          "original": "Unnamed: 92",
+          "normalized": "unnamed_92"
+        },
+        {
+          "original": "Unnamed: 93",
+          "normalized": "unnamed_93"
+        },
+        {
+          "original": "Unnamed: 94",
+          "normalized": "unnamed_94"
+        },
+        {
+          "original": "Unnamed: 95",
+          "normalized": "unnamed_95"
+        },
+        {
+          "original": "Unnamed: 96",
+          "normalized": "unnamed_96"
+        },
+        {
+          "original": "Unnamed: 97",
+          "normalized": "unnamed_97"
+        },
+        {
+          "original": "Unnamed: 98",
+          "normalized": "unnamed_98"
+        },
+        {
+          "original": "Unnamed: 99",
+          "normalized": "unnamed_99"
+        },
+        {
+          "original": "Unnamed: 100",
+          "normalized": "unnamed_100"
+        },
+        {
+          "original": "Unnamed: 101",
+          "normalized": "unnamed_101"
+        },
+        {
+          "original": "Unnamed: 102",
+          "normalized": "unnamed_102"
+        },
+        {
+          "original": "Unnamed: 103",
+          "normalized": "unnamed_103"
+        },
+        {
+          "original": "Unnamed: 104",
+          "normalized": "unnamed_104"
+        },
+        {
+          "original": "Unnamed: 105",
+          "normalized": "unnamed_105"
+        },
+        {
+          "original": "Unnamed: 106",
+          "normalized": "unnamed_106"
+        },
+        {
+          "original": "Unnamed: 107",
+          "normalized": "unnamed_107"
+        },
+        {
+          "original": "Unnamed: 108",
+          "normalized": "unnamed_108"
+        },
+        {
+          "original": "Unnamed: 109",
+          "normalized": "unnamed_109"
+        },
+        {
+          "original": "Unnamed: 110",
+          "normalized": "unnamed_110"
+        },
+        {
+          "original": "Unnamed: 111",
+          "normalized": "unnamed_111"
+        },
+        {
+          "original": "Unnamed: 112",
+          "normalized": "unnamed_112"
+        },
+        {
+          "original": "Unnamed: 113",
+          "normalized": "unnamed_113"
+        },
+        {
+          "original": "Unnamed: 114",
+          "normalized": "unnamed_114"
+        },
+        {
+          "original": "Unnamed: 115",
+          "normalized": "unnamed_115"
+        },
+        {
+          "original": "Unnamed: 116",
+          "normalized": "unnamed_116"
+        },
+        {
+          "original": "Unnamed: 117",
+          "normalized": "unnamed_117"
+        },
+        {
+          "original": "Unnamed: 118",
+          "normalized": "unnamed_118"
+        },
+        {
+          "original": "Unnamed: 119",
+          "normalized": "unnamed_119"
+        },
+        {
+          "original": "Unnamed: 120",
+          "normalized": "unnamed_120"
+        },
+        {
+          "original": "Unnamed: 121",
+          "normalized": "unnamed_121"
+        },
+        {
+          "original": "Unnamed: 122",
+          "normalized": "unnamed_122"
+        },
+        {
+          "original": "Unnamed: 123",
+          "normalized": "unnamed_123"
+        },
+        {
+          "original": "Unnamed: 124",
+          "normalized": "unnamed_124"
+        },
+        {
+          "original": "Unnamed: 125",
+          "normalized": "unnamed_125"
+        },
+        {
+          "original": "Unnamed: 126",
+          "normalized": "unnamed_126"
+        },
+        {
+          "original": "Unnamed: 127",
+          "normalized": "unnamed_127"
+        },
+        {
+          "original": "Unnamed: 128",
+          "normalized": "unnamed_128"
+        },
+        {
+          "original": "Unnamed: 129",
+          "normalized": "unnamed_129"
+        },
+        {
+          "original": "Unnamed: 130",
+          "normalized": "unnamed_130"
+        },
+        {
+          "original": "Unnamed: 131",
+          "normalized": "unnamed_131"
+        },
+        {
+          "original": "Unnamed: 132",
+          "normalized": "unnamed_132"
+        },
+        {
+          "original": "Unnamed: 133",
+          "normalized": "unnamed_133"
+        },
+        {
+          "original": "Unnamed: 134",
+          "normalized": "unnamed_134"
+        },
+        {
+          "original": "Unnamed: 135",
+          "normalized": "unnamed_135"
+        },
+        {
+          "original": "Unnamed: 136",
+          "normalized": "unnamed_136"
+        },
+        {
+          "original": "Unnamed: 137",
+          "normalized": "unnamed_137"
+        },
+        {
+          "original": "Unnamed: 138",
+          "normalized": "unnamed_138"
+        },
+        {
+          "original": "Unnamed: 139",
+          "normalized": "unnamed_139"
+        },
+        {
+          "original": "Unnamed: 140",
+          "normalized": "unnamed_140"
+        },
+        {
+          "original": "Unnamed: 141",
+          "normalized": "unnamed_141"
+        },
+        {
+          "original": "Unnamed: 142",
+          "normalized": "unnamed_142"
+        },
+        {
+          "original": "Unnamed: 143",
+          "normalized": "unnamed_143"
+        },
+        {
+          "original": "Unnamed: 144",
+          "normalized": "unnamed_144"
+        },
+        {
+          "original": "Unnamed: 145",
+          "normalized": "unnamed_145"
+        },
+        {
+          "original": "Unnamed: 146",
+          "normalized": "unnamed_146"
+        },
+        {
+          "original": "Unnamed: 147",
+          "normalized": "unnamed_147"
+        },
+        {
+          "original": "Unnamed: 148",
+          "normalized": "unnamed_148"
+        },
+        {
+          "original": "Unnamed: 149",
+          "normalized": "unnamed_149"
+        },
+        {
+          "original": "Unnamed: 150",
+          "normalized": "unnamed_150"
+        },
+        {
+          "original": "Unnamed: 151",
+          "normalized": "unnamed_151"
+        },
+        {
+          "original": "Unnamed: 152",
+          "normalized": "unnamed_152"
+        },
+        {
+          "original": "Unnamed: 153",
+          "normalized": "unnamed_153"
+        },
+        {
+          "original": "Unnamed: 154",
+          "normalized": "unnamed_154"
+        },
+        {
+          "original": "Unnamed: 155",
+          "normalized": "unnamed_155"
+        },
+        {
+          "original": "Unnamed: 156",
+          "normalized": "unnamed_156"
+        },
+        {
+          "original": "Unnamed: 157",
+          "normalized": "unnamed_157"
+        },
+        {
+          "original": "Unnamed: 158",
+          "normalized": "unnamed_158"
+        },
+        {
+          "original": "Unnamed: 159",
+          "normalized": "unnamed_159"
+        },
+        {
+          "original": "Unnamed: 160",
+          "normalized": "unnamed_160"
+        },
+        {
+          "original": "Unnamed: 161",
+          "normalized": "unnamed_161"
+        },
+        {
+          "original": "Unnamed: 162",
+          "normalized": "unnamed_162"
+        },
+        {
+          "original": "Unnamed: 163",
+          "normalized": "unnamed_163"
+        },
+        {
+          "original": "Unnamed: 164",
+          "normalized": "unnamed_164"
+        }
+      ],
+      "numeric_coerced": [
+        "unnamed_109"
+      ],
+      "period_columns": [],
+      "na_replaced": 0,
+      "final_shape": [
+        373,
+        165
+      ],
+      "sheet_name": "TB"
+    },
+    "dataset_id": "stress_test_client:innovist_mis_july_2025:tb",
+    "client_id": "stress_test_client",
+    "rows": 373,
+    "columns": [
+      "onesto_labs_private_limited",
+      "unnamed_1",
+      "unnamed_2",
+      "unnamed_3",
+      "unnamed_4",
+      "unnamed_5",
+      "unnamed_6",
+      "unnamed_7",
+      "unnamed_8",
+      "unnamed_9",
+      "unnamed_10",
+      "unnamed_11",
+      "unnamed_12",
+      "unnamed_13",
+      "unnamed_14",
+      "unnamed_15",
+      "unnamed_16",
+      "unnamed_17",
+      "unnamed_18",
+      "unnamed_19",
+      "unnamed_20",
+      "unnamed_21",
+      "unnamed_22",
+      "unnamed_23",
+      "unnamed_24",
+      "unnamed_25",
+      "unnamed_26",
+      "unnamed_27",
+      "unnamed_28",
+      "unnamed_29",
+      "unnamed_30",
+      "unnamed_31",
+      "unnamed_32",
+      "unnamed_33",
+      "unnamed_34",
+      "unnamed_35",
+      "unnamed_36",
+      "unnamed_37",
+      "unnamed_38",
+      "unnamed_39",
+      "unnamed_40",
+      "unnamed_41",
+      "unnamed_42",
+      "unnamed_43",
+      "unnamed_44",
+      "unnamed_45",
+      "unnamed_46",
+      "unnamed_47",
+      "unnamed_48",
+      "unnamed_49",
+      "unnamed_50",
+      "unnamed_51",
+      "unnamed_52",
+      "unnamed_53",
+      "unnamed_54",
+      "unnamed_55",
+      "unnamed_56",
+      "unnamed_57",
+      "unnamed_58",
+      "unnamed_59",
+      "unnamed_60",
+      "unnamed_61",
+      "unnamed_62",
+      "unnamed_63",
+      "unnamed_64",
+      "unnamed_65",
+      "unnamed_66",
+      "unnamed_67",
+      "unnamed_68",
+      "unnamed_69",
+      "unnamed_70",
+      "unnamed_71",
+      "unnamed_72",
+      "unnamed_73",
+      "unnamed_74",
+      "unnamed_75",
+      "unnamed_76",
+      "unnamed_77",
+      "unnamed_78",
+      "unnamed_79",
+      "unnamed_80",
+      "unnamed_81",
+      "unnamed_82",
+      "unnamed_83",
+      "unnamed_84",
+      "unnamed_85",
+      "unnamed_86",
+      "unnamed_87",
+      "unnamed_88",
+      "unnamed_89",
+      "unnamed_90",
+      "unnamed_91",
+      "unnamed_92",
+      "unnamed_93",
+      "unnamed_94",
+      "unnamed_95",
+      "unnamed_96",
+      "unnamed_97",
+      "unnamed_98",
+      "unnamed_99",
+      "unnamed_100",
+      "unnamed_101",
+      "unnamed_102",
+      "unnamed_103",
+      "unnamed_104",
+      "unnamed_105",
+      "unnamed_106",
+      "unnamed_107",
+      "unnamed_108",
+      "unnamed_109",
+      "unnamed_110",
+      "unnamed_111",
+      "unnamed_112",
+      "unnamed_113",
+      "unnamed_114",
+      "unnamed_115",
+      "unnamed_116",
+      "unnamed_117",
+      "unnamed_118",
+      "unnamed_119",
+      "unnamed_120",
+      "unnamed_121",
+      "unnamed_122",
+      "unnamed_123",
+      "unnamed_124",
+      "unnamed_125",
+      "unnamed_126",
+      "unnamed_127",
+      "unnamed_128",
+      "unnamed_129",
+      "unnamed_130",
+      "unnamed_131",
+      "unnamed_132",
+      "unnamed_133",
+      "unnamed_134",
+      "unnamed_135",
+      "unnamed_136",
+      "unnamed_137",
+      "unnamed_138",
+      "unnamed_139",
+      "unnamed_140",
+      "unnamed_141",
+      "unnamed_142",
+      "unnamed_143",
+      "unnamed_144",
+      "unnamed_145",
+      "unnamed_146",
+      "unnamed_147",
+      "unnamed_148",
+      "unnamed_149",
+      "unnamed_150",
+      "unnamed_151",
+      "unnamed_152",
+      "unnamed_153",
+      "unnamed_154",
+      "unnamed_155",
+      "unnamed_156",
+      "unnamed_157",
+      "unnamed_158",
+      "unnamed_159",
+      "unnamed_160",
+      "unnamed_161",
+      "unnamed_162",
+      "unnamed_163",
+      "unnamed_164"
+    ],
+    "dtypes": {
+      "onesto_labs_private_limited": "object",
+      "unnamed_1": "object",
+      "unnamed_2": "object",
+      "unnamed_3": "object",
+      "unnamed_4": "object",
+      "unnamed_5": "object",
+      "unnamed_6": "object",
+      "unnamed_7": "object",
+      "unnamed_8": "object",
+      "unnamed_9": "object",
+      "unnamed_10": "object",
+      "unnamed_11": "object",
+      "unnamed_12": "object",
+      "unnamed_13": "object",
+      "unnamed_14": "object",
+      "unnamed_15": "object",
+      "unnamed_16": "object",
+      "unnamed_17": "object",
+      "unnamed_18": "object",
+      "unnamed_19": "object",
+      "unnamed_20": "object",
+      "unnamed_21": "object",
+      "unnamed_22": "object",
+      "unnamed_23": "object",
+      "unnamed_24": "object",
+      "unnamed_25": "object",
+      "unnamed_26": "object",
+      "unnamed_27": "object",
+      "unnamed_28": "object",
+      "unnamed_29": "object",
+      "unnamed_30": "object",
+      "unnamed_31": "object",
+      "unnamed_32": "object",
+      "unnamed_33": "object",
+      "unnamed_34": "object",
+      "unnamed_35": "object",
+      "unnamed_36": "object",
+      "unnamed_37": "object",
+      "unnamed_38": "object",
+      "unnamed_39": "object",
+      "unnamed_40": "object",
+      "unnamed_41": "object",
+      "unnamed_42": "object",
+      "unnamed_43": "object",
+      "unnamed_44": "object",
+      "unnamed_45": "object",
+      "unnamed_46": "object",
+      "unnamed_47": "object",
+      "unnamed_48": "object",
+      "unnamed_49": "object",
+      "unnamed_50": "object",
+      "unnamed_51": "object",
+      "unnamed_52": "object",
+      "unnamed_53": "object",
+      "unnamed_54": "object",
+      "unnamed_55": "object",
+      "unnamed_56": "object",
+      "unnamed_57": "object",
+      "unnamed_58": "object",
+      "unnamed_59": "object",
+      "unnamed_60": "object",
+      "unnamed_61": "object",
+      "unnamed_62": "object",
+      "unnamed_63": "object",
+      "unnamed_64": "object",
+      "unnamed_65": "object",
+      "unnamed_66": "object",
+      "unnamed_67": "object",
+      "unnamed_68": "object",
+      "unnamed_69": "object",
+      "unnamed_70": "object",
+      "unnamed_71": "object",
+      "unnamed_72": "object",
+      "unnamed_73": "object",
+      "unnamed_74": "object",
+      "unnamed_75": "object",
+      "unnamed_76": "object",
+      "unnamed_77": "object",
+      "unnamed_78": "object",
+      "unnamed_79": "object",
+      "unnamed_80": "object",
+      "unnamed_81": "object",
+      "unnamed_82": "object",
+      "unnamed_83": "object",
+      "unnamed_84": "object",
+      "unnamed_85": "object",
+      "unnamed_86": "object",
+      "unnamed_87": "object",
+      "unnamed_88": "object",
+      "unnamed_89": "object",
+      "unnamed_90": "object",
+      "unnamed_91": "object",
+      "unnamed_92": "object",
+      "unnamed_93": "object",
+      "unnamed_94": "object",
+      "unnamed_95": "object",
+      "unnamed_96": "object",
+      "unnamed_97": "object",
+      "unnamed_98": "object",
+      "unnamed_99": "object",
+      "unnamed_100": "object",
+      "unnamed_101": "object",
+      "unnamed_102": "object",
+      "unnamed_103": "object",
+      "unnamed_104": "object",
+      "unnamed_105": "object",
+      "unnamed_106": "object",
+      "unnamed_107": "object",
+      "unnamed_108": "object",
+      "unnamed_109": "float64",
+      "unnamed_110": "object",
+      "unnamed_111": "object",
+      "unnamed_112": "object",
+      "unnamed_113": "object",
+      "unnamed_114": "object",
+      "unnamed_115": "object",
+      "unnamed_116": "object",
+      "unnamed_117": "object",
+      "unnamed_118": "object",
+      "unnamed_119": "object",
+      "unnamed_120": "object",
+      "unnamed_121": "object",
+      "unnamed_122": "object",
+      "unnamed_123": "object",
+      "unnamed_124": "object",
+      "unnamed_125": "object",
+      "unnamed_126": "object",
+      "unnamed_127": "object",
+      "unnamed_128": "object",
+      "unnamed_129": "object",
+      "unnamed_130": "object",
+      "unnamed_131": "object",
+      "unnamed_132": "object",
+      "unnamed_133": "object",
+      "unnamed_134": "object",
+      "unnamed_135": "object",
+      "unnamed_136": "object",
+      "unnamed_137": "object",
+      "unnamed_138": "object",
+      "unnamed_139": "object",
+      "unnamed_140": "object",
+      "unnamed_141": "object",
+      "unnamed_142": "object",
+      "unnamed_143": "object",
+      "unnamed_144": "object",
+      "unnamed_145": "object",
+      "unnamed_146": "object",
+      "unnamed_147": "object",
+      "unnamed_148": "object",
+      "unnamed_149": "object",
+      "unnamed_150": "object",
+      "unnamed_151": "object",
+      "unnamed_152": "object",
+      "unnamed_153": "object",
+      "unnamed_154": "object",
+      "unnamed_155": "object",
+      "unnamed_156": "object",
+      "unnamed_157": "object",
+      "unnamed_158": "object",
+      "unnamed_159": "object",
+      "unnamed_160": "object",
+      "unnamed_161": "object",
+      "unnamed_162": "object",
+      "unnamed_163": "object",
+      "unnamed_164": "object"
+    },
+    "registered_at": "2025-12-19T18:39:41.573675",
+    "parquet_path": "D:\\Projects2.0\\Valuenaire\\Re\\data\\dataframe_cache\\stress_test_client_innovist_mis_july_2025_tb.parquet"
+  },
+  "stress_test_client:innovist_mis_july_2025:classification": {
+    "preprocessing": {
+      "original_shape": [
+        371,
+        59
+      ],
+      "columns_normalized": [
+        {
+          "original": "Unnamed: 0",
+          "normalized": "unnamed_0"
+        },
+        {
+          "original": "Unnamed: 1",
+          "normalized": "unnamed_1"
+        },
+        {
+          "original": "Unnamed: 2",
+          "normalized": "unnamed_2"
+        },
+        {
+          "original": "Unnamed: 3",
+          "normalized": "unnamed_3"
+        },
+        {
+          "original": "Unnamed: 4",
+          "normalized": "unnamed_4"
+        },
+        {
+          "original": "Unnamed: 5",
+          "normalized": "unnamed_5"
+        },
+        {
+          "original": "Unnamed: 6",
+          "normalized": "unnamed_6"
+        },
+        {
+          "original": "Unnamed: 7",
+          "normalized": "unnamed_7"
+        },
+        {
+          "original": "Unnamed: 8",
+          "normalized": "unnamed_8"
+        },
+        {
+          "original": "Unnamed: 9",
+          "normalized": "unnamed_9"
+        },
+        {
+          "original": "Unnamed: 10",
+          "normalized": "unnamed_10"
+        },
+        {
+          "original": "Unnamed: 11",
+          "normalized": "unnamed_11"
+        },
+        {
+          "original": "Unnamed: 12",
+          "normalized": "unnamed_12"
+        },
+        {
+          "original": "Unnamed: 13",
+          "normalized": "unnamed_13"
+        },
+        {
+          "original": "Unnamed: 14",
+          "normalized": "unnamed_14"
+        },
+        {
+          "original": "Unnamed: 15",
+          "normalized": "unnamed_15"
+        },
+        {
+          "original": "Unnamed: 16",
+          "normalized": "unnamed_16"
+        },
+        {
+          "original": "Unnamed: 17",
+          "normalized": "unnamed_17"
+        },
+        {
+          "original": "Unnamed: 18",
+          "normalized": "unnamed_18"
+        },
+        {
+          "original": "Unnamed: 19",
+          "normalized": "unnamed_19"
+        },
+        {
+          "original": "Unnamed: 20",
+          "normalized": "unnamed_20"
+        },
+        {
+          "original": "Unnamed: 21",
+          "normalized": "unnamed_21"
+        },
+        {
+          "original": "Unnamed: 22",
+          "normalized": "unnamed_22"
+        },
+        {
+          "original": "Unnamed: 23",
+          "normalized": "unnamed_23"
+        },
+        {
+          "original": "Unnamed: 24",
+          "normalized": "unnamed_24"
+        },
+        {
+          "original": "Unnamed: 25",
+          "normalized": "unnamed_25"
+        },
+        {
+          "original": "Unnamed: 26",
+          "normalized": "unnamed_26"
+        },
+        {
+          "original": "Unnamed: 27",
+          "normalized": "unnamed_27"
+        },
+        {
+          "original": "Unnamed: 28",
+          "normalized": "unnamed_28"
+        },
+        {
+          "original": "Unnamed: 29",
+          "normalized": "unnamed_29"
+        },
+        {
+          "original": "Unnamed: 30",
+          "normalized": "unnamed_30"
+        },
+        {
+          "original": "Unnamed: 31",
+          "normalized": "unnamed_31"
+        },
+        {
+          "original": "Unnamed: 32",
+          "normalized": "unnamed_32"
+        },
+        {
+          "original": "Unnamed: 33",
+          "normalized": "unnamed_33"
+        },
+        {
+          "original": "Unnamed: 34",
+          "normalized": "unnamed_34"
+        },
+        {
+          "original": "Unnamed: 35",
+          "normalized": "unnamed_35"
+        },
+        {
+          "original": "Unnamed: 36",
+          "normalized": "unnamed_36"
+        },
+        {
+          "original": "Unnamed: 37",
+          "normalized": "unnamed_37"
+        },
+        {
+          "original": "Unnamed: 38",
+          "normalized": "unnamed_38"
+        },
+        {
+          "original": "Unnamed: 39",
+          "normalized": "unnamed_39"
+        },
+        {
+          "original": "Unnamed: 40",
+          "normalized": "unnamed_40"
+        },
+        {
+          "original": "Unnamed: 41",
+          "normalized": "unnamed_41"
+        },
+        {
+          "original": "Unnamed: 42",
+          "normalized": "unnamed_42"
+        },
+        {
+          "original": "Unnamed: 43",
+          "normalized": "unnamed_43"
+        },
+        {
+          "original": "Unnamed: 44",
+          "normalized": "unnamed_44"
+        },
+        {
+          "original": "Unnamed: 45",
+          "normalized": "unnamed_45"
+        },
+        {
+          "original": "Unnamed: 46",
+          "normalized": "unnamed_46"
+        },
+        {
+          "original": "Unnamed: 47",
+          "normalized": "unnamed_47"
+        },
+        {
+          "original": "Unnamed: 48",
+          "normalized": "unnamed_48"
+        },
+        {
+          "original": "Unnamed: 49",
+          "normalized": "unnamed_49"
+        },
+        {
+          "original": "Unnamed: 50",
+          "normalized": "unnamed_50"
+        },
+        {
+          "original": "Unnamed: 51",
+          "normalized": "unnamed_51"
+        },
+        {
+          "original": "Unnamed: 52",
+          "normalized": "unnamed_52"
+        },
+        {
+          "original": "Unnamed: 53",
+          "normalized": "unnamed_53"
+        },
+        {
+          "original": "Unnamed: 54",
+          "normalized": "unnamed_54"
+        },
+        {
+          "original": "Unnamed: 55",
+          "normalized": "unnamed_55"
+        },
+        {
+          "original": "Unnamed: 56",
+          "normalized": "unnamed_56"
+        },
+        {
+          "original": "Unnamed: 57",
+          "normalized": "unnamed_57"
+        },
+        {
+          "original": "Unnamed: 58",
+          "normalized": "unnamed_58"
+        }
+      ],
+      "numeric_coerced": [],
+      "period_columns": [],
+      "na_replaced": 0,
+      "final_shape": [
+        369,
+        59
+      ],
+      "sheet_name": "Classification"
+    },
+    "dataset_id": "stress_test_client:innovist_mis_july_2025:classification",
+    "client_id": "stress_test_client",
+    "rows": 369,
+    "columns": [
+      "unnamed_0",
+      "unnamed_1",
+      "unnamed_2",
+      "unnamed_3",
+      "unnamed_4",
+      "unnamed_5",
+      "unnamed_6",
+      "unnamed_7",
+      "unnamed_8",
+      "unnamed_9",
+      "unnamed_10",
+      "unnamed_11",
+      "unnamed_12",
+      "unnamed_13",
+      "unnamed_14",
+      "unnamed_15",
+      "unnamed_16",
+      "unnamed_17",
+      "unnamed_18",
+      "unnamed_19",
+      "unnamed_20",
+      "unnamed_21",
+      "unnamed_22",
+      "unnamed_23",
+      "unnamed_24",
+      "unnamed_25",
+      "unnamed_26",
+      "unnamed_27",
+      "unnamed_28",
+      "unnamed_29",
+      "unnamed_30",
+      "unnamed_31",
+      "unnamed_32",
+      "unnamed_33",
+      "unnamed_34",
+      "unnamed_35",
+      "unnamed_36",
+      "unnamed_37",
+      "unnamed_38",
+      "unnamed_39",
+      "unnamed_40",
+      "unnamed_41",
+      "unnamed_42",
+      "unnamed_43",
+      "unnamed_44",
+      "unnamed_45",
+      "unnamed_46",
+      "unnamed_47",
+      "unnamed_48",
+      "unnamed_49",
+      "unnamed_50",
+      "unnamed_51",
+      "unnamed_52",
+      "unnamed_53",
+      "unnamed_54",
+      "unnamed_55",
+      "unnamed_56",
+      "unnamed_57",
+      "unnamed_58"
+    ],
+    "dtypes": {
+      "unnamed_0": "object",
+      "unnamed_1": "object",
+      "unnamed_2": "object",
+      "unnamed_3": "object",
+      "unnamed_4": "object",
+      "unnamed_5": "object",
+      "unnamed_6": "object",
+      "unnamed_7": "object",
+      "unnamed_8": "object",
+      "unnamed_9": "object",
+      "unnamed_10": "object",
+      "unnamed_11": "object",
+      "unnamed_12": "object",
+      "unnamed_13": "object",
+      "unnamed_14": "object",
+      "unnamed_15": "object",
+      "unnamed_16": "object",
+      "unnamed_17": "object",
+      "unnamed_18": "object",
+      "unnamed_19": "object",
+      "unnamed_20": "object",
+      "unnamed_21": "object",
+      "unnamed_22": "object",
+      "unnamed_23": "object",
+      "unnamed_24": "object",
+      "unnamed_25": "object",
+      "unnamed_26": "object",
+      "unnamed_27": "object",
+      "unnamed_28": "object",
+      "unnamed_29": "object",
+      "unnamed_30": "object",
+      "unnamed_31": "object",
+      "unnamed_32": "object",
+      "unnamed_33": "object",
+      "unnamed_34": "object",
+      "unnamed_35": "object",
+      "unnamed_36": "object",
+      "unnamed_37": "object",
+      "unnamed_38": "object",
+      "unnamed_39": "object",
+      "unnamed_40": "object",
+      "unnamed_41": "object",
+      "unnamed_42": "object",
+      "unnamed_43": "object",
+      "unnamed_44": "object",
+      "unnamed_45": "object",
+      "unnamed_46": "object",
+      "unnamed_47": "object",
+      "unnamed_48": "object",
+      "unnamed_49": "object",
+      "unnamed_50": "object",
+      "unnamed_51": "object",
+      "unnamed_52": "object",
+      "unnamed_53": "object",
+      "unnamed_54": "object",
+      "unnamed_55": "object",
+      "unnamed_56": "object",
+      "unnamed_57": "object",
+      "unnamed_58": "object"
+    },
+    "registered_at": "2025-12-19T18:39:42.208295",
+    "parquet_path": "D:\\Projects2.0\\Valuenaire\\Re\\data\\dataframe_cache\\stress_test_client_innovist_mis_july_2025_classification.parquet"
+  },
+  "stress_test_client:innovist_mis_july_2025:pl_consolidated": {
+    "preprocessing": {
+      "original_shape": [
+        77,
+        57
+      ],
+      "columns_normalized": [
+        {
+          "original": "Onesto Labs Pvt Ltd",
+          "normalized": "onesto_labs_pvt_ltd"
+        },
+        {
+          "original": "Unnamed: 1",
+          "normalized": "unnamed_1"
+        },
+        {
+          "original": "Unnamed: 2",
+          "normalized": "unnamed_2"
+        },
+        {
+          "original": "Unnamed: 3",
+          "normalized": "unnamed_3"
+        },
+        {
+          "original": "Unnamed: 4",
+          "normalized": "unnamed_4"
+        },
+        {
+          "original": "Unnamed: 5",
+          "normalized": "unnamed_5"
+        },
+        {
+          "original": "Unnamed: 6",
+          "normalized": "unnamed_6"
+        },
+        {
+          "original": "Unnamed: 7",
+          "normalized": "unnamed_7"
+        },
+        {
+          "original": "Unnamed: 8",
+          "normalized": "unnamed_8"
+        },
+        {
+          "original": "Unnamed: 9",
+          "normalized": "unnamed_9"
+        },
+        {
+          "original": "Unnamed: 10",
+          "normalized": "unnamed_10"
+        },
+        {
+          "original": "Unnamed: 11",
+          "normalized": "unnamed_11"
+        },
+        {
+          "original": "Unnamed: 12",
+          "normalized": "unnamed_12"
+        },
+        {
+          "original": "Unnamed: 13",
+          "normalized": "unnamed_13"
+        },
+        {
+          "original": "Unnamed: 14",
+          "normalized": "unnamed_14"
+        },
+        {
+          "original": "Unnamed: 15",
+          "normalized": "unnamed_15"
+        },
+        {
+          "original": "Unnamed: 16",
+          "normalized": "unnamed_16"
+        },
+        {
+          "original": "Unnamed: 17",
+          "normalized": "unnamed_17"
+        },
+        {
+          "original": "Unnamed: 18",
+          "normalized": "unnamed_18"
+        },
+        {
+          "original": "Unnamed: 19",
+          "normalized": "unnamed_19"
+        },
+        {
+          "original": "Unnamed: 20",
+          "normalized": "unnamed_20"
+        },
+        {
+          "original": "Unnamed: 21",
+          "normalized": "unnamed_21"
+        },
+        {
+          "original": "Unnamed: 22",
+          "normalized": "unnamed_22"
+        },
+        {
+          "original": "Unnamed: 23",
+          "normalized": "unnamed_23"
+        },
+        {
+          "original": "Unnamed: 24",
+          "normalized": "unnamed_24"
+        },
+        {
+          "original": "Unnamed: 25",
+          "normalized": "unnamed_25"
+        },
+        {
+          "original": "Unnamed: 26",
+          "normalized": "unnamed_26"
+        },
+        {
+          "original": "Unnamed: 27",
+          "normalized": "unnamed_27"
+        },
+        {
+          "original": "Unnamed: 28",
+          "normalized": "unnamed_28"
+        },
+        {
+          "original": "Unnamed: 29",
+          "normalized": "unnamed_29"
+        },
+        {
+          "original": "Unnamed: 30",
+          "normalized": "unnamed_30"
+        },
+        {
+          "original": "Unnamed: 31",
+          "normalized": "unnamed_31"
+        },
+        {
+          "original": "Unnamed: 32",
+          "normalized": "unnamed_32"
+        },
+        {
+          "original": "Unnamed: 33",
+          "normalized": "unnamed_33"
+        },
+        {
+          "original": "Unnamed: 34",
+          "normalized": "unnamed_34"
+        },
+        {
+          "original": "Unnamed: 35",
+          "normalized": "unnamed_35"
+        },
+        {
+          "original": "Unnamed: 36",
+          "normalized": "unnamed_36"
+        },
+        {
+          "original": "Unnamed: 37",
+          "normalized": "unnamed_37"
+        },
+        {
+          "original": "Unnamed: 38",
+          "normalized": "unnamed_38"
+        },
+        {
+          "original": "Unnamed: 39",
+          "normalized": "unnamed_39"
+        },
+        {
+          "original": "Unnamed: 40",
+          "normalized": "unnamed_40"
+        },
+        {
+          "original": "Unnamed: 41",
+          "normalized": "unnamed_41"
+        },
+        {
+          "original": "Unnamed: 42",
+          "normalized": "unnamed_42"
+        },
+        {
+          "original": "Unnamed: 43",
+          "normalized": "unnamed_43"
+        },
+        {
+          "original": "Unnamed: 44",
+          "normalized": "unnamed_44"
+        },
+        {
+          "original": "Unnamed: 45",
+          "normalized": "unnamed_45"
+        },
+        {
+          "original": "Unnamed: 46",
+          "normalized": "unnamed_46"
+        },
+        {
+          "original": "Unnamed: 47",
+          "normalized": "unnamed_47"
+        },
+        {
+          "original": "Unnamed: 48",
+          "normalized": "unnamed_48"
+        },
+        {
+          "original": "Unnamed: 49",
+          "normalized": "unnamed_49"
+        },
+        {
+          "original": "Unnamed: 50",
+          "normalized": "unnamed_50"
+        },
+        {
+          "original": "Unnamed: 51",
+          "normalized": "unnamed_51"
+        },
+        {
+          "original": "Unnamed: 52",
+          "normalized": "unnamed_52"
+        },
+        {
+          "original": "Unnamed: 53",
+          "normalized": "unnamed_53"
+        },
+        {
+          "original": "Unnamed: 54",
+          "normalized": "unnamed_54"
+        },
+        {
+          "original": "Unnamed: 55",
+          "normalized": "unnamed_55"
+        },
+        {
+          "original": "Unnamed: 56",
+          "normalized": "unnamed_56"
+        }
+      ],
+      "numeric_coerced": [],
+      "period_columns": [],
+      "na_replaced": 0,
+      "final_shape": [
+        74,
+        57
+      ],
+      "sheet_name": "PL-Consolidated"
+    },
+    "dataset_id": "stress_test_client:innovist_mis_july_2025:pl_consolidated",
+    "client_id": "stress_test_client",
+    "rows": 74,
+    "columns": [
+      "onesto_labs_pvt_ltd",
+      "unnamed_1",
+      "unnamed_2",
+      "unnamed_3",
+      "unnamed_4",
+      "unnamed_5",
+      "unnamed_6",
+      "unnamed_7",
+      "unnamed_8",
+      "unnamed_9",
+      "unnamed_10",
+      "unnamed_11",
+      "unnamed_12",
+      "unnamed_13",
+      "unnamed_14",
+      "unnamed_15",
+      "unnamed_16",
+      "unnamed_17",
+      "unnamed_18",
+      "unnamed_19",
+      "unnamed_20",
+      "unnamed_21",
+      "unnamed_22",
+      "unnamed_23",
+      "unnamed_24",
+      "unnamed_25",
+      "unnamed_26",
+      "unnamed_27",
+      "unnamed_28",
+      "unnamed_29",
+      "unnamed_30",
+      "unnamed_31",
+      "unnamed_32",
+      "unnamed_33",
+      "unnamed_34",
+      "unnamed_35",
+      "unnamed_36",
+      "unnamed_37",
+      "unnamed_38",
+      "unnamed_39",
+      "unnamed_40",
+      "unnamed_41",
+      "unnamed_42",
+      "unnamed_43",
+      "unnamed_44",
+      "unnamed_45",
+      "unnamed_46",
+      "unnamed_47",
+      "unnamed_48",
+      "unnamed_49",
+      "unnamed_50",
+      "unnamed_51",
+      "unnamed_52",
+      "unnamed_53",
+      "unnamed_54",
+      "unnamed_55",
+      "unnamed_56"
+    ],
+    "dtypes": {
+      "onesto_labs_pvt_ltd": "object",
+      "unnamed_1": "object",
+      "unnamed_2": "object",
+      "unnamed_3": "object",
+      "unnamed_4": "object",
+      "unnamed_5": "object",
+      "unnamed_6": "object",
+      "unnamed_7": "object",
+      "unnamed_8": "object",
+      "unnamed_9": "object",
+      "unnamed_10": "object",
+      "unnamed_11": "object",
+      "unnamed_12": "object",
+      "unnamed_13": "object",
+      "unnamed_14": "object",
+      "unnamed_15": "object",
+      "unnamed_16": "object",
+      "unnamed_17": "object",
+      "unnamed_18": "object",
+      "unnamed_19": "object",
+      "unnamed_20": "object",
+      "unnamed_21": "object",
+      "unnamed_22": "object",
+      "unnamed_23": "object",
+      "unnamed_24": "object",
+      "unnamed_25": "object",
+      "unnamed_26": "object",
+      "unnamed_27": "object",
+      "unnamed_28": "object",
+      "unnamed_29": "object",
+      "unnamed_30": "object",
+      "unnamed_31": "object",
+      "unnamed_32": "object",
+      "unnamed_33": "object",
+      "unnamed_34": "object",
+      "unnamed_35": "object",
+      "unnamed_36": "object",
+      "unnamed_37": "object",
+      "unnamed_38": "object",
+      "unnamed_39": "object",
+      "unnamed_40": "object",
+      "unnamed_41": "object",
+      "unnamed_42": "object",
+      "unnamed_43": "object",
+      "unnamed_44": "object",
+      "unnamed_45": "object",
+      "unnamed_46": "object",
+      "unnamed_47": "object",
+      "unnamed_48": "object",
+      "unnamed_49": "object",
+      "unnamed_50": "object",
+      "unnamed_51": "object",
+      "unnamed_52": "object",
+      "unnamed_53": "object",
+      "unnamed_54": "object",
+      "unnamed_55": "object",
+      "unnamed_56": "object"
+    },
+    "registered_at": "2025-12-19T18:39:42.494655",
+    "parquet_path": "D:\\Projects2.0\\Valuenaire\\Re\\data\\dataframe_cache\\stress_test_client_innovist_mis_july_2025_pl_consolidated.parquet"
+  },
+  "stress_test_client:innovist_mis_july_2025:bs": {
+    "preprocessing": {
+      "original_shape": [
+        30,
+        55
+      ],
+      "columns_normalized": [
+        {
+          "original": "Onesto Labs Pvt Ltd",
+          "normalized": "onesto_labs_pvt_ltd"
+        },
+        {
+          "original": "Unnamed: 1",
+          "normalized": "unnamed_1"
+        },
+        {
+          "original": "Unnamed: 2",
+          "normalized": "unnamed_2"
+        },
+        {
+          "original": "Unnamed: 3",
+          "normalized": "unnamed_3"
+        },
+        {
+          "original": "Unnamed: 4",
+          "normalized": "unnamed_4"
+        },
+        {
+          "original": "Unnamed: 5",
+          "normalized": "unnamed_5"
+        },
+        {
+          "original": "Unnamed: 6",
+          "normalized": "unnamed_6"
+        },
+        {
+          "original": "Unnamed: 7",
+          "normalized": "unnamed_7"
+        },
+        {
+          "original": "Unnamed: 8",
+          "normalized": "unnamed_8"
+        },
+        {
+          "original": "Unnamed: 9",
+          "normalized": "unnamed_9"
+        },
+        {
+          "original": "Unnamed: 10",
+          "normalized": "unnamed_10"
+        },
+        {
+          "original": "Unnamed: 11",
+          "normalized": "unnamed_11"
+        },
+        {
+          "original": "Unnamed: 12",
+          "normalized": "unnamed_12"
+        },
+        {
+          "original": "Unnamed: 13",
+          "normalized": "unnamed_13"
+        },
+        {
+          "original": "Unnamed: 14",
+          "normalized": "unnamed_14"
+        },
+        {
+          "original": "Unnamed: 15",
+          "normalized": "unnamed_15"
+        },
+        {
+          "original": "Unnamed: 16",
+          "normalized": "unnamed_16"
+        },
+        {
+          "original": "Unnamed: 17",
+          "normalized": "unnamed_17"
+        },
+        {
+          "original": "Unnamed: 18",
+          "normalized": "unnamed_18"
+        },
+        {
+          "original": "Unnamed: 19",
+          "normalized": "unnamed_19"
+        },
+        {
+          "original": "Unnamed: 20",
+          "normalized": "unnamed_20"
+        },
+        {
+          "original": "Unnamed: 21",
+          "normalized": "unnamed_21"
+        },
+        {
+          "original": "Unnamed: 22",
+          "normalized": "unnamed_22"
+        },
+        {
+          "original": "Unnamed: 23",
+          "normalized": "unnamed_23"
+        },
+        {
+          "original": "Unnamed: 24",
+          "normalized": "unnamed_24"
+        },
+        {
+          "original": "Unnamed: 25",
+          "normalized": "unnamed_25"
+        },
+        {
+          "original": "Unnamed: 26",
+          "normalized": "unnamed_26"
+        },
+        {
+          "original": "Unnamed: 27",
+          "normalized": "unnamed_27"
+        },
+        {
+          "original": "Unnamed: 28",
+          "normalized": "unnamed_28"
+        },
+        {
+          "original": "Unnamed: 29",
+          "normalized": "unnamed_29"
+        },
+        {
+          "original": "Unnamed: 30",
+          "normalized": "unnamed_30"
+        },
+        {
+          "original": "Unnamed: 31",
+          "normalized": "unnamed_31"
+        },
+        {
+          "original": "Unnamed: 32",
+          "normalized": "unnamed_32"
+        },
+        {
+          "original": "Unnamed: 33",
+          "normalized": "unnamed_33"
+        },
+        {
+          "original": "Unnamed: 34",
+          "normalized": "unnamed_34"
+        },
+        {
+          "original": "Unnamed: 35",
+          "normalized": "unnamed_35"
+        },
+        {
+          "original": "Unnamed: 36",
+          "normalized": "unnamed_36"
+        },
+        {
+          "original": "Unnamed: 37",
+          "normalized": "unnamed_37"
+        },
+        {
+          "original": "Unnamed: 38",
+          "normalized": "unnamed_38"
+        },
+        {
+          "original": "Unnamed: 39",
+          "normalized": "unnamed_39"
+        },
+        {
+          "original": "Unnamed: 40",
+          "normalized": "unnamed_40"
+        },
+        {
+          "original": "Unnamed: 41",
+          "normalized": "unnamed_41"
+        },
+        {
+          "original": "Unnamed: 42",
+          "normalized": "unnamed_42"
+        },
+        {
+          "original": "Unnamed: 43",
+          "normalized": "unnamed_43"
+        },
+        {
+          "original": "Unnamed: 44",
+          "normalized": "unnamed_44"
+        },
+        {
+          "original": "Unnamed: 45",
+          "normalized": "unnamed_45"
+        },
+        {
+          "original": "Unnamed: 46",
+          "normalized": "unnamed_46"
+        },
+        {
+          "original": "Unnamed: 47",
+          "normalized": "unnamed_47"
+        },
+        {
+          "original": "Unnamed: 48",
+          "normalized": "unnamed_48"
+        },
+        {
+          "original": "Unnamed: 49",
+          "normalized": "unnamed_49"
+        },
+        {
+          "original": "Unnamed: 50",
+          "normalized": "unnamed_50"
+        },
+        {
+          "original": "Unnamed: 51",
+          "normalized": "unnamed_51"
+        },
+        {
+          "original": "Unnamed: 52",
+          "normalized": "unnamed_52"
+        },
+        {
+          "original": "Unnamed: 53",
+          "normalized": "unnamed_53"
+        },
+        {
+          "original": "Unnamed: 54",
+          "normalized": "unnamed_54"
+        }
+      ],
+      "numeric_coerced": [],
+      "period_columns": [],
+      "na_replaced": 0,
+      "final_shape": [
+        27,
+        55
+      ],
+      "sheet_name": "BS"
+    },
+    "dataset_id": "stress_test_client:innovist_mis_july_2025:bs",
+    "client_id": "stress_test_client",
+    "rows": 27,
+    "columns": [
+      "onesto_labs_pvt_ltd",
+      "unnamed_1",
+      "unnamed_2",
+      "unnamed_3",
+      "unnamed_4",
+      "unnamed_5",
+      "unnamed_6",
+      "unnamed_7",
+      "unnamed_8",
+      "unnamed_9",
+      "unnamed_10",
+      "unnamed_11",
+      "unnamed_12",
+      "unnamed_13",
+      "unnamed_14",
+      "unnamed_15",
+      "unnamed_16",
+      "unnamed_17",
+      "unnamed_18",
+      "unnamed_19",
+      "unnamed_20",
+      "unnamed_21",
+      "unnamed_22",
+      "unnamed_23",
+      "unnamed_24",
+      "unnamed_25",
+      "unnamed_26",
+      "unnamed_27",
+      "unnamed_28",
+      "unnamed_29",
+      "unnamed_30",
+      "unnamed_31",
+      "unnamed_32",
+      "unnamed_33",
+      "unnamed_34",
+      "unnamed_35",
+      "unnamed_36",
+      "unnamed_37",
+      "unnamed_38",
+      "unnamed_39",
+      "unnamed_40",
+      "unnamed_41",
+      "unnamed_42",
+      "unnamed_43",
+      "unnamed_44",
+      "unnamed_45",
+      "unnamed_46",
+      "unnamed_47",
+      "unnamed_48",
+      "unnamed_49",
+      "unnamed_50",
+      "unnamed_51",
+      "unnamed_52",
+      "unnamed_53",
+      "unnamed_54"
+    ],
+    "dtypes": {
+      "onesto_labs_pvt_ltd": "object",
+      "unnamed_1": "object",
+      "unnamed_2": "object",
+      "unnamed_3": "object",
+      "unnamed_4": "object",
+      "unnamed_5": "object",
+      "unnamed_6": "object",
+      "unnamed_7": "object",
+      "unnamed_8": "object",
+      "unnamed_9": "object",
+      "unnamed_10": "object",
+      "unnamed_11": "object",
+      "unnamed_12": "object",
+      "unnamed_13": "object",
+      "unnamed_14": "object",
+      "unnamed_15": "object",
+      "unnamed_16": "object",
+      "unnamed_17": "object",
+      "unnamed_18": "object",
+      "unnamed_19": "object",
+      "unnamed_20": "object",
+      "unnamed_21": "object",
+      "unnamed_22": "object",
+      "unnamed_23": "object",
+      "unnamed_24": "object",
+      "unnamed_25": "object",
+      "unnamed_26": "object",
+      "unnamed_27": "object",
+      "unnamed_28": "object",
+      "unnamed_29": "object",
+      "unnamed_30": "object",
+      "unnamed_31": "object",
+      "unnamed_32": "object",
+      "unnamed_33": "object",
+      "unnamed_34": "object",
+      "unnamed_35": "object",
+      "unnamed_36": "object",
+      "unnamed_37": "object",
+      "unnamed_38": "object",
+      "unnamed_39": "object",
+      "unnamed_40": "object",
+      "unnamed_41": "object",
+      "unnamed_42": "object",
+      "unnamed_43": "object",
+      "unnamed_44": "object",
+      "unnamed_45": "object",
+      "unnamed_46": "object",
+      "unnamed_47": "object",
+      "unnamed_48": "object",
+      "unnamed_49": "object",
+      "unnamed_50": "object",
+      "unnamed_51": "object",
+      "unnamed_52": "object",
+      "unnamed_53": "object",
+      "unnamed_54": "object"
+    },
+    "registered_at": "2025-12-19T18:39:42.741072",
+    "parquet_path": "D:\\Projects2.0\\Valuenaire\\Re\\data\\dataframe_cache\\stress_test_client_innovist_mis_july_2025_bs.parquet"
+  },
+  "stress_test_client:innovist_mis_july_2025:working_tb": {
+    "preprocessing": {
+      "original_shape": [
+        365,
+        109
+      ],
+      "columns_normalized": [
+        {
+          "original": "Unnamed: 0",
+          "normalized": "unnamed_0"
+        }
+      ],
+      "numeric_coerced": [],
+      "period_columns": [],
+      "na_replaced": 0,
+      "final_shape": [
+        365,
+        109
+      ],
+      "sheet_name": "Working_TB"
+    },
+    "dataset_id": "stress_test_client:innovist_mis_july_2025:working_tb",
+    "client_id": "stress_test_client",
+    "rows": 365,
+    "columns": [
+      "unnamed_0",
+      "2",
+      "3",
+      "4",
+      "5",
+      "6",
+      "7",
+      "8",
+      "9",
+      "10",
+      "11",
+      "12",
+      "13",
+      "14",
+      "15",
+      "16",
+      "17",
+      "18",
+      "19",
+      "20",
+      "21",
+      "22",
+      "23",
+      "24",
+      "25",
+      "26",
+      "27",
+      "28",
+      "29",
+      "30",
+      "31",
+      "32",
+      "33",
+      "34",
+      "35",
+      "36",
+      "37",
+      "38",
+      "39",
+      "40",
+      "41",
+      "42",
+      "43",
+      "44",
+      "45",
+      "46",
+      "47",
+      "48",
+      "49",
+      "50",
+      "51",
+      "52",
+      "53",
+      "54",
+      "55",
+      "56",
+      "57",
+      "58",
+      "59",
+      "60",
+      "61",
+      "62",
+      "63",
+      "64",
+      "65",
+      "66",
+      "67",
+      "68",
+      "69",
+      "70",
+      "71",
+      "72",
+      "73",
+      "74",
+      "75",
+      "76",
+      "77",
+      "78",
+      "79",
+      "80",
+      "81",
+      "82",
+      "83",
+      "84",
+      "85",
+      "86",
+      "87",
+      "88",
+      "89",
+      "90",
+      "91",
+      "92",
+      "93",
+      "94",
+      "95",
+      "96",
+      "97",
+      "98",
+      "99",
+      "100",
+      "101",
+      "102",
+      "103",
+      "104",
+      "105",
+      "106",
+      "107",
+      "108",
+      "109"
+    ],
+    "dtypes": {
+      "unnamed_0": "object",
+      "2": "object",
+      "3": "object",
+      "4": "object",
+      "5": "object",
+      "6": "object",
+      "7": "object",
+      "8": "object",
+      "9": "object",
+      "10": "object",
+      "11": "object",
+      "12": "object",
+      "13": "object",
+      "14": "object",
+      "15": "object",
+      "16": "object",
+      "17": "object",
+      "18": "object",
+      "19": "object",
+      "20": "object",
+      "21": "object",
+      "22": "object",
+      "23": "object",
+      "24": "object",
+      "25": "object",
+      "26": "object",
+      "27": "object",
+      "28": "object",
+      "29": "object",
+      "30": "object",
+      "31": "object",
+      "32": "object",
+      "33": "object",
+      "34": "object",
+      "35": "object",
+      "36": "object",
+      "37": "object",
+      "38": "object",
+      "39": "object",
+      "40": "object",
+      "41": "object",
+      "42": "object",
+      "43": "object",
+      "44": "object",
+      "45": "object",
+      "46": "object",
+      "47": "object",
+      "48": "object",
+      "49": "object",
+      "50": "object",
+      "51": "object",
+      "52": "object",
+      "53": "object",
+      "54": "object",
+      "55": "object",
+      "56": "object",
+      "57": "object",
+      "58": "object",
+      "59": "object",
+      "60": "object",
+      "61": "object",
+      "62": "object",
+      "63": "object",
+      "64": "object",
+      "65": "object",
+      "66": "object",
+      "67": "object",
+      "68": "object",
+      "69": "object",
+      "70": "object",
+      "71": "object",
+      "72": "object",
+      "73": "object",
+      "74": "object",
+      "75": "object",
+      "76": "object",
+      "77": "object",
+      "78": "object",
+      "79": "object",
+      "80": "object",
+      "81": "object",
+      "82": "object",
+      "83": "object",
+      "84": "object",
+      "85": "object",
+      "86": "object",
+      "87": "object",
+      "88": "object",
+      "89": "object",
+      "90": "object",
+      "91": "object",
+      "92": "object",
+      "93": "object",
+      "94": "object",
+      "95": "object",
+      "96": "object",
+      "97": "object",
+      "98": "object",
+      "99": "object",
+      "100": "object",
+      "101": "object",
+      "102": "object",
+      "103": "object",
+      "104": "object",
+      "105": "object",
+      "106": "object",
+      "107": "object",
+      "108": "object",
+      "109": "object"
+    },
+    "registered_at": "2025-12-19T18:39:43.409208",
+    "parquet_path": "D:\\Projects2.0\\Valuenaire\\Re\\data\\dataframe_cache\\stress_test_client_innovist_mis_july_2025_working_tb.parquet"
+  },
+  "stress_test_client:innovist_mis_july_2025:cf": {
+    "preprocessing": {
+      "original_shape": [
+        33,
+        54
+      ],
+      "columns_normalized": [
+        {
+          "original": "Onesto Labs Pvt Ltd",
+          "normalized": "onesto_labs_pvt_ltd"
+        },
+        {
+          "original": "Unnamed: 1",
+          "normalized": "unnamed_1"
+        },
+        {
+          "original": "Unnamed: 2",
+          "normalized": "unnamed_2"
+        },
+        {
+          "original": "Unnamed: 3",
+          "normalized": "unnamed_3"
+        },
+        {
+          "original": "Unnamed: 4",
+          "normalized": "unnamed_4"
+        },
+        {
+          "original": "Unnamed: 5",
+          "normalized": "unnamed_5"
+        },
+        {
+          "original": "Unnamed: 6",
+          "normalized": "unnamed_6"
+        },
+        {
+          "original": "Unnamed: 7",
+          "normalized": "unnamed_7"
+        },
+        {
+          "original": "Unnamed: 8",
+          "normalized": "unnamed_8"
+        },
+        {
+          "original": "Unnamed: 9",
+          "normalized": "unnamed_9"
+        },
+        {
+          "original": "Unnamed: 10",
+          "normalized": "unnamed_10"
+        },
+        {
+          "original": "Unnamed: 11",
+          "normalized": "unnamed_11"
+        },
+        {
+          "original": "Unnamed: 12",
+          "normalized": "unnamed_12"
+        },
+        {
+          "original": "Unnamed: 13",
+          "normalized": "unnamed_13"
+        },
+        {
+          "original": "Unnamed: 14",
+          "normalized": "unnamed_14"
+        },
+        {
+          "original": "Unnamed: 15",
+          "normalized": "unnamed_15"
+        },
+        {
+          "original": "Unnamed: 16",
+          "normalized": "unnamed_16"
+        },
+        {
+          "original": "Unnamed: 17",
+          "normalized": "unnamed_17"
+        },
+        {
+          "original": "Unnamed: 18",
+          "normalized": "unnamed_18"
+        },
+        {
+          "original": "Unnamed: 19",
+          "normalized": "unnamed_19"
+        },
+        {
+          "original": "Unnamed: 20",
+          "normalized": "unnamed_20"
+        },
+        {
+          "original": "Unnamed: 21",
+          "normalized": "unnamed_21"
+        },
+        {
+          "original": "Unnamed: 22",
+          "normalized": "unnamed_22"
+        },
+        {
+          "original": "Unnamed: 23",
+          "normalized": "unnamed_23"
+        },
+        {
+          "original": "Unnamed: 24",
+          "normalized": "unnamed_24"
+        },
+        {
+          "original": "Unnamed: 25",
+          "normalized": "unnamed_25"
+        },
+        {
+          "original": "Unnamed: 26",
+          "normalized": "unnamed_26"
+        },
+        {
+          "original": "Unnamed: 27",
+          "normalized": "unnamed_27"
+        },
+        {
+          "original": "Unnamed: 28",
+          "normalized": "unnamed_28"
+        },
+        {
+          "original": "Unnamed: 29",
+          "normalized": "unnamed_29"
+        },
+        {
+          "original": "Unnamed: 30",
+          "normalized": "unnamed_30"
+        },
+        {
+          "original": "Unnamed: 31",
+          "normalized": "unnamed_31"
+        },
+        {
+          "original": "Unnamed: 32",
+          "normalized": "unnamed_32"
+        },
+        {
+          "original": "Unnamed: 33",
+          "normalized": "unnamed_33"
+        },
+        {
+          "original": "Unnamed: 34",
+          "normalized": "unnamed_34"
+        },
+        {
+          "original": "Unnamed: 35",
+          "normalized": "unnamed_35"
+        },
+        {
+          "original": "Unnamed: 36",
+          "normalized": "unnamed_36"
+        },
+        {
+          "original": "Unnamed: 37",
+          "normalized": "unnamed_37"
+        },
+        {
+          "original": "Unnamed: 38",
+          "normalized": "unnamed_38"
+        },
+        {
+          "original": "Unnamed: 39",
+          "normalized": "unnamed_39"
+        },
+        {
+          "original": "Unnamed: 40",
+          "normalized": "unnamed_40"
+        },
+        {
+          "original": "Unnamed: 41",
+          "normalized": "unnamed_41"
+        },
+        {
+          "original": "Unnamed: 42",
+          "normalized": "unnamed_42"
+        },
+        {
+          "original": "Unnamed: 43",
+          "normalized": "unnamed_43"
+        },
+        {
+          "original": "Unnamed: 44",
+          "normalized": "unnamed_44"
+        },
+        {
+          "original": "Unnamed: 45",
+          "normalized": "unnamed_45"
+        },
+        {
+          "original": "Unnamed: 46",
+          "normalized": "unnamed_46"
+        },
+        {
+          "original": "Unnamed: 47",
+          "normalized": "unnamed_47"
+        },
+        {
+          "original": "Unnamed: 48",
+          "normalized": "unnamed_48"
+        },
+        {
+          "original": "Unnamed: 49",
+          "normalized": "unnamed_49"
+        },
+        {
+          "original": "Unnamed: 50",
+          "normalized": "unnamed_50"
+        },
+        {
+          "original": "Unnamed: 51",
+          "normalized": "unnamed_51"
+        },
+        {
+          "original": "Unnamed: 52",
+          "normalized": "unnamed_52"
+        },
+        {
+          "original": "Unnamed: 53",
+          "normalized": "unnamed_53"
+        }
+      ],
+      "numeric_coerced": [],
+      "period_columns": [],
+      "na_replaced": 0,
+      "final_shape": [
+        24,
+        54
+      ],
+      "sheet_name": "CF"
+    },
+    "dataset_id": "stress_test_client:innovist_mis_july_2025:cf",
+    "client_id": "stress_test_client",
+    "rows": 24,
+    "columns": [
+      "onesto_labs_pvt_ltd",
+      "unnamed_1",
+      "unnamed_2",
+      "unnamed_3",
+      "unnamed_4",
+      "unnamed_5",
+      "unnamed_6",
+      "unnamed_7",
+      "unnamed_8",
+      "unnamed_9",
+      "unnamed_10",
+      "unnamed_11",
+      "unnamed_12",
+      "unnamed_13",
+      "unnamed_14",
+      "unnamed_15",
+      "unnamed_16",
+      "unnamed_17",
+      "unnamed_18",
+      "unnamed_19",
+      "unnamed_20",
+      "unnamed_21",
+      "unnamed_22",
+      "unnamed_23",
+      "unnamed_24",
+      "unnamed_25",
+      "unnamed_26",
+      "unnamed_27",
+      "unnamed_28",
+      "unnamed_29",
+      "unnamed_30",
+      "unnamed_31",
+      "unnamed_32",
+      "unnamed_33",
+      "unnamed_34",
+      "unnamed_35",
+      "unnamed_36",
+      "unnamed_37",
+      "unnamed_38",
+      "unnamed_39",
+      "unnamed_40",
+      "unnamed_41",
+      "unnamed_42",
+      "unnamed_43",
+      "unnamed_44",
+      "unnamed_45",
+      "unnamed_46",
+      "unnamed_47",
+      "unnamed_48",
+      "unnamed_49",
+      "unnamed_50",
+      "unnamed_51",
+      "unnamed_52",
+      "unnamed_53"
+    ],
+    "dtypes": {
+      "onesto_labs_pvt_ltd": "object",
+      "unnamed_1": "object",
+      "unnamed_2": "object",
+      "unnamed_3": "object",
+      "unnamed_4": "object",
+      "unnamed_5": "object",
+      "unnamed_6": "object",
+      "unnamed_7": "object",
+      "unnamed_8": "object",
+      "unnamed_9": "object",
+      "unnamed_10": "object",
+      "unnamed_11": "object",
+      "unnamed_12": "object",
+      "unnamed_13": "object",
+      "unnamed_14": "object",
+      "unnamed_15": "object",
+      "unnamed_16": "object",
+      "unnamed_17": "object",
+      "unnamed_18": "object",
+      "unnamed_19": "object",
+      "unnamed_20": "object",
+      "unnamed_21": "object",
+      "unnamed_22": "object",
+      "unnamed_23": "object",
+      "unnamed_24": "object",
+      "unnamed_25": "object",
+      "unnamed_26": "object",
+      "unnamed_27": "object",
+      "unnamed_28": "object",
+      "unnamed_29": "object",
+      "unnamed_30": "object",
+      "unnamed_31": "object",
+      "unnamed_32": "object",
+      "unnamed_33": "object",
+      "unnamed_34": "object",
+      "unnamed_35": "object",
+      "unnamed_36": "object",
+      "unnamed_37": "object",
+      "unnamed_38": "object",
+      "unnamed_39": "object",
+      "unnamed_40": "object",
+      "unnamed_41": "object",
+      "unnamed_42": "object",
+      "unnamed_43": "object",
+      "unnamed_44": "object",
+      "unnamed_45": "object",
+      "unnamed_46": "object",
+      "unnamed_47": "object",
+      "unnamed_48": "object",
+      "unnamed_49": "object",
+      "unnamed_50": "object",
+      "unnamed_51": "object",
+      "unnamed_52": "object",
+      "unnamed_53": "object"
+    },
+    "registered_at": "2025-12-19T18:39:43.671739",
+    "parquet_path": "D:\\Projects2.0\\Valuenaire\\Re\\data\\dataframe_cache\\stress_test_client_innovist_mis_july_2025_cf.parquet"
   }
 }
