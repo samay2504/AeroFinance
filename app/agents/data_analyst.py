@@ -49,7 +49,64 @@ class DataAnalystAgent:
         self._query_understanding = None
         self._schema_cache: Dict[str, Any] = {}  # Cache analyzed schemas
         self.dataframes: Dict[str, pd.DataFrame] = {}
+        
+        # Auto-initialize LLM from environment if not provided
+        if self._llm is None:
+            self._llm = self._init_llm_from_env()
+        
         self._init_components()
+    
+    def _init_llm_from_env(self):
+        """
+        Initialize LLM provider from environment variables.
+        Uses the LLMProvider class with provider preference chain.
+        """
+        try:
+            from app.core.llm_provider import LLMProvider
+            import os
+            
+            # Load environment variables
+            try:
+                from dotenv import load_dotenv
+                load_dotenv()
+            except ImportError:
+                pass
+            
+            # Build config from environment with sensible defaults
+            # This avoids depending on pydantic settings parsing
+            provider_pref_str = os.getenv(
+                "LLM_PROVIDER_PREFERENCE", 
+                "google_genai,groq,ollama,openrouter,openai"
+            )
+            provider_preference = [p.strip() for p in provider_pref_str.split(",")]
+            
+            config = {
+                "provider_preference": provider_preference,
+                "temperature": float(os.getenv("LLM_TEMPERATURE", "0.1")),
+                "max_retries": int(os.getenv("LLM_MAX_RETRIES", "3")),
+                "retry_delay": float(os.getenv("LLM_RETRY_DELAY", "1.0")),
+                "ollama_enabled": os.getenv("OLLAMA_ENABLED", "false").lower() == "true",
+                "ollama_model": os.getenv("OLLAMA_MODEL", "llama3.2"),
+                "openrouter_enabled": os.getenv("OPENROUTER_ENABLED", "false").lower() == "true",
+            }
+            
+            logger.debug(f"LLM config: providers={config['provider_preference']}")
+            
+            # LLMProvider auto-initializes in __init__
+            provider = LLMProvider(config)
+            
+            if provider.llm:
+                logger.info(f"Auto-initialized LLM: {provider.current_provider}")
+                return provider.llm
+            else:
+                logger.warning("LLM provider initialization returned no LLM - running without LLM")
+                return None
+                
+        except Exception as e:
+            logger.warning(f"Failed to auto-initialize LLM from environment: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
 
     def _init_components(self):
         """Initialize component dependencies."""
@@ -89,12 +146,15 @@ class DataAnalystAgent:
                 get_semantic_matcher,
                 get_structure_detector,
                 get_query_understanding,
+                get_financial_ner,
             )
             self._semantic_matcher = get_semantic_matcher()
             self._structure_detector = get_structure_detector()
             self._query_understanding = get_query_understanding()
+            self._ner = get_financial_ner()  # For dynamic metric detection
         except Exception as e:
             logger.warning(f"Semantic understanding unavailable: {e}")
+            self._ner = None
 
         # Initialize tool orchestrator for integrated tool execution
         try:
@@ -812,6 +872,47 @@ class DataAnalystAgent:
             if 'percentage' in intents or 'variance' in query_lower or '%' in query:
                 # This is complex - delegate to LLM for now
                 pass
+            
+            # ==== SUMMARY/OVERVIEW GENERATION (NO LLM FALLBACK) ====
+            # Uses query strategy detection instead of hardcoded keywords
+            strategy = query_info.get('strategy', {}) if query_info else {}
+            if strategy.get('lookup_type') == 'summary' or (
+                not strategy and any(kw in query_lower for kw in ['summary', 'summarize', 'overview'])
+            ):
+                # Generate a heuristic summary of the data
+                summary_parts = []
+                
+                # 1. Dataset info
+                summary_parts.append(f"Dataset has {len(df)} rows and {len(df.columns)} columns.")
+                
+                # 2. Use NER to identify key financial metrics dynamically
+                if self._ner and label_col:
+                    for idx, row in df.iterrows():
+                        label = str(row[label_col])
+                        if label.lower() in ('nan', 'none', '', 'na'):
+                            continue
+                        
+                        # Use NER to detect if this is a financial metric
+                        entities = self._ner.extract_entities(label)
+                        if any(e.entity_type == 'metric' for e in entities):
+                            # Get the last non-null numeric value
+                            for col in reversed(list(df.columns)):
+                                if col != label_col:
+                                    val = pd.to_numeric(row[col], errors='coerce')
+                                    if pd.notna(val) and val != 0:
+                                        summary_parts.append(f"- {row[label_col]}: {round(float(val), 2)}")
+                                        break
+                            if len(summary_parts) >= 7:
+                                break
+                
+                if len(summary_parts) > 1:
+                    summary = "\n".join(summary_parts)
+                    return AnalysisResult(
+                        success=True,
+                        result=summary,
+                        method="pandas:heuristic_summary",
+                        explanation=f"Generated overview of {df_id or 'dataset'}"
+                    )
 
         except Exception as e:
             logger.warning(f"Semantic Pandas failed: {e}")
@@ -827,10 +928,21 @@ class DataAnalystAgent:
     ) -> Optional[int]:
         """
         Find the row containing the queried metric using semantic matching.
-        No hardcoded patterns - uses similarity scoring.
+        Uses the semantic matcher and NER for dynamic term recognition.
+        No hardcoded patterns - works with any financial data.
         """
         if not label_col or label_col not in df.columns:
             return None
+        
+        # Use NER to extract significant terms from query
+        query_entities = []
+        if self._ner:
+            query_entities = self._ner.extract_entities(query)
+        
+        # Use semantic matcher to expand query keywords
+        expanded_keywords = keywords.copy() if keywords else set()
+        if self._semantic_matcher:
+            expanded_keywords = self._semantic_matcher.expand_query(query)
         
         best_row = None
         best_score = 0.0
@@ -847,21 +959,41 @@ class DataAnalystAgent:
             except ValueError:
                 pass
             
-            # Calculate similarity using semantic matcher if available
+            label_lower = label.lower()
+            score = 0.0
+            
+            # 1. Use semantic matcher for similarity (primary method)
             if self._semantic_matcher:
-                score = self._semantic_matcher.calculate_similarity(query, label)
-            else:
-                # Simple keyword overlap
-                label_lower = label.lower()
-                matching_keywords = sum(1 for kw in keywords if kw in label_lower)
-                score = matching_keywords / max(1, len(keywords))
+                semantic_score = self._semantic_matcher.calculate_similarity(query, label)
+                score = semantic_score * 10  # Scale appropriately
+            
+            # 2. Boost for exact keyword matches from expanded keywords
+            for kw in expanded_keywords:
+                if len(kw) >= 3:  # Only meaningful keywords
+                    if re.search(rf'\b{re.escape(kw)}\b', label_lower):
+                        score += 5  # Exact word boundary match
+                    elif kw in label_lower:
+                        score += 2  # Substring match
+            
+            # 3. Boost for NER entity matches
+            if query_entities:
+                for entity in query_entities:
+                    entity_text = entity.text.lower()
+                    if entity_text in label_lower:
+                        score += 8  # Strong match for recognized entities
+            
+            # 4. Check if label itself contains financial metrics (using NER)
+            if self._ner and score > 0:
+                label_entities = self._ner.extract_entities(label)
+                if any(e.entity_type == 'metric' for e in label_entities):
+                    score *= 1.2  # Boost for recognized financial metrics
             
             if score > best_score:
                 best_score = score
                 best_row = idx
         
-        # Return if we have a reasonable match (threshold: 0.2)
-        return best_row if best_score >= 0.2 else None
+        # Return if we have a reasonable match
+        return best_row if best_score >= 2 else None
 
     def _find_date_column(
         self,
@@ -871,30 +1003,82 @@ class DataAnalystAgent:
     ) -> Optional[str]:
         """
         Dynamically find the column containing a specific date.
-        Works with any date format.
+        Works with any date format - searches both column names and header rows.
         """
-        month_abbr = month_name[:3]
+        month_abbr = month_name[:3].lower()
         month_num_map = {
             'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'may': 5, 'jun': 6,
             'jul': 7, 'aug': 8, 'sep': 9, 'oct': 10, 'nov': 11, 'dec': 12
         }
-        month_num = month_num_map.get(month_abbr.lower(), 0)
+        month_num = month_num_map.get(month_abbr, 0)
         
-        for row_idx in range(min(10, len(df))):
+        # Handle 2-digit year (20 -> 2020)
+        year_full = None
+        year_short = None
+        if year:
+            if len(year) == 2:
+                year_short = year
+                year_full = f"20{year}" if int(year) < 50 else f"19{year}"
+            else:
+                year_full = year
+                year_short = year[-2:]
+        
+        # 1. First check column names/headers directly
+        for col in df.columns:
+            col_str = str(col)
+            
+            # Check datetime objects
+            if hasattr(col, 'month') and hasattr(col, 'year'):
+                # It's a datetime column
+                if col.month == month_num:
+                    if not year or str(col.year) == year_full or str(col.year)[-2:] == year_short:
+                        return col
+            
+            # Check string representation
+            col_lower = col_str.lower()
+            
+            # YYYY-MM-DD format (e.g., "2020-12-31 00:00:00")
+            date_match = re.match(r'(\d{4})-(\d{2})-(\d{2})', col_str)
+            if date_match:
+                y = date_match.group(1)
+                m = int(date_match.group(2))
+                if m == month_num:
+                    if not year or y == year_full or y[-2:] == year_short:
+                        return col
+            
+            # Text-based patterns (e.g., "Dec-20", "december 2020")
+            if month_abbr in col_lower:
+                if not year or (year_full and year_full in col_str) or (year_short and year_short in col_lower):
+                    return col
+        
+        # 2. Check header rows (first 5 rows) for date patterns
+        for row_idx in range(min(5, len(df))):
             for col_idx, val in enumerate(df.iloc[row_idx]):
-                val_str = str(val).lower()
+                val_str = str(val)
                 
-                # Check YYYY-MM-DD format
-                date_match = re.match(r'(\d{4})-(\d{2})-', val_str)
+                # Skip NaN or empty
+                if pd.isna(val) or val_str.lower() in ('nan', ''):
+                    continue
+                
+                # Check datetime objects in data
+                if hasattr(val, 'month') and hasattr(val, 'year'):
+                    if val.month == month_num:
+                        if not year or str(val.year) == year_full or str(val.year)[-2:] == year_short:
+                            return df.columns[col_idx]
+                
+                # YYYY-MM-DD format in cell values
+                date_match = re.match(r'(\d{4})-(\d{2})-(\d{2})', val_str)
                 if date_match:
                     y = date_match.group(1)
                     m = int(date_match.group(2))
-                    if m == month_num and (not year or y == year):
-                        return df.columns[col_idx]
+                    if m == month_num:
+                        if not year or y == year_full or y[-2:] == year_short:
+                            return df.columns[col_idx]
                 
-                # Check text-based dates
-                if month_abbr in val_str:
-                    if not year or year in val_str:
+                # Text-based dates
+                val_lower = val_str.lower()
+                if month_abbr in val_lower:
+                    if not year or (year_full and year_full in val_str) or (year_short and year_short in val_lower):
                         return df.columns[col_idx]
         
         return None

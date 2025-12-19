@@ -494,6 +494,7 @@ class QueryUnderstanding:
             'metrics': [],
             'constraints': {},
             'keywords': set(),
+            'strategy': None,  # Added: lookup strategy
         }
         
         # Extract intent
@@ -519,7 +520,112 @@ class QueryUnderstanding:
         # Extract keywords with synonym expansion
         result['keywords'] = self._matcher.expand_query(query)
         
+        # Determine lookup strategy
+        result['strategy'] = self._determine_strategy(result)
+        
         return result
+    
+    def _determine_strategy(self, parsed: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Intelligently determine the lookup strategy based on query analysis.
+        
+        Returns a strategy dict with:
+        - lookup_type: 'row', 'column', 'cell', 'aggregation', 'comparison', 'summary'
+        - requires_row_search: bool - need to find a specific row by label
+        - requires_column_search: bool - need to find a specific column by header/period
+        - requires_computation: bool - need calculations (sum, avg, growth, etc.)
+        - llm_required: bool - requires LLM for complex interpretation
+        """
+        strategy = {
+            'lookup_type': 'cell',  # Default: find specific cell
+            'requires_row_search': False,
+            'requires_column_search': False,
+            'requires_computation': False,
+            'llm_required': False,
+            'confidence': 0.5,
+        }
+        
+        intents = parsed.get('intent', [])
+        periods = parsed.get('periods', [])
+        metrics = parsed.get('metrics', [])
+        keywords = parsed.get('keywords', set())
+        query = parsed.get('original', '').lower()
+        
+        # ==== STRATEGY DETERMINATION LOGIC ====
+        
+        # 1. SUMMARY/OVERVIEW - needs LLM
+        if any(kw in query for kw in ['summary', 'summarize', 'overview', 'describe', 'explain', 'tell me about']):
+            strategy['lookup_type'] = 'summary'
+            strategy['llm_required'] = True
+            strategy['confidence'] = 0.9
+            return strategy
+        
+        # 2. AGGREGATION (total, sum, count)
+        if 'aggregation' in intents:
+            strategy['lookup_type'] = 'aggregation'
+            strategy['requires_computation'] = True
+            if periods:
+                # Sum for specific period -> need column
+                strategy['requires_column_search'] = True
+            if metrics:
+                # Sum for specific metric -> need row
+                strategy['requires_row_search'] = True
+            strategy['confidence'] = 0.8
+            return strategy
+        
+        # 3. COMPARISON/GROWTH (period-to-period)
+        if 'comparison' in intents or len(periods) >= 2:
+            strategy['lookup_type'] = 'comparison'
+            strategy['requires_row_search'] = True  # Need metric row
+            strategy['requires_column_search'] = True  # Need period columns
+            strategy['requires_computation'] = True
+            strategy['llm_required'] = len(periods) < 2  # May need LLM to infer periods
+            strategy['confidence'] = 0.85
+            return strategy
+        
+        # 4. SPECIFIC CELL LOOKUP (value at row X, column Y)
+        if periods and (metrics or any(kw in keywords for kw in ['revenue', 'sales', 'profit', 'cost', 'expense', 'gmv', 'income'])):
+            strategy['lookup_type'] = 'cell'
+            strategy['requires_row_search'] = True  # Find the metric row
+            strategy['requires_column_search'] = True  # Find the period column
+            strategy['confidence'] = 0.9
+            return strategy
+        
+        # 5. SINGLE PERIOD LOOKUP (all values for a period)
+        if periods and len(periods) == 1 and not metrics:
+            strategy['lookup_type'] = 'column'
+            strategy['requires_column_search'] = True
+            strategy['confidence'] = 0.7
+            return strategy
+        
+        # 6. SINGLE METRIC LOOKUP (all values for a metric)
+        if metrics and not periods:
+            strategy['lookup_type'] = 'row'
+            strategy['requires_row_search'] = True
+            strategy['confidence'] = 0.7
+            return strategy
+        
+        # 7. PERCENTAGE/RATIO
+        if 'percentage' in intents:
+            strategy['lookup_type'] = 'cell'
+            strategy['requires_row_search'] = True
+            strategy['requires_column_search'] = True if periods else False
+            strategy['confidence'] = 0.75
+            return strategy
+        
+        # 8. DEFAULT: Simple lookup (needs LLM to interpret)
+        if 'lookup' in intents:
+            strategy['lookup_type'] = 'cell'
+            strategy['requires_row_search'] = True
+            strategy['requires_column_search'] = bool(periods)
+            strategy['llm_required'] = True  # Need LLM to understand what to look up
+            strategy['confidence'] = 0.6
+            return strategy
+        
+        # 9. FALLBACK: Complex query needs LLM
+        strategy['llm_required'] = True
+        strategy['confidence'] = 0.3
+        return strategy
 
 
 # Global instances
