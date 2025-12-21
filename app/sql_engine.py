@@ -185,6 +185,32 @@ class SQLEngine:
             if re.search(rf"\b{keyword}\b", sql_upper):
                 return False, f"Dangerous keyword not allowed: {keyword}"
 
+        # ANTI-HALLUCINATION: Check that referenced tables exist
+        # Extract table names from FROM and JOIN clauses
+        from_pattern = r'\bFROM\s+([a-zA-Z_][a-zA-Z0-9_]*)'
+        join_pattern = r'\bJOIN\s+([a-zA-Z_][a-zA-Z0-9_]*)'
+        
+        referenced_tables = set()
+        for match in re.finditer(from_pattern, sql, re.IGNORECASE):
+            table_name = match.group(1).lower()
+            # Skip common SQL keywords that might be matched
+            if table_name not in ('select', 'where', 'group', 'order', 'having', 'limit'):
+                referenced_tables.add(table_name)
+        
+        for match in re.finditer(join_pattern, sql, re.IGNORECASE):
+            table_name = match.group(1).lower()
+            referenced_tables.add(table_name)
+        
+        # Check if all referenced tables exist
+        if referenced_tables:
+            existing_tables = set(t.lower() for t in self._registered_tables.keys())
+            missing_tables = referenced_tables - existing_tables
+            
+            if missing_tables:
+                # Provide helpful error message with available tables
+                available = ', '.join(sorted(existing_tables)[:5])
+                return False, f"Table not found: {', '.join(missing_tables)}. Available: {available}"
+
         # Parse with sqlparse if available
         if SQLPARSE_AVAILABLE:
             try:

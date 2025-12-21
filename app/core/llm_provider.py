@@ -228,10 +228,12 @@ class LLMProvider:
 
         for model in models_to_try:
             try:
+                # max_retries=0 to fail fast - our wrapper handles retries
                 llm = ChatOpenAI(
                     model=model,
                     openai_api_key=api_key,
                     temperature=self.config.get("temperature", 0.1),
+                    max_retries=0,
                 )
                 test_response = llm.invoke("Test")
                 if test_response:
@@ -257,10 +259,13 @@ class LLMProvider:
 
         for model in models_to_try:
             try:
+                # CRITICAL: max_retries=0 to fail fast and let our fallback handle it
+                # This prevents Groq's internal exponential backoff (4s, 6s, 11s, 12s delays)
                 llm = ChatGroq(
                     model=model,
                     groq_api_key=api_key,
                     temperature=self.config.get("temperature", 0.1),
+                    max_retries=0,  # Fail fast - our wrapper handles retries/fallback
                 )
                 test_response = llm.invoke("Test")
                 if test_response:

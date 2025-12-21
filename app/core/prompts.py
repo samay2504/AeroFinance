@@ -130,6 +130,13 @@ CRITICAL DuckDB SQL RULES:
 5. For NULL-like values, the data is pre-cleaned but use COALESCE(col, 0) for safety.
 6. The table name is the sanitized version shown in schema - use EXACTLY that name.
 
+ANTI-HALLUCINATION RULES (CRITICAL):
+- DO NOT invent table names like 'customer_data', 'customers', 'users', 'orders', etc.
+- ONLY use the EXACT table name provided in DATABASE SCHEMA above.
+- ONLY use column names that EXIST in the schema - DO NOT make up columns.
+- If the requested data doesn't exist in the schema, return a query that filters for it.
+- NEVER generate CREATE TABLE, DROP, DELETE, INSERT, or UPDATE statements.
+
 QUERY PATTERNS:
 - For "growth from X to Y": Calculate (Y_value - X_value) using the appropriate columns
 - For "value in period Z": Select the value from column matching period Z
