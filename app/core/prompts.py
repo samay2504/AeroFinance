@@ -198,9 +198,16 @@ USER QUERY: {query}
 Generate Python code that:
 1. Works with a pandas DataFrame named 'df' (already loaded).
 2. Defines a function 'run(df)' that returns the result.
-3. Uses only: pandas, numpy, math, decimal (no other imports).
+3. Uses only: pd (pandas), np (numpy), math, decimal, datetime - ALREADY AVAILABLE IN SCOPE.
 4. Returns a JSON-serializable result (dict, list, number, or string).
-5. Handles missing values gracefully.
+5. Handles missing values gracefully with pd.isna() or pd.notna().
+
+CRITICAL RESTRICTIONS (code will be REJECTED if violated):
+- DO NOT use import statements - modules are pre-loaded
+- DO NOT use __import__, eval(), exec(), open(), or getattr()
+- DO NOT access files, networks, or system resources
+- DO NOT use globals(), locals(), or vars()
+- Use 'pd' not 'pandas', 'np' not 'numpy'
 
 OUTPUT FORMAT:
 Return ONLY valid JSON:

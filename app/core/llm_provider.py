@@ -336,11 +336,17 @@ class LLMProvider:
 
     def _try_openrouter(self):
         """Initialize OpenRouter with HTTP fallback."""
-        enabled = os.getenv("OPENROUTER_ENABLED", "").lower() in ("true", "1", "yes")
-        if not enabled and not self.config.get("openrouter_enabled"):
-            raise ImportError("OpenRouter not enabled")
-
+        # Auto-enable if API key is present (production-friendly)
         api_key = os.getenv("OPENROUTER_API_KEY") or self.config.get("openrouter_api_key")
+        enabled = (
+            os.getenv("OPENROUTER_ENABLED", "").lower() in ("true", "1", "yes") or
+            self.config.get("openrouter_enabled") or
+            bool(api_key)  # Auto-enable if API key exists
+        )
+        
+        if not enabled:
+            raise ImportError("OpenRouter not enabled and no API key found")
+
         # Use free models: mistralai/devstral-2512:free or google/gemini-2.0-flash-exp:free
         model = os.getenv("OPENROUTER_MODEL") or self.config.get("openrouter_model", "mistralai/devstral-2512:free")
 
