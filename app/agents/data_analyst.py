@@ -217,35 +217,63 @@ class DataAnalystAgent:
         query: str,
         datasets: List[Dict[str, Any]]
     ) -> Optional[str]:
-        """Match query to best dataset based on content keywords."""
+        """
+        Match query to best dataset using semantic understanding.
+        Prioritizes explicit sheet/file name mentions in the query.
+        """
         if not datasets:
             return None
 
         query_lower = query.lower()
         
-        # Keyword mapping to sheet types - uses semantic matching principles
-        keyword_map = {
-            "income statement": ["income", "statement", "p_l", "pnl"],
-            "balance sheet": ["balance", "sheet", "assets"],
-            "cashflow": ["cashflow", "cash_flow", "cash"],
-            "cashburn": ["cashburn", "cash_burn", "burn"],
-            "unit economics": ["unit", "economics", "per_order", "per order", "cost_per"],
-            "cost per order": ["unit", "economics", "per_order"],  # Maps to unit economics
-            "digital marketing": ["unit", "economics", "marketing"],  # Maps to unit economics
-            "marketing cost": ["unit", "economics", "marketing"],
-            "gmv": ["gmv", "merchandise", "value", "cashburn"],
-            "december": ["cashburn", "monthly", "cash_burn"],  # Monthly data
-            "revenue": ["income", "revenue", "statement"],
-            "collection": ["collection", "prepaid", "recorded", "fy22"],
-            "prepaid": ["fy22", "prepaid", "recorded", "lectures"],  # Maps to fy22 sheet
-            "recorded": ["fy22", "prepaid", "recorded"],  # Maps to fy22 sheet
-            "lectures": ["fy22", "prepaid", "recorded", "lectures"],  # Maps to fy22 sheet
-            "fy22": ["fy22"],  # Direct period match
-            "variance": ["variance", "actual", "budget", "forecasting", "comp"],
-            "actual": ["comp", "variance", "model"],
-            "model": ["comp", "variance", "project"],
-        }
-
+        # 1. FIRST: Check for explicit sheet/file name mentions
+        # Patterns like "from the X sheet", "X report", "X file" should take priority
+        explicit_patterns = [
+            r'from\s+(?:the\s+)?(\w+)\s+(?:sheet|report|file|data)',
+            r'(?:sheet|report|file)(?:\s+called)?\s+(\w+)',
+            r'in\s+(?:the\s+)?(\w+)\s+(?:sheet|report|file)',
+        ]
+        
+        for pattern in explicit_patterns:
+            match = re.search(pattern, query_lower)
+            if match:
+                explicit_name = match.group(1)
+                # Find datasets that contain this name
+                matching_datasets = [
+                    ds for ds in datasets 
+                    if explicit_name in ds.get("dataset_id", "").lower()
+                ]
+                
+                if len(matching_datasets) == 1:
+                    return matching_datasets[0].get("dataset_id")
+                elif len(matching_datasets) > 1:
+                    # Multiple matches - pick based on query context
+                    # Check for P&L context
+                    if any(term in query_lower for term in ['p&l', 'p_l', 'profit', 'loss', 'pl']):
+                        for ds in matching_datasets:
+                            ds_id = ds.get("dataset_id", "").lower()
+                            if 'pl' in ds_id.split(':')[-1] or 'income' in ds_id:
+                                return ds.get("dataset_id")
+                    # Check for balance sheet context
+                    if any(term in query_lower for term in ['balance', 'bs', 'asset', 'liability']):
+                        for ds in matching_datasets:
+                            ds_id = ds.get("dataset_id", "").lower()
+                            if 'bs' in ds_id.split(':')[-1] or 'balance' in ds_id:
+                                return ds.get("dataset_id")
+                    # Check for cashflow context  
+                    if any(term in query_lower for term in ['cash', 'flow', 'cf']):
+                        for ds in matching_datasets:
+                            ds_id = ds.get("dataset_id", "").lower()
+                            if 'cf' in ds_id.split(':')[-1] or 'cash' in ds_id:
+                                return ds.get("dataset_id")
+                    # Default to first non-tb match or first match
+                    for ds in matching_datasets:
+                        ds_id = ds.get("dataset_id", "").lower()
+                        if 'tb' not in ds_id.split(':')[-1]:
+                            return ds.get("dataset_id")
+                    return matching_datasets[0].get("dataset_id")
+        
+        # 2. Use semantic matching for implicit references
         best_match = None
         best_score = 0
 
@@ -256,27 +284,40 @@ class DataAnalystAgent:
             score = 0
             dataset_lower = dataset_id.lower()
             columns_lower = " ".join(str(c).lower() for c in columns)
-
-            # Check keywords
-            for keyword, patterns in keyword_map.items():
-                if keyword in query_lower:
-                    for pattern in patterns:
-                        if pattern in dataset_lower or pattern in columns_lower:
-                            score += 10
-
-            # Direct column match
+            
+            # Use semantic matcher for dataset name matching
+            if self._semantic_matcher:
+                semantic_score = self._semantic_matcher.calculate_similarity(query, dataset_id)
+                score += semantic_score * 10
+            
+            # Direct word matches in dataset name
             for word in query_lower.split():
                 if len(word) > 3:
-                    if word in columns_lower:
-                        score += 5
                     if word in dataset_lower:
+                        score += 5
+                    if word in columns_lower:
                         score += 3
-
-            # Period match
+            
+            # Period match (fy21, 9mfy22, etc.)
             periods = re.findall(r"fy\d{2}|9mfy\d{2}|q\d", query_lower)
             for period in periods:
-                if period in columns_lower:
+                if period in columns_lower or period in dataset_lower:
                     score += 8
+            
+            # P&L/PL references - prioritize actual P&L over trial balance
+            if any(term in query_lower for term in ['p&l', 'p_l', 'profit and loss', 'profit loss', 'pl_consolidated', 'consolidated p']):
+                if 'pl_consolidated' in dataset_lower or 'pl' in dataset_lower.split(':')[-1]:
+                    score += 20  # Strong boost for P&L sheet
+                elif any(term in dataset_lower for term in ['income', 'pnl']):
+                    score += 15
+                # Penalize trial balance when looking for P&L
+                if 'tb' in dataset_lower.split(':')[-1] or 'trial' in dataset_lower:
+                    score -= 10
+            
+            # Cashburn/GMV references
+            if any(term in query_lower for term in ['cashburn', 'gmv', 'cash burn']):
+                if 'cashburn' in dataset_lower or 'cash' in dataset_lower:
+                    score += 15
 
             if score > best_score:
                 best_score = score
@@ -513,9 +554,47 @@ class DataAnalystAgent:
                 sample_str = str(sample_vals)[:50] if sample_vals else "empty"
                 schema_str += f"  - {col}: {dtype} (e.g. {sample_str})\n"
 
-            # Build data sample - show first few rows as context
+            # Build data sample - ENHANCED: targeted context when strategy needs row+column search
+            data_sample = ""
             sample_rows = min(5, len(df))
-            data_sample = df.head(sample_rows).to_string(max_colwidth=30)
+            
+            # Parse query to get strategy
+            query_info = None
+            if self._query_understanding:
+                query_info = self._query_understanding.parse_query(query)
+            
+            strategy = query_info.get('strategy', {}) if query_info else {}
+            
+            # If strategy requires both row and column search, try to find and show targeted sample
+            if strategy.get('requires_row_search') and strategy.get('requires_column_search'):
+                # Try to find the target row
+                label_col = None
+                if self._structure_detector:
+                    label_col_idx = self._structure_detector.detect_label_column(df)
+                    if label_col_idx < len(df.columns):
+                        label_col = df.columns[label_col_idx]
+                
+                if label_col:
+                    # Find the row that matches the query using semantic matching
+                    keywords = query_info.get('keywords', set()) if query_info else set()
+                    target_row_idx = self._find_metric_row_semantic(df, label_col, query, keywords)
+                    
+                    if target_row_idx is not None:
+                        # Show 2 rows before and after the target
+                        start_idx = max(0, target_row_idx - 2)
+                        end_idx = min(len(df), target_row_idx + 3)
+                        
+                        data_sample = f"TARGETED SAMPLE (around matched row {target_row_idx}):\n"
+                        data_sample += df.iloc[start_idx:end_idx].to_string(max_colwidth=35)
+                        data_sample += f"\n\nNOTE: Row {target_row_idx} likely contains the target metric: '{df.iloc[target_row_idx][label_col]}'"
+                        
+                        # Also show first 2 rows for header context
+                        if start_idx > 2:
+                            data_sample = f"HEADER ROWS:\n{df.head(2).to_string(max_colwidth=35)}\n\n" + data_sample
+            
+            # Fallback to simple head if no targeted sample
+            if not data_sample:
+                data_sample = df.head(sample_rows).to_string(max_colwidth=30)
 
             # Build columns list
             available_columns = ", ".join(schema["columns"])
@@ -619,7 +698,7 @@ class DataAnalystAgent:
         df_id: str,
         schema: Dict[str, Any]
     ) -> Optional[AnalysisResult]:
-        """Try LLM-generated Python code in sandbox."""
+        """Try LLM-generated Python code in sandbox with enhanced context."""
         if not self._llm or not self._sandbox:
             return None
 
@@ -627,7 +706,40 @@ class DataAnalystAgent:
             from app.core.prompts import get_data_analyst_python_prompt
 
             schema_str = f"DataFrame: {df_id}\nShape: {df.shape}\nColumns: {list(df.columns)}"
-            sample = df.head(3).to_string() if len(df) > 0 else ""
+            
+            # Enhanced: Targeted sample data
+            sample = ""
+            
+            # Parse query to get strategy
+            query_info = None
+            if self._query_understanding:
+                query_info = self._query_understanding.parse_query(query)
+            
+            strategy = query_info.get('strategy', {}) if query_info else {}
+            
+            # If strategy requires both row and column search, provide targeted sample
+            if strategy.get('requires_row_search') and strategy.get('requires_column_search'):
+                label_col = None
+                if self._structure_detector:
+                    label_col_idx = self._structure_detector.detect_label_column(df)
+                    if label_col_idx < len(df.columns):
+                        label_col = df.columns[label_col_idx]
+                
+                if label_col:
+                    keywords = query_info.get('keywords', set()) if query_info else set()
+                    target_row_idx = self._find_metric_row_semantic(df, label_col, query, keywords)
+                    
+                    if target_row_idx is not None:
+                        start_idx = max(0, target_row_idx - 2)
+                        end_idx = min(len(df), target_row_idx + 3)
+                        
+                        sample = f"TARGETED SAMPLE (row {target_row_idx} likely matches query):\n"
+                        sample += df.iloc[start_idx:end_idx].to_string(max_colwidth=40)
+                        sample += f"\n\nLabel column: '{label_col}', Target row label: '{df.iloc[target_row_idx][label_col]}'"
+            
+            # Fallback to simple head
+            if not sample and len(df) > 0:
+                sample = df.head(5).to_string()
             
             prompt = get_data_analyst_python_prompt(schema_str, query, sample)
             
