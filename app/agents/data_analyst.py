@@ -247,77 +247,98 @@ class DataAnalystAgent:
                 if len(matching_datasets) == 1:
                     return matching_datasets[0].get("dataset_id")
                 elif len(matching_datasets) > 1:
-                    # Multiple matches - pick based on query context
-                    # Check for P&L context
-                    if any(term in query_lower for term in ['p&l', 'p_l', 'profit', 'loss', 'pl']):
-                        for ds in matching_datasets:
-                            ds_id = ds.get("dataset_id", "").lower()
-                            if 'pl' in ds_id.split(':')[-1] or 'income' in ds_id:
-                                return ds.get("dataset_id")
-                    # Check for balance sheet context
-                    if any(term in query_lower for term in ['balance', 'bs', 'asset', 'liability']):
-                        for ds in matching_datasets:
-                            ds_id = ds.get("dataset_id", "").lower()
-                            if 'bs' in ds_id.split(':')[-1] or 'balance' in ds_id:
-                                return ds.get("dataset_id")
-                    # Check for cashflow context  
-                    if any(term in query_lower for term in ['cash', 'flow', 'cf']):
-                        for ds in matching_datasets:
-                            ds_id = ds.get("dataset_id", "").lower()
-                            if 'cf' in ds_id.split(':')[-1] or 'cash' in ds_id:
-                                return ds.get("dataset_id")
-                    # Default to first non-tb match or first match
+                    # Multiple matches - use NER to pick based on query context
+                    # This is dynamic - uses patterns from FinancialNER
+                    query_entities = []
+                    if self._ner:
+                        query_entities = self._ner.extract_entities(query)
+                    
+                    # Find the best match based on entity overlap with dataset names
+                    best_ds = None
+                    best_entity_score = 0
+                    
                     for ds in matching_datasets:
                         ds_id = ds.get("dataset_id", "").lower()
-                        if 'tb' not in ds_id.split(':')[-1]:
-                            return ds.get("dataset_id")
+                        ds_sheet = ds_id.split(':')[-1]  # Get sheet name part
+                        entity_score = 0
+                        
+                        # Check if query entities match dataset name
+                        # Uses SHEET_TYPE_CATEGORIES from FinancialNER (centralized)
+                        for entity in query_entities:
+                            if entity.entity_type == 'metric':
+                                category = entity.metadata.get('category', '')
+                                if self._ner:
+                                    sheet_categories = getattr(self._ner, 'SHEET_TYPE_CATEGORIES', {})
+                                    for sheet_term, categories in sheet_categories.items():
+                                        if sheet_term in ds_sheet and category in categories:
+                                            entity_score += 10
+                                            break
+                        
+                        # Use semantic matcher for similarity
+                        if self._semantic_matcher:
+                            sim_score = self._semantic_matcher.calculate_similarity(query, ds_sheet)
+                            entity_score += sim_score * 5
+                        
+                        if entity_score > best_entity_score:
+                            best_entity_score = entity_score
+                            best_ds = ds.get("dataset_id")
+                    
+                    if best_ds:
+                        return best_ds
+                    # Fallback to first match
                     return matching_datasets[0].get("dataset_id")
         
-        # 2. Use semantic matching for implicit references
+        # 2. Use FULLY DYNAMIC semantic matching for implicit references
         best_match = None
         best_score = 0
+        
+        # Extract query entities using NER
+        query_entities = []
+        if self._ner:
+            query_entities = self._ner.extract_entities(query)
+        
+        # Expand query keywords using semantic matcher
+        expanded_keywords = set()
+        if self._semantic_matcher:
+            expanded_keywords = self._semantic_matcher.expand_query(query)
 
         for dataset in datasets:
             dataset_id = dataset.get("dataset_id", "")
             columns = dataset.get("columns", [])
             
-            score = 0
+            score = 0.0
             dataset_lower = dataset_id.lower()
+            dataset_sheet = dataset_lower.split(':')[-1]
             columns_lower = " ".join(str(c).lower() for c in columns)
             
-            # Use semantic matcher for dataset name matching
+            # 1. Semantic similarity (DYNAMIC - uses synonym expansion)
             if self._semantic_matcher:
                 semantic_score = self._semantic_matcher.calculate_similarity(query, dataset_id)
-                score += semantic_score * 10
+                score += semantic_score * 15
             
-            # Direct word matches in dataset name
-            for word in query_lower.split():
-                if len(word) > 3:
-                    if word in dataset_lower:
+            # 2. Expanded keyword matches (DYNAMIC - uses synonyms)
+            for kw in expanded_keywords:
+                if len(kw) >= 3:
+                    if kw in dataset_lower:
                         score += 5
-                    if word in columns_lower:
+                    if kw in columns_lower:
                         score += 3
             
-            # Period match (fy21, 9mfy22, etc.)
-            periods = re.findall(r"fy\d{2}|9mfy\d{2}|q\d", query_lower)
-            for period in periods:
-                if period in columns_lower or period in dataset_lower:
-                    score += 8
-            
-            # P&L/PL references - prioritize actual P&L over trial balance
-            if any(term in query_lower for term in ['p&l', 'p_l', 'profit and loss', 'profit loss', 'pl_consolidated', 'consolidated p']):
-                if 'pl_consolidated' in dataset_lower or 'pl' in dataset_lower.split(':')[-1]:
-                    score += 20  # Strong boost for P&L sheet
-                elif any(term in dataset_lower for term in ['income', 'pnl']):
-                    score += 15
-                # Penalize trial balance when looking for P&L
-                if 'tb' in dataset_lower.split(':')[-1] or 'trial' in dataset_lower:
-                    score -= 10
-            
-            # Cashburn/GMV references
-            if any(term in query_lower for term in ['cashburn', 'gmv', 'cash burn']):
-                if 'cashburn' in dataset_lower or 'cash' in dataset_lower:
-                    score += 15
+            # 3. Period entity matches (DYNAMIC - uses NER patterns)
+            for entity in query_entities:
+                if entity.entity_type == 'period':
+                    period_normalized = entity.normalized
+                    if period_normalized in columns_lower or period_normalized in dataset_lower:
+                        score += 10
+                elif entity.entity_type == 'metric':
+                    # Check if metric category relates to dataset type
+                    # Uses SHEET_TYPE_CATEGORIES from FinancialNER (centralized, extensible)
+                    category = entity.metadata.get('category', '')
+                    if self._ner:
+                        sheet_categories = getattr(self._ner, 'SHEET_TYPE_CATEGORIES', {})
+                        for sheet_term, categories in sheet_categories.items():
+                            if sheet_term in dataset_sheet and category in categories:
+                                score += 8
 
             if score > best_score:
                 best_score = score

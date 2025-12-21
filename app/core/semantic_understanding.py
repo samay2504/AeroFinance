@@ -90,6 +90,7 @@ class FinancialNER:
             r'profit', r'margin', r'earning', r'ebitda', r'ebit',
             r'net\s*income', r'gross\s*profit', r'operating\s*profit',
             r'pbt', r'pat', r'bottom\s*line',
+            r'p&l', r'p_l', r'pnl', r'profit\s*(?:and|&)\s*loss',  # P&L variants
         ],
         'asset': [
             r'asset', r'receivable', r'inventory', r'cash', r'investment',
@@ -119,6 +120,39 @@ class FinancialNER:
             r'gmv', r'arpu', r'aov', r'ltv', r'cac', r'arr', r'mrr',
             r'dau', r'mau', r'conversion', r'churn', r'retention',
         ],
+    }
+    
+    # Sheet type to metric category mapping
+    # This maps common sheet name patterns to the metric categories they contain
+    # EXTEND THIS to support new sheet naming conventions
+    SHEET_TYPE_CATEGORIES = {
+        # P&L / Income Statement sheets
+        'pl': ['profit', 'revenue', 'expense'],
+        'p_l': ['profit', 'revenue', 'expense'],
+        'pnl': ['profit', 'revenue', 'expense'],
+        'income': ['profit', 'revenue', 'expense'],
+        'profit': ['profit', 'revenue', 'expense'],
+        'revenue': ['revenue'],
+        
+        # Balance Sheet sheets  
+        'bs': ['asset', 'liability', 'equity'],
+        'balance': ['asset', 'liability', 'equity'],
+        'assets': ['asset'],
+        'liabilities': ['liability'],
+        
+        # Cash Flow sheets
+        'cf': ['cashflow'],
+        'cash': ['cashflow'],
+        'cashflow': ['cashflow'],
+        
+        # Performance/KPI sheets
+        'kpi': ['performance', 'ratio', 'volume'],
+        'metrics': ['performance', 'ratio'],
+        'unit': ['performance', 'volume'],  # unit economics
+        
+        # Trial Balance (typically raw data, lower priority)
+        'tb': [],  # Empty = no specific category preference
+        'trial': [],
     }
 
     def __init__(self):
