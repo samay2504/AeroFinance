@@ -316,10 +316,21 @@ def get_sql_engine() -> SQLEngine:
     global _sql_engine
     
     if _sql_engine is None:
-        from app.config import settings
+        # Use sensible defaults - don't depend on settings to avoid parsing errors
+        memory_limit = "2GB"
+        threads = 4
+        
+        try:
+            from app.config import settings
+            memory_limit = settings.duckdb.memory_limit
+            threads = settings.duckdb.threads
+        except Exception:
+            # Use defaults if settings fail
+            pass
+        
         _sql_engine = SQLEngine(
-            memory_limit=settings.duckdb.memory_limit,
-            threads=settings.duckdb.threads
+            memory_limit=memory_limit,
+            threads=threads
         )
     
     return _sql_engine

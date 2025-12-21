@@ -58,11 +58,11 @@ class DataAnalystAgent:
     
     def _init_llm_from_env(self):
         """
-        Initialize LLM provider from environment variables.
-        Uses the LLMProvider class with provider preference chain.
+        Initialize LLM wrapper from environment variables.
+        Returns an LLMWrapper which provides invoke_with_structured_output.
         """
         try:
-            from app.core.llm_provider import LLMProvider
+            from app.core.llm_wrapper import LLMWrapper
             import os
             
             # Load environment variables
@@ -88,18 +88,19 @@ class DataAnalystAgent:
                 "ollama_enabled": os.getenv("OLLAMA_ENABLED", "false").lower() == "true",
                 "ollama_model": os.getenv("OLLAMA_MODEL", "llama3.2"),
                 "openrouter_enabled": os.getenv("OPENROUTER_ENABLED", "false").lower() == "true",
+                "cache_enabled": True,  # Enable caching
             }
             
             logger.debug(f"LLM config: providers={config['provider_preference']}")
             
-            # LLMProvider auto-initializes in __init__
-            provider = LLMProvider(config)
+            # Return LLMWrapper which has invoke_with_structured_output
+            wrapper = LLMWrapper(config)
             
-            if provider.llm:
-                logger.info(f"Auto-initialized LLM: {provider.current_provider}")
-                return provider.llm
+            if wrapper.llm:
+                logger.info(f"Auto-initialized LLM wrapper: {wrapper.provider_name}")
+                return wrapper
             else:
-                logger.warning("LLM provider initialization returned no LLM - running without LLM")
+                logger.warning("LLM wrapper initialization returned no LLM - running without LLM")
                 return None
                 
         except Exception as e:

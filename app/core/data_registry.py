@@ -270,10 +270,20 @@ def get_data_registry() -> DataRegistry:
     global _registry
     
     if _registry is None:
-        from app.config import settings
-        redis_url = settings.cache.redis_url if settings.cache.redis_enabled else None
+        # Use sensible defaults
+        max_lru = 10
+        redis_url = None
+        
+        try:
+            from app.config import settings
+            max_lru = settings.storage.max_lru_dataframes
+            redis_url = settings.cache.redis_url if settings.cache.redis_enabled else None
+        except Exception:
+            # Use defaults if settings fail
+            pass
+        
         _registry = DataRegistry(
-            max_lru_size=settings.storage.max_lru_dataframes,
+            max_lru_size=max_lru,
             redis_url=redis_url
         )
     
