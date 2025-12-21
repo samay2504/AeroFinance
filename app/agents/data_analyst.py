@@ -402,6 +402,31 @@ class DataAnalystAgent:
         if meta_result:
             return meta_result
 
+        # ==== SUMMARY QUERIES: LLM FIRST with RAG ====
+        # For summary/overview queries, use LLM first (better quality)
+        query_info = None
+        if self._query_understanding:
+            query_info = self._query_understanding.parse_query(query)
+        
+        strategy = query_info.get('strategy', {}) if query_info else {}
+        query_lower = query.lower()
+        
+        is_summary_query = (
+            strategy.get('lookup_type') == 'summary' or 
+            any(kw in query_lower for kw in ['summary', 'summarize', 'overview', 'what is', "what's in", 'tell me about', 'describe'])
+        )
+        
+        if is_summary_query and self._llm:
+            # Try LLM summary with RAG context
+            llm_summary = self._try_llm_summary(query, df, df_id, client_id)
+            if llm_summary and llm_summary.success:
+                return llm_summary
+            
+            # Fallback to heuristic summary
+            heuristic_summary = self._generate_heuristic_summary(df, df_id)
+            if heuristic_summary:
+                return heuristic_summary
+
         # Step 1: Try deterministic template
         template_result = self._try_template_sql(query, df, df_id, schema)
         if template_result and template_result.success:
@@ -437,6 +462,169 @@ class DataAnalystAgent:
             method="exhausted",
             explanation="Tried: template SQL, semantic Pandas, LLM SQL, LLM Python"
         )
+    
+    def _try_llm_summary(
+        self,
+        query: str,
+        df: pd.DataFrame,
+        df_id: str,
+        client_id: Optional[str]
+    ) -> Optional[AnalysisResult]:
+        """
+        Generate summary using LLM with RAG context.
+        Combines document vector search with data sample for comprehensive summary.
+        """
+        if not self._llm:
+            return None
+        
+        try:
+            # Build context from multiple sources
+            context_parts = []
+            
+            # 1. Get RAG context if available
+            rag_context = ""
+            try:
+                from app.rag.ingest import get_rag_pipeline
+                rag = get_rag_pipeline()
+                if rag and rag.is_available and client_id:
+                    # Search for relevant document content
+                    rag_result = rag.query(
+                        question=query,
+                        client_id=client_id,
+                        top_k=5,
+                        score_threshold=0.3
+                    )
+                    if rag_result.get("contexts"):
+                        rag_context = "\n".join([c["text"] for c in rag_result["contexts"][:3]])
+                        context_parts.append(f"DOCUMENT CONTEXT:\n{rag_context}")
+            except Exception as e:
+                logger.debug(f"RAG context not available: {e}")
+            
+            # 2. Get data sample and structure
+            label_col = None
+            if self._structure_detector:
+                label_col_idx = self._structure_detector.detect_label_column(df)
+                if label_col_idx < len(df.columns):
+                    label_col = df.columns[label_col_idx]
+            
+            if not label_col and len(df.columns) > 0:
+                label_col = df.columns[0]
+            
+            # Get key metrics using NER
+            key_metrics = []
+            if self._ner and label_col:
+                for idx, row in df.head(30).iterrows():
+                    label = str(row[label_col])
+                    if label.lower() in ('nan', 'none', '', 'na'):
+                        continue
+                    entities = self._ner.extract_entities(label)
+                    if any(e.entity_type == 'metric' for e in entities):
+                        for col in reversed(list(df.columns)):
+                            if col != label_col:
+                                val = pd.to_numeric(row[col], errors='coerce')
+                                if pd.notna(val) and val != 0:
+                                    key_metrics.append(f"- {label}: {round(float(val), 2)}")
+                                    break
+                        if len(key_metrics) >= 8:
+                            break
+            
+            # Build data summary
+            data_summary = f"DATASET: {df_id}\n"
+            data_summary += f"Size: {len(df)} rows x {len(df.columns)} columns\n"
+            data_summary += f"Columns: {', '.join(list(df.columns)[:10])}"
+            if len(df.columns) > 10:
+                data_summary += f" ... and {len(df.columns) - 10} more"
+            data_summary += "\n\n"
+            
+            if key_metrics:
+                data_summary += "KEY METRICS IDENTIFIED:\n"
+                data_summary += "\n".join(key_metrics[:8])
+            else:
+                # Show sample rows
+                data_summary += "SAMPLE DATA:\n"
+                data_summary += df.head(5).to_string(max_colwidth=30)
+            
+            context_parts.append(data_summary)
+            
+            # 3. Generate summary with LLM
+            full_context = "\n\n".join(context_parts)
+            
+            prompt = f"""You are a financial analyst. Provide a comprehensive summary of the following data.
+
+{full_context}
+
+USER QUERY: {query}
+
+Provide a clear, structured summary that includes:
+1. Overview of what this data represents
+2. Key financial metrics and their values
+3. Notable trends or insights
+4. Any important observations
+
+Keep the summary concise but informative (3-5 paragraphs)."""
+
+            response = self._llm.invoke(prompt)
+            summary = str(response.content) if hasattr(response, 'content') else str(response)
+            
+            return AnalysisResult(
+                success=True,
+                result=summary,
+                method="llm:rag_summary",
+                explanation=f"Generated summary using LLM with {'RAG context and ' if rag_context else ''}data analysis"
+            )
+            
+        except Exception as e:
+            logger.warning(f"LLM summary failed: {e}")
+            return None
+    
+    def _generate_heuristic_summary(
+        self,
+        df: pd.DataFrame,
+        df_id: str
+    ) -> Optional[AnalysisResult]:
+        """Generate a heuristic summary without LLM."""
+        try:
+            label_col = None
+            if self._structure_detector:
+                label_col_idx = self._structure_detector.detect_label_column(df)
+                if label_col_idx < len(df.columns):
+                    label_col = df.columns[label_col_idx]
+            
+            if not label_col and len(df.columns) > 0:
+                label_col = df.columns[0]
+            
+            summary_parts = []
+            summary_parts.append(f"Dataset: {df_id}")
+            summary_parts.append(f"Size: {len(df)} rows x {len(df.columns)} columns")
+            
+            # Get key metrics
+            if self._ner and label_col:
+                for idx, row in df.iterrows():
+                    label = str(row[label_col])
+                    if label.lower() in ('nan', 'none', '', 'na'):
+                        continue
+                    entities = self._ner.extract_entities(label)
+                    if any(e.entity_type == 'metric' for e in entities):
+                        for col in reversed(list(df.columns)):
+                            if col != label_col:
+                                val = pd.to_numeric(row[col], errors='coerce')
+                                if pd.notna(val) and val != 0:
+                                    summary_parts.append(f"- {label}: {round(float(val), 2)}")
+                                    break
+                        if len(summary_parts) >= 8:
+                            break
+            
+            if len(summary_parts) > 2:
+                return AnalysisResult(
+                    success=True,
+                    result="\n".join(summary_parts),
+                    method="pandas:heuristic_summary",
+                    explanation=f"Generated overview of {df_id}"
+                )
+        except Exception as e:
+            logger.warning(f"Heuristic summary failed: {e}")
+        
+        return None
 
     def _handle_metadata_query(
         self,
