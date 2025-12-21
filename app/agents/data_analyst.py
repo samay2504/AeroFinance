@@ -818,6 +818,58 @@ class DataAnalystAgent:
             if self._query_understanding:
                 query_info = self._query_understanding.parse_query(query)
             
+            query_lower = query.lower()
+            
+            # ==== SUMMARY/OVERVIEW CHECK FIRST ====
+            # Check at the beginning to prioritize summary requests
+            strategy = query_info.get('strategy', {}) if query_info else {}
+            if strategy.get('lookup_type') == 'summary' or (
+                not strategy and any(kw in query_lower for kw in ['summary', 'summarize', 'overview', 'tell me about', 'describe'])
+            ):
+                # Detect label column
+                label_col = None
+                if self._structure_detector:
+                    label_col_idx = self._structure_detector.detect_label_column(df)
+                    if label_col_idx < len(df.columns):
+                        label_col = df.columns[label_col_idx]
+                
+                if not label_col and len(df.columns) > 0:
+                    label_col = df.columns[0]
+                
+                # Generate summary
+                summary_parts = []
+                summary_parts.append(f"Dataset has {len(df)} rows and {len(df.columns)} columns.")
+                
+                # Use NER to identify key financial metrics
+                if self._ner and label_col:
+                    found_metrics = 0
+                    for idx, row in df.iterrows():
+                        label = str(row[label_col])
+                        if label.lower() in ('nan', 'none', '', 'na'):
+                            continue
+                        
+                        entities = self._ner.extract_entities(label)
+                        if any(e.entity_type == 'metric' for e in entities):
+                            # Get the last non-null numeric value
+                            for col in reversed(list(df.columns)):
+                                if col != label_col:
+                                    val = pd.to_numeric(row[col], errors='coerce')
+                                    if pd.notna(val) and val != 0:
+                                        summary_parts.append(f"- {row[label_col]}: {round(float(val), 2)}")
+                                        found_metrics += 1
+                                        break
+                            if found_metrics >= 6:
+                                break
+                
+                if len(summary_parts) > 1:
+                    summary = "\n".join(summary_parts)
+                    return AnalysisResult(
+                        success=True,
+                        result=summary,
+                        method="pandas:heuristic_summary",
+                        explanation=f"Generated overview of {df_id or 'dataset'}"
+                    )
+            
             # Analyze data structure using semantic understanding
             period_col_map = {}
             label_col = None
