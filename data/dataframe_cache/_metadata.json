@@ -775,7 +775,7 @@
       "unnamed_23": "object",
       "unnamed_24": "object"
     },
-    "registered_at": "2025-12-19T19:29:55.637079",
+    "registered_at": "2025-12-22T12:47:39.128287",
     "parquet_path": "D:\\Projects2.0\\Valuenaire\\Re\\data\\dataframe_cache\\stress_test_client_mis__report_comp.parquet"
   },
   "stress_test_client:mis__report:cashburn_fy21": {
@@ -906,7 +906,7 @@
       "unnamed_16": "object",
       "unnamed_17": "object"
     },
-    "registered_at": "2025-12-19T19:29:56.087942",
+    "registered_at": "2025-12-22T12:47:39.551242",
     "parquet_path": "D:\\Projects2.0\\Valuenaire\\Re\\data\\dataframe_cache\\stress_test_client_mis__report_cashburn_fy21.parquet"
   },
   "stress_test_client:mis__report:unit_economics": {
@@ -981,7 +981,7 @@
       "unnamed_10": "object",
       "unnamed_11": "object"
     },
-    "registered_at": "2025-12-19T19:29:56.527084",
+    "registered_at": "2025-12-22T12:47:39.979651",
     "parquet_path": "D:\\Projects2.0\\Valuenaire\\Re\\data\\dataframe_cache\\stress_test_client_mis__report_unit_economics.parquet"
   },
   "stress_test_client:mis__report:income_statement___ppt": {
@@ -1062,7 +1062,7 @@
       "unnamed_10": "object",
       "unnamed_11": "object"
     },
-    "registered_at": "2025-12-19T19:29:57.054917",
+    "registered_at": "2025-12-22T12:47:40.353359",
     "parquet_path": "D:\\Projects2.0\\Valuenaire\\Re\\data\\dataframe_cache\\stress_test_client_mis__report_income_statement___ppt.parquet"
   },
   "stress_test_client:mis__report:fy22": {
@@ -1200,7 +1200,7 @@
       "unnamed_17": "float64",
       "unnamed_19": "float64"
     },
-    "registered_at": "2025-12-19T19:29:57.553904",
+    "registered_at": "2025-12-22T12:47:40.829288",
     "parquet_path": "D:\\Projects2.0\\Valuenaire\\Re\\data\\dataframe_cache\\stress_test_client_mis__report_fy22.parquet"
   },
   "stress_test_client:innovist_mis_july_2025:tb": {
@@ -2219,7 +2219,7 @@
       "unnamed_163": "object",
       "unnamed_164": "object"
     },
-    "registered_at": "2025-12-19T19:30:00.183232",
+    "registered_at": "2025-12-22T12:47:43.728622",
     "parquet_path": "D:\\Projects2.0\\Valuenaire\\Re\\data\\dataframe_cache\\stress_test_client_innovist_mis_july_2025_tb.parquet"
   },
   "stress_test_client:innovist_mis_july_2025:classification": {
@@ -2600,7 +2600,7 @@
       "unnamed_57": "object",
       "unnamed_58": "object"
     },
-    "registered_at": "2025-12-19T19:30:00.975186",
+    "registered_at": "2025-12-22T12:47:44.564242",
     "parquet_path": "D:\\Projects2.0\\Valuenaire\\Re\\data\\dataframe_cache\\stress_test_client_innovist_mis_july_2025_classification.parquet"
   },
   "stress_test_client:innovist_mis_july_2025:pl_consolidated": {
@@ -2969,7 +2969,7 @@
       "unnamed_55": "object",
       "unnamed_56": "object"
     },
-    "registered_at": "2025-12-19T19:30:01.310756",
+    "registered_at": "2025-12-22T12:47:45.039638",
     "parquet_path": "D:\\Projects2.0\\Valuenaire\\Re\\data\\dataframe_cache\\stress_test_client_innovist_mis_july_2025_pl_consolidated.parquet"
   },
   "stress_test_client:innovist_mis_july_2025:bs": {
@@ -3326,7 +3326,7 @@
       "unnamed_53": "object",
       "unnamed_54": "object"
     },
-    "registered_at": "2025-12-19T19:30:01.607445",
+    "registered_at": "2025-12-22T12:47:45.347106",
     "parquet_path": "D:\\Projects2.0\\Valuenaire\\Re\\data\\dataframe_cache\\stress_test_client_innovist_mis_july_2025_bs.parquet"
   },
   "stress_test_client:innovist_mis_july_2025:working_tb": {
@@ -3575,7 +3575,7 @@
       "108": "object",
       "109": "object"
     },
-    "registered_at": "2025-12-19T19:30:02.405006",
+    "registered_at": "2025-12-22T12:47:46.214890",
     "parquet_path": "D:\\Projects2.0\\Valuenaire\\Re\\data\\dataframe_cache\\stress_test_client_innovist_mis_july_2025_working_tb.parquet"
   },
   "stress_test_client:innovist_mis_july_2025:cf": {
@@ -3926,7 +3926,7 @@
       "unnamed_52": "object",
       "unnamed_53": "object"
     },
-    "registered_at": "2025-12-19T19:30:02.732322",
+    "registered_at": "2025-12-22T12:47:46.502594",
     "parquet_path": "D:\\Projects2.0\\Valuenaire\\Re\\data\\dataframe_cache\\stress_test_client_innovist_mis_july_2025_cf.parquet"
   },
   "debug_client:mis__report:comp": {
@@ -5201,5 +5201,235 @@
     },
     "registered_at": "2025-12-19T20:05:07.646005",
     "parquet_path": "D:\\Projects2.0\\Valuenaire\\Re\\data\\dataframe_cache\\debug_client_innovist_mis_july_2025_cf.parquet"
+  },
+  "mis__report:comp": {
+    "dataset_id": "mis__report:comp",
+    "client_id": null,
+    "rows": 39,
+    "columns": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24
+    ],
+    "dtypes": {
+      "0": "object",
+      "1": "object",
+      "2": "object",
+      "3": "object",
+      "4": "object",
+      "5": "object",
+      "6": "object",
+      "7": "object",
+      "8": "object",
+      "9": "object",
+      "10": "object",
+      "11": "object",
+      "12": "object",
+      "13": "object",
+      "14": "object",
+      "15": "object",
+      "16": "object",
+      "17": "object",
+      "18": "object",
+      "19": "object",
+      "20": "object",
+      "21": "object",
+      "22": "object",
+      "23": "object",
+      "24": "object"
+    },
+    "registered_at": "2025-12-22T15:46:11.093400",
+    "parquet_path": "D:\\Projects2.0\\Valuenaire\\Re\\data\\dataframe_cache\\mis__report_comp.parquet"
+  },
+  "mis__report:unit_economics": {
+    "dataset_id": "mis__report:unit_economics",
+    "client_id": null,
+    "rows": 29,
+    "columns": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11
+    ],
+    "dtypes": {
+      "0": "float64",
+      "1": "object",
+      "2": "object",
+      "3": "object",
+      "4": "float64",
+      "5": "object",
+      "6": "object",
+      "7": "float64",
+      "8": "object",
+      "9": "float64",
+      "10": "object",
+      "11": "object"
+    },
+    "registered_at": "2025-12-22T15:46:11.489715",
+    "parquet_path": "D:\\Projects2.0\\Valuenaire\\Re\\data\\dataframe_cache\\mis__report_unit_economics.parquet"
+  },
+  "mis__report:income_statement_|_ppt": {
+    "dataset_id": "mis__report:income_statement_|_ppt",
+    "client_id": null,
+    "rows": 35,
+    "columns": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11
+    ],
+    "dtypes": {
+      "0": "float64",
+      "1": "object",
+      "2": "object",
+      "3": "object",
+      "4": "object",
+      "5": "float64",
+      "6": "object",
+      "7": "object",
+      "8": "object",
+      "9": "float64",
+      "10": "object",
+      "11": "object"
+    },
+    "registered_at": "2025-12-22T15:46:11.837213",
+    "parquet_path": null,
+    "memory_only": true
+  },
+  "mis__report:cashburn_fy21": {
+    "dataset_id": "mis__report:cashburn_fy21",
+    "client_id": null,
+    "rows": 43,
+    "columns": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17
+    ],
+    "dtypes": {
+      "0": "float64",
+      "1": "object",
+      "2": "object",
+      "3": "object",
+      "4": "object",
+      "5": "object",
+      "6": "object",
+      "7": "object",
+      "8": "object",
+      "9": "object",
+      "10": "object",
+      "11": "object",
+      "12": "object",
+      "13": "object",
+      "14": "float64",
+      "15": "object",
+      "16": "object",
+      "17": "object"
+    },
+    "registered_at": "2025-12-22T15:46:12.185192",
+    "parquet_path": "D:\\Projects2.0\\Valuenaire\\Re\\data\\dataframe_cache\\mis__report_cashburn_fy21.parquet"
+  },
+  "mis__report:fy22": {
+    "dataset_id": "mis__report:fy22",
+    "client_id": null,
+    "rows": 77,
+    "columns": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19
+    ],
+    "dtypes": {
+      "0": "object",
+      "1": "object",
+      "2": "object",
+      "3": "object",
+      "4": "object",
+      "5": "object",
+      "6": "object",
+      "7": "object",
+      "8": "object",
+      "9": "object",
+      "10": "object",
+      "11": "object",
+      "12": "object",
+      "13": "object",
+      "14": "float64",
+      "15": "object",
+      "16": "object",
+      "17": "float64",
+      "18": "float64",
+      "19": "float64"
+    },
+    "registered_at": "2025-12-22T15:46:12.548669",
+    "parquet_path": "D:\\Projects2.0\\Valuenaire\\Re\\data\\dataframe_cache\\mis__report_fy22.parquet"
   }
 }

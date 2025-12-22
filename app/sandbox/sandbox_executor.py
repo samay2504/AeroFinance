@@ -152,6 +152,31 @@ class SandboxExecutor:
 
     def _create_sandbox_globals(self, df: pd.DataFrame) -> Dict[str, Any]:
         """Create restricted globals for sandbox execution."""
+        
+        # Whitelist of safe modules that can be imported
+        safe_modules = {
+            "math": __import__("math"),
+            "decimal": __import__("decimal"),
+            "datetime": __import__("datetime"),
+            "re": __import__("re"),
+            "statistics": __import__("statistics"),
+            "collections": __import__("collections"),
+            "functools": __import__("functools"),
+            "itertools": __import__("itertools"),
+        }
+        
+        # Safe import function that only allows whitelisted modules
+        def safe_import(name, globals=None, locals=None, fromlist=(), level=0):
+            """Restricted import that only allows whitelisted modules."""
+            if name in safe_modules:
+                return safe_modules[name]
+            elif name == "pandas" or name == "pd":
+                return pd
+            elif name == "numpy" or name == "np":
+                return np
+            else:
+                raise ImportError(f"Import of '{name}' not allowed in sandbox")
+        
         return {
             "__builtins__": {
                 "len": len,
@@ -180,15 +205,23 @@ class SandboxExecutor:
                 "True": True,
                 "False": False,
                 "None": None,
+                "__import__": safe_import,  # Safe import function
+                "Exception": Exception,
+                "ValueError": ValueError,
+                "TypeError": TypeError,
+                "KeyError": KeyError,
+                "IndexError": IndexError,
             },
             "pd": pd,
             "np": np,
             "pandas": pd,
             "numpy": np,
             "df": df.copy(),  # Pass a copy for safety
-            "math": __import__("math"),
-            "decimal": __import__("decimal"),
-            "datetime": __import__("datetime"),
+            "math": safe_modules["math"],
+            "decimal": safe_modules["decimal"],
+            "datetime": safe_modules["datetime"],
+            "re": safe_modules["re"],
+            "statistics": safe_modules["statistics"],
         }
 
     def execute(self, code: str, df: pd.DataFrame) -> Dict[str, Any]:

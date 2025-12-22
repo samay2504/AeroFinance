@@ -1,6 +1,6 @@
 """
 LLM Provider - Production-grade multi-provider LLM orchestration.
-Supports: Google Gemini, Groq, OpenAI, HuggingFace, Ollama, OpenRouter.
+Supports: Google Gemini, Groq, OpenAI, Ollama, OpenRouter.
 Includes intelligent fallback, retry logic, and metrics tracking.
 """
 import os
@@ -11,6 +11,11 @@ import subprocess
 import shutil
 import atexit
 import json
+import sys
+
+# Prevent transformers from loading torch which causes DLL issues on Windows
+os.environ['TRANSFORMERS_OFFLINE'] = '1'
+os.environ['HF_HUB_DISABLE_TELEMETRY'] = '1'
 
 try:
     import requests
@@ -26,35 +31,42 @@ except ImportError:
     pass
 
 # Import all possible LLM providers
-try:
-    from langchain_huggingface import HuggingFaceEndpoint
-    HUGGINGFACE_AVAILABLE = True
-except ImportError:
-    HUGGINGFACE_AVAILABLE = False
+# Use Exception instead of ImportError to catch DLL loading errors on Windows
+
+# HuggingFace imports commented out to avoid torch DLL dependency
+# Uncomment if HuggingFace provider is needed
+# try:
+#     from langchain_huggingface import HuggingFaceEndpoint
+#     HUGGINGFACE_AVAILABLE = True
+# except Exception:
+#     HUGGINGFACE_AVAILABLE = False
+HUGGINGFACE_AVAILABLE = False
 
 try:
     from langchain_google_genai import ChatGoogleGenerativeAI
     GOOGLE_GENAI_AVAILABLE = True
-except ImportError:
+except Exception:
     GOOGLE_GENAI_AVAILABLE = False
 
 try:
     from langchain_openai import ChatOpenAI
     OPENAI_AVAILABLE = True
-except ImportError:
+except Exception:
     OPENAI_AVAILABLE = False
 
 try:
     from langchain_groq import ChatGroq
     GROQ_AVAILABLE = True
-except ImportError:
+except Exception:
     GROQ_AVAILABLE = False
 
-try:
-    from huggingface_hub import HfApi
-    HF_API_AVAILABLE = True
-except ImportError:
-    HF_API_AVAILABLE = False
+# HuggingFace Hub API also commented out
+# try:
+#     from huggingface_hub import HfApi
+#     HF_API_AVAILABLE = True
+# except Exception:
+#     HF_API_AVAILABLE = False
+HF_API_AVAILABLE = False
 
 # Attempt LangChain Ollama (community package)
 try:

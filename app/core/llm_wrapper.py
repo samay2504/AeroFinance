@@ -8,6 +8,13 @@ from typing import Any, Dict, Optional, Union
 import json
 import re
 import hashlib
+import os
+import sys
+
+# Prevent transformers from loading torch which causes DLL issues on Windows
+# We don't use HuggingFace models, so this is safe
+os.environ['TRANSFORMERS_OFFLINE'] = '1'
+os.environ['HF_HUB_DISABLE_TELEMETRY'] = '1'
 
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from langchain_core.prompts import PromptTemplate
@@ -328,6 +335,160 @@ class LLMWrapper:
         self._cache_hits = 0
 
 
+class PandasAILLMAdapter:
+    """
+    Adapter class to make LLMWrapper compatible with PandasAI 3.0.
+    
+    PandasAI 3.0 expects an LLM object with specific interface methods.
+    This adapter wraps our multi-provider LLMWrapper to work with PandasAI.
+    """
+    
+    def __init__(self, llm_wrapper: LLMWrapper):
+        """
+        Initialize adapter with existing LLMWrapper.
+        
+        Args:
+            llm_wrapper: The existing LLMWrapper instance
+        """
+        self._wrapper = llm_wrapper
+        self._model = llm_wrapper.provider_name or "gemini"
+        
+    @property
+    def model(self) -> str:
+        """Return model name for PandasAI."""
+        return self._model
+    
+    @property
+    def type(self) -> str:
+        """Return LLM type for PandasAI."""
+        return "custom"
+    
+    def __call__(self, instruction: str, context: str = "", suffix: str = "") -> str:
+        """PandasAI 3.0 may call the LLM directly."""
+        return self.call(instruction, context, suffix)
+        
+    def call(self, instruction: str, context: str = "", suffix: str = "") -> str:
+        """
+        PandasAI calls this method for LLM interaction.
+        
+        Args:
+            instruction: The instruction/prompt
+            context: Optional context
+            suffix: Optional suffix
+            
+        Returns:
+            LLM response as string
+        """
+        # Combine instruction with context
+        full_prompt = instruction
+        if context:
+            full_prompt = f"{context}\n\n{instruction}"
+        if suffix:
+            full_prompt = f"{full_prompt}\n\n{suffix}"
+            
+        try:
+            response = self._wrapper.invoke(full_prompt, use_cache=True)
+            return str(response)
+        except Exception as e:
+            logger.warning(f"PandasAI LLM call failed: {e}")
+            return f"Error: {e}"
+    
+    def complete(self, prompt: str) -> str:
+        """
+        Simple completion method for PandasAI 3.0.
+        
+        Args:
+            prompt: The prompt to complete
+            
+        Returns:
+            LLM completion as string
+        """
+        try:
+            response = self._wrapper.invoke(prompt, use_cache=False)
+            return str(response)
+        except Exception as e:
+            logger.warning(f"PandasAI complete failed: {e}")
+            return f"Error: {e}"
+    
+    def chat_completion(self, messages: list) -> str:
+        """
+        Handle chat completion format used by some PandasAI versions.
+        
+        Args:
+            messages: List of message dicts with 'role' and 'content'
+            
+        Returns:
+            LLM response as string
+        """
+        # Flatten messages into a prompt
+        prompt_parts = []
+        for msg in messages:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            if role == "system":
+                prompt_parts.insert(0, content)
+            else:
+                prompt_parts.append(content)
+        
+        full_prompt = "\n\n".join(prompt_parts)
+        
+        try:
+            response = self._wrapper.invoke(full_prompt, use_cache=True)
+            return str(response)
+        except Exception as e:
+            logger.warning(f"PandasAI chat completion failed: {e}")
+            return f"Error: {e}"
+    
+    def generate_code(self, instruction: str, context: str = "") -> str:
+        """
+        Generate Python code - used by PandasAI for code generation.
+        
+        Args:
+            instruction: Code generation instruction
+            context: Data context
+            
+        Returns:
+            Generated Python code
+        """
+        prompt = f"""Generate Python code to answer this question about the data.
+        
+DATA CONTEXT:
+{context}
+
+INSTRUCTION: {instruction}
+
+Return ONLY valid Python code that works with a pandas DataFrame named 'df'.
+The code should print or return the final result."""
+
+        try:
+            response = self._wrapper.invoke(prompt, use_cache=False)
+            # Extract code from response if wrapped in markdown
+            code = str(response)
+            if "```python" in code:
+                code = code.split("```python")[1].split("```")[0]
+            elif "```" in code:
+                code = code.split("```")[1].split("```")[0]
+            return code.strip()
+        except Exception as e:
+            logger.warning(f"PandasAI code generation failed: {e}")
+            return f"# Error: {e}"
+
+
+def create_pandasai_llm_adapter(llm_wrapper: LLMWrapper = None) -> PandasAILLMAdapter:
+    """
+    Create a PandasAI-compatible LLM adapter.
+    
+    Args:
+        llm_wrapper: Optional LLMWrapper instance. If None, uses singleton.
+        
+    Returns:
+        PandasAILLMAdapter instance
+    """
+    if llm_wrapper is None:
+        llm_wrapper = get_llm_wrapper()
+    return PandasAILLMAdapter(llm_wrapper)
+
+
 # Singleton instance
 _llm_wrapper: Optional[LLMWrapper] = None
 
@@ -351,4 +512,5 @@ def get_llm_wrapper(config: Optional[Dict[str, Any]] = None) -> LLMWrapper:
     return _llm_wrapper
 
 
-__all__ = ["LLMWrapper", "get_llm_wrapper"]
+__all__ = ["LLMWrapper", "get_llm_wrapper", "PandasAILLMAdapter", "create_pandasai_llm_adapter"]
+

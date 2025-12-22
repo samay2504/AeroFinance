@@ -2,12 +2,17 @@
 Document Ingest - Smart chunking and embedding pipeline for RAG.
 Qdrant primary, Chroma fallback. Multi-tenant via client_id metadata.
 """
+import os
 import logging
 import re
 import hashlib
 from typing import Dict, Any, List, Optional, Tuple
 from pathlib import Path
 import io
+
+# Prevent transformers from loading torch which causes DLL issues on Windows
+os.environ['TRANSFORMERS_OFFLINE'] = '1'
+os.environ['HF_HUB_DISABLE_TELEMETRY'] = '1'
 
 logger = logging.getLogger(__name__)
 
@@ -25,12 +30,14 @@ try:
 except ImportError:
     CHROMA_AVAILABLE = False
 
-# Embedding model
-try:
-    from sentence_transformers import SentenceTransformer
-    SENTENCE_TRANSFORMERS_AVAILABLE = True
-except ImportError:
-    SENTENCE_TRANSFORMERS_AVAILABLE = False
+# Embedding model - commented out to avoid torch dependency
+# To enable: uncomment and ensure torch is properly installed
+# try:
+#     from sentence_transformers import SentenceTransformer
+#     SENTENCE_TRANSFORMERS_AVAILABLE = True
+# except ImportError:
+#     SENTENCE_TRANSFORMERS_AVAILABLE = False
+SENTENCE_TRANSFORMERS_AVAILABLE = False
 
 
 class SmartChunker:

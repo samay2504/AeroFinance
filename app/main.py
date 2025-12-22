@@ -2,8 +2,22 @@
 AI-CA Main Application - FastAPI entrypoint with CLI runner.
 Production-grade Agentic AI Chartered Accountant RAG System.
 """
-import logging
 import sys
+import os
+
+# Windows DLL path fix for torch (must be before any other imports)
+if sys.platform == 'win32':
+    os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
+    # Add torch lib to DLL search path if needed
+    torch_lib = os.path.join(os.path.dirname(sys.executable), 'Lib', 'site-packages', 'torch', 'lib')
+    if os.path.exists(torch_lib):
+        os.environ['PATH'] = torch_lib + os.pathsep + os.environ.get('PATH', '')
+        try:
+            os.add_dll_directory(torch_lib)
+        except (AttributeError, OSError):
+            pass
+
+import logging
 import argparse
 import json
 from typing import Any, Dict, List, Optional

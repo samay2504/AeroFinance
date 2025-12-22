@@ -411,9 +411,15 @@ class DataAnalystAgent:
         strategy = query_info.get('strategy', {}) if query_info else {}
         query_lower = query.lower()
         
+        # Check for specific metric indicators that should NOT trigger summary
+        has_specific_metric = any(kw in query_lower for kw in [
+            'cost', 'revenue', 'profit', 'growth', 'margin', 'value', 'total', 
+            'sum', 'average', 'count', 'variance', 'rate', 'percentage', '%'
+        ])
+        
         is_summary_query = (
             strategy.get('lookup_type') == 'summary' or 
-            any(kw in query_lower for kw in ['summary', 'summarize', 'overview', 'what is', "what's in", 'tell me about', 'describe'])
+            (not has_specific_metric and any(kw in query_lower for kw in ['summary', 'summarize', 'overview', "what's in", 'tell me about', 'describe']))
         )
         
         if is_summary_query and self._llm:
@@ -456,11 +462,19 @@ class DataAnalystAgent:
                 if "not found" not in result_str and "no data" not in result_str:
                     return python_result
 
+        # Step 5: Try PandasAI (natural language to DataFrame queries)
+        # PandasAI excels at complex analytical questions and can generate
+        # sophisticated code that our heuristics might miss
+        if self._llm:
+            pandasai_result = self._try_pandasai(query, df, df_id)
+            if pandasai_result and pandasai_result.success:
+                return pandasai_result
+
         return AnalysisResult(
             success=False,
             error="Could not process query with any available method",
             method="exhausted",
-            explanation="Tried: template SQL, semantic Pandas, LLM SQL, LLM Python"
+            explanation="Tried: template SQL, semantic Pandas, LLM SQL, LLM Python, PandasAI"
         )
     
     def _try_llm_summary(
@@ -989,6 +1003,175 @@ Keep the summary concise but informative (3-5 paragraphs)."""
         
         return None
 
+    def _try_pandasai(
+        self,
+        query: str,
+        df: pd.DataFrame,
+        df_id: str
+    ) -> Optional[AnalysisResult]:
+        """
+        Try PandasAI for natural language DataFrame queries.
+        
+        PandasAI excels at:
+        - Complex analytical questions
+        - Multi-step calculations
+        - Aggregations and groupings
+        - Finding patterns in data
+        
+        Uses our LLM infrastructure via the adapter.
+        """
+        try:
+            import pandasai as pai
+            from app.core.llm_wrapper import create_pandasai_llm_adapter
+        except ImportError:
+            logger.debug("PandasAI not available")
+            return None
+        
+        try:
+            # Create PandasAI LLM adapter using our LLM wrapper
+            pai_llm = create_pandasai_llm_adapter(self._llm)
+            
+            # PandasAI 3.0 approach - use DataFrame class directly
+            # Note: pai.config.set() may not work for all config options in v3
+            # Instead, we use the direct API
+            try:
+                # PandasAI 3.0 uses pai.DataFrame 
+                from pandasai import DataFrame as PAIDataFrame
+                smart_df = PAIDataFrame(df.copy())
+                
+                # Set the LLM for this query session
+                # In PandasAI 3.0, you may need environment variables or extensions
+                # Since we're using our adapter, we try direct invocation
+                
+                # PandasAI 3.0 chat method
+                result = smart_df.chat(query)
+                
+            except (ImportError, AttributeError, TypeError) as e1:
+                logger.debug(f"PandasAI DataFrame failed: {e1}, trying SmartDataframe")
+                
+                # Fallback to SmartDataframe if available
+                try:
+                    from pandasai import SmartDataframe
+                    smart_df = SmartDataframe(df.copy(), config={
+                        "llm": pai_llm,
+                        "verbose": False,
+                        "save_charts": False,
+                    })
+                    result = smart_df.chat(query)
+                    
+                except (ImportError, AttributeError) as e2:
+                    logger.debug(f"SmartDataframe failed: {e2}, trying Agent")
+                    
+                    # Last resort: Agent approach
+                    from pandasai import Agent
+                    agent = Agent([df.copy()], config={
+                        "llm": pai_llm,
+                        "verbose": False,
+                    })
+                    result = agent.chat(query)
+            
+            # Parse result
+            if result is None:
+                return None
+            
+            # Handle different result types
+            if isinstance(result, pd.DataFrame):
+                if result.empty:
+                    return None
+                if result.shape == (1, 1):
+                    value = result.iloc[0, 0]
+                    try:
+                        float_val = float(value)
+                        return AnalysisResult(
+                            success=True,
+                            result=float_val,
+                            value=float_val,
+                            method="pandasai:chat",
+                            explanation=f"PandasAI analyzed {df_id}"
+                        )
+                    except (ValueError, TypeError):
+                        pass
+                return AnalysisResult(
+                    success=True,
+                    result=result.to_dict(),
+                    method="pandasai:chat",
+                    explanation=f"PandasAI returned {len(result)} rows"
+                )
+            
+            elif isinstance(result, (int, float)):
+                return AnalysisResult(
+                    success=True,
+                    result=result,
+                    value=float(result),
+                    method="pandasai:chat",
+                    explanation=f"PandasAI calculated from {df_id}"
+                )
+            
+            elif isinstance(result, str):
+                # Check if it's an error message
+                if result.lower().startswith("error") or "failed" in result.lower():
+                    logger.warning(f"PandasAI returned error: {result[:100]}")
+                    return None
+                
+                # Try to extract numeric value from string
+                try:
+                    # Handle formatted numbers like "1,234.56"
+                    clean_str = result.replace(",", "").strip()
+                    # Try to find a number in the string
+                    import re
+                    numbers = re.findall(r'-?\d+\.?\d*', clean_str)
+                    if numbers:
+                        value = float(numbers[0])
+                        return AnalysisResult(
+                            success=True,
+                            result=value,
+                            value=value,
+                            method="pandasai:chat",
+                            explanation=f"PandasAI: {result[:100]}"
+                        )
+                except (ValueError, TypeError):
+                    pass
+                
+                return AnalysisResult(
+                    success=True,
+                    result=result,
+                    method="pandasai:chat",
+                    explanation="PandasAI natural language response"
+                )
+            
+            elif isinstance(result, dict):
+                # Handle dict results - try to extract first numeric value
+                for key, val in result.items():
+                    if isinstance(val, (int, float)):
+                        return AnalysisResult(
+                            success=True,
+                            result=val,
+                            value=float(val),
+                            method="pandasai:chat",
+                            explanation=f"PandasAI: {key}={val}"
+                        )
+                # Return the dict as-is if no numeric value found
+                return AnalysisResult(
+                    success=True,
+                    result=result,
+                    method="pandasai:chat",
+                    explanation="PandasAI dict result"
+                )
+            
+            else:
+                # Handle other types (lists, etc.)
+                return AnalysisResult(
+                    success=True,
+                    result=result,
+                    method="pandasai:chat",
+                    explanation="PandasAI analysis complete"
+                )
+            
+        except Exception as e:
+            logger.warning(f"PandasAI failed: {e}")
+            return None
+
+
     def _try_heuristic_pandas(
         self,
         query: str,
@@ -1124,10 +1307,64 @@ Keep the summary concise but informative (3-5 paragraphs)."""
                                     explanation=f"Growth in '{metric_name}' from {period1} ({val1}) to {period2} ({val2})"
                                 )
 
-            # ==== SINGLE PERIOD LOOKUP ====
+            # ==== SINGLE PERIOD LOOKUP (DYNAMIC COLUMN MATCHING) ====
             if len(periods_in_query) == 1:
                 period = periods_in_query[0]
                 target_col = period_col_map.get(period)
+                
+                # Dynamic column context matching using semantic similarity
+                # Extract meaningful phrases from query (2-3 word n-grams)
+                query_tokens = query_lower.replace('?', '').replace('.', '').split()
+                query_ngrams = []
+                for i in range(len(query_tokens)):
+                    if i + 1 < len(query_tokens):
+                        query_ngrams.append(f"{query_tokens[i]} {query_tokens[i+1]}")
+                    if i + 2 < len(query_tokens):
+                        query_ngrams.append(f"{query_tokens[i]} {query_tokens[i+1]} {query_tokens[i+2]}")
+                
+                # Also add individual meaningful tokens (length >= 4 to avoid noise)
+                for token in query_tokens:
+                    if len(token) >= 4 and token not in ['from', 'what', 'show', 'tell', 'need', 'give']:
+                        query_ngrams.append(token)
+                
+                # Find best matching column by checking headers and cell values
+                best_col = None
+                best_score = 0
+                
+                # Check column names directly
+                for col_idx, col in enumerate(df.columns):
+                    col_str = str(col).lower()
+                    for ngram in query_ngrams:
+                        if ngram in col_str and period.lower() in col_str:
+                            score = len(ngram) + 10  # Bonus for period + context match
+                            if score > best_score:
+                                best_score = score
+                                best_col = col
+                
+                # Check header rows (first 3 rows) for grouped column headers
+                if not best_col and len(df) > 2:
+                    for row_idx in range(min(3, len(df))):
+                        row_vals = df.iloc[row_idx].tolist()
+                        for col_idx, cell_val in enumerate(row_vals):
+                            cell_str = str(cell_val).lower() if pd.notna(cell_val) else ''
+                            for ngram in query_ngrams:
+                                if ngram in cell_str:
+                                    # Found matching header, look for period column in this group
+                                    # Search nearby columns (within 5 columns)
+                                    for j in range(max(0, col_idx), min(len(df.columns), col_idx + 6)):
+                                        # Check if this column or its header contains the period
+                                        col_header = str(df.columns[j]).lower()
+                                        next_row_val = str(df.iloc[row_idx + 1, j]).lower() if row_idx + 1 < len(df) else ''
+                                        if period.lower() in col_header or period.lower() in next_row_val:
+                                            if col_idx != j:  # Don't use the header column itself
+                                                score = len(ngram) + 5
+                                                if score > best_score:
+                                                    best_score = score
+                                                    best_col = df.columns[j]
+                
+                # Use best matching column if found, otherwise fallback to period_col_map
+                if best_col and best_score > 3:
+                    target_col = best_col
                 
                 if target_col and label_col:
                     metric_row = self._find_metric_row_semantic(
