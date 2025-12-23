@@ -1155,18 +1155,22 @@ Keep the summary concise but informative (3-5 paragraphs)."""
             # Note: pai.config.set() may not work for all config options in v3
             # Instead, we use the direct API
             try:
-                # PandasAI 3.0 uses pai.DataFrame 
+                # PandasAI 3.0 uses pai.DataFrame (or SmartDataframe alias)
                 from pandasai import DataFrame as PAIDataFrame
-                smart_df = PAIDataFrame(df.copy())
                 
-                # Set the LLM for this query session
-                # In PandasAI 3.0, you may need environment variables or extensions
-                # Since we're using our adapter, we try direct invocation
+                # FIX: Must pass config to constructor to use custom LLM
+                smart_df = PAIDataFrame(df.copy(), config={
+                    "llm": pai_llm,
+                    "verbose": False,
+                    "save_charts": False,
+                    "enforce_privacy": True
+                })
                 
                 # PandasAI 3.0 chat method
                 result = smart_df.chat(query)
                 
-            except (ImportError, AttributeError, TypeError) as e1:
+            except (ImportError, AttributeError, TypeError, Exception) as e1:
+                # Catch generic Exception too because API key error might be raised
                 logger.debug(f"PandasAI DataFrame failed: {e1}, trying SmartDataframe")
                 
                 # Fallback to SmartDataframe if available

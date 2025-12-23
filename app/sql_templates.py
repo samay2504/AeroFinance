@@ -160,8 +160,25 @@ class SQLTemplateEngine:
             if search_lower == col_str:
                 return col
 
-        # Partial match
+        # Space-less exact match (e.g. "9M FY22" -> "9MFY22")
+        search_nospace = search_lower.replace(" ", "")
         for col in available_columns:
+            col_str = str(col).lower()
+            col_nospace = col_str.replace(" ", "")
+            if search_nospace == col_nospace:
+                return col
+
+        # Partial match - SORT BY LENGTH DESCENDING
+        # This prevents "FY22" from matching "9MFY22" if checked first
+        # We want "9MFY22" to match "9MFY22" instead of "FY22" matching it? 
+        # Actually usually query is "9MFY22" finding column "9MFY22". 
+        # But if query is "9m fy22" and column is "FY22". "FY22" in "9m fy22".
+        # We want to avoid that if there is a better target.
+        
+        # We should check if the search term contains the column name
+        sorted_cols = sorted(available_columns, key=lambda x: len(str(x)), reverse=True)
+        
+        for col in sorted_cols:
             col_str = str(col).lower()
             if search_lower in col_str or col_str in search_lower:
                 return col
