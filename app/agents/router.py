@@ -1,9 +1,9 @@
 """
-Router Agent - Deterministic query classification to track:
-TRACK_DATA (SQL/Pandas), TRACK_DOC (RAG), or TRACK_WEB (Web Search).
+Router Agent - Semantic query classification using NLP.
+Uses spaCy for similarity matching and LLM for intent classification.
+Routes to: TRACK_DATA (SQL/Pandas), TRACK_DOC (RAG), or TRACK_WEB (Web Search).
 """
 import logging
-import re
 from typing import Dict, Any, Optional, List
 
 logger = logging.getLogger(__name__)
@@ -14,111 +14,169 @@ TRACK_DATA = "TRACK_DATA"
 TRACK_DOC = "TRACK_DOC"
 TRACK_WEB = "TRACK_WEB"
 
+# Try to load spaCy for semantic similarity
+_nlp = None
+_SPACY_AVAILABLE = False
 
-# Keyword patterns for deterministic routing
-DATA_KEYWORDS = [
-    r"\b(sum|total|aggregate|count|average|avg|mean)\b",
-    r"\b(growth|variance|change|delta|difference)\b",
-    r"\b(fy\d{2}|q\d|9mfy|3mfy)\b",
-    r"\b(revenue|sales|income|profit|cost|expense)\b",
-    r"\b(from\s+\d{4}\s+to|between\s+\d{4})\b",
-    r"\b(what was|how much|calculate|compute)\b",
-    r"\b(gmv|arpu|cac|ltv|churn|retention)\b",
-    r"\b(january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{4}\b",
-    r"\b(ledger|balance sheet|income statement|cashflow|p&l)\b",
-    r"\b(per order|per unit|unit economics)\b",
-    r"\b(how many sheets|list.*sheets|sheet names)\b",  # Metadata queries
+try:
+    import spacy
+    # Try to load a model with word vectors
+    try:
+        _nlp = spacy.load("en_core_web_md")  # Medium model has word vectors
+        _SPACY_AVAILABLE = True
+        logger.info("Loaded spaCy model: en_core_web_md")
+    except OSError:
+        try:
+            _nlp = spacy.load("en_core_web_sm")  # Small model (limited vectors)
+            _SPACY_AVAILABLE = True
+            logger.info("Loaded spaCy model: en_core_web_sm (limited vectors)")
+        except OSError:
+            logger.warning("No spaCy model found. Run: python -m spacy download en_core_web_md")
+except ImportError:
+    logger.info("spaCy not available. Using pattern-based routing only.")
+
+
+# Intent exemplars for semantic similarity matching
+DATA_INTENT_EXEMPLARS = [
+    "how many sheets are there",
+    "what are the sheet names",
+    "show me the data",
+    "calculate the total",
+    "what is the sum",
+    "list all records",
+    "find the average",
+    "what is nifty",
+    "show volume gainers",
+    "top stocks by price",
+    "count the rows",
+    "growth rate",
+    "compare values",
 ]
 
-DOC_KEYWORDS = [
-    r"\b(clause|policy|terms|conditions|agreement)\b",
-    r"\b(definition|defined as|means)\b",
-    r"\b(contract|legal|compliance|regulation)\b",
-    r"\b(notes to accounts|accounting policy)\b",
-    r"\b(cancellation|termination|liability)\b",
-    r"\b(indemnity|warranty|guarantee)\b",
+DOC_INTENT_EXEMPLARS = [
+    "what does clause 5 say",
+    "find the cancellation policy",
+    "accounting policy for inventory",
+    "terms and conditions",
+    "legal definition",
+    "contract agreement",
+    "compliance requirement",
 ]
 
-WEB_KEYWORDS = [
-    r"\b(current|latest|today|2024|2025)\b.*\b(rate|tax|regulation)\b",
-    r"\b(budget\s+\d{4}|union budget)\b",
-    r"\b(rbi|sebi|gst|income tax)\b.*\b(current|latest|new)\b",
-    r"\b(benchmark|industry|market)\b.*\b(rate|standard)\b",
-    r"\b(what is the current|latest news)\b",
+WEB_INTENT_EXEMPLARS = [
+    "current repo rate",
+    "latest GST rules",
+    "today's market news",
+    "current tax rate",
+    "real-time stock price",
+    "2024 budget announcement",
 ]
 
 
 class RouterAgent:
     """
-    Deterministic router with LLM fallback.
-    Routes queries to appropriate track based on keyword patterns.
+    Semantic router with LLM fallback.
+    Uses spaCy similarity for intent matching, LLM for complex cases.
+    No hardcoded keyword matching - fully dynamic.
     """
 
     def __init__(self, llm_wrapper=None):
         self._llm = llm_wrapper
         self._route_cache: Dict[str, str] = {}
+        self._has_loaded_data = False
+        self._loaded_datasets_info = ""
+        
+        # Pre-compute intent exemplar docs for spaCy similarity
+        self._data_docs = []
+        self._doc_docs = []
+        self._web_docs = []
+        
+        if _SPACY_AVAILABLE and _nlp:
+            self._data_docs = [_nlp(text) for text in DATA_INTENT_EXEMPLARS]
+            self._doc_docs = [_nlp(text) for text in DOC_INTENT_EXEMPLARS]
+            self._web_docs = [_nlp(text) for text in WEB_INTENT_EXEMPLARS]
+            logger.debug("Pre-computed spaCy docs for intent exemplars")
 
-    def _match_patterns(self, query: str, patterns: List[str]) -> int:
-        """Count pattern matches for a query."""
-        matches = 0
-        query_lower = query.lower()
-        for pattern in patterns:
-            if re.search(pattern, query_lower, re.IGNORECASE):
-                matches += 1
-        return matches
+    def set_data_context(self, has_data: bool, datasets_info: str = ""):
+        """Set whether data is currently loaded and what datasets."""
+        self._has_loaded_data = has_data
+        self._loaded_datasets_info = datasets_info
 
-    def route(self, query: str, client_context: Optional[str] = None) -> Dict[str, Any]:
+    def _compute_intent_similarity(self, query: str) -> Dict[str, float]:
+        """Compute semantic similarity to each intent using spaCy."""
+        if not _SPACY_AVAILABLE or not _nlp:
+            return {"data": 0.0, "doc": 0.0, "web": 0.0}
+        
+        query_doc = _nlp(query.lower())
+        
+        # Compute max similarity to each intent category
+        data_sim = max((query_doc.similarity(doc) for doc in self._data_docs), default=0.0) if self._data_docs else 0.0
+        doc_sim = max((query_doc.similarity(doc) for doc in self._doc_docs), default=0.0) if self._doc_docs else 0.0
+        web_sim = max((query_doc.similarity(doc) for doc in self._web_docs), default=0.0) if self._web_docs else 0.0
+        
+        return {"data": data_sim, "doc": doc_sim, "web": web_sim}
+
+    def route(self, query: str, client_context: Optional[str] = None, has_loaded_data: bool = None) -> Dict[str, Any]:
         """
-        Route query to appropriate track.
+        Route query to appropriate track using semantic understanding.
         
         Args:
             query: User's question
             client_context: Optional context about available data
+            has_loaded_data: Override for whether data is loaded
             
         Returns:
             Dict with track, confidence, and reasoning
         """
+        # Use provided flag or instance flag
+        data_loaded = has_loaded_data if has_loaded_data is not None else self._has_loaded_data
+        
         # Check cache
-        cache_key = query.lower().strip()
+        cache_key = f"{query.lower().strip()}:{data_loaded}"
         if cache_key in self._route_cache:
             cached = self._route_cache[cache_key]
             return {"track": cached, "confidence": 0.95, "method": "cache"}
 
-        # Deterministic pattern matching
-        data_score = self._match_patterns(query, DATA_KEYWORDS)
-        doc_score = self._match_patterns(query, DOC_KEYWORDS)
-        web_score = self._match_patterns(query, WEB_KEYWORDS)
-
-        logger.debug(f"Route scores - DATA: {data_score}, DOC: {doc_score}, WEB: {web_score}")
-
-        # Determine track
-        max_score = max(data_score, doc_score, web_score)
+        # Method 1: Semantic similarity with spaCy
+        similarities = self._compute_intent_similarity(query)
+        logger.debug(f"Intent similarities: {similarities}")
         
-        if max_score == 0:
-            # No clear pattern - use LLM if available
-            if self._llm:
-                return self._route_with_llm(query, client_context)
-            # Default to data track
-            track = TRACK_DATA
-            confidence = 0.5
-            method = "default"
-        elif data_score == max_score and data_score > doc_score and data_score > web_score:
-            track = TRACK_DATA
-            confidence = min(0.6 + (data_score * 0.1), 0.95)
-            method = "pattern"
-        elif doc_score == max_score and doc_score > data_score:
-            track = TRACK_DOC
-            confidence = min(0.6 + (doc_score * 0.1), 0.95)
-            method = "pattern"
-        elif web_score == max_score and web_score > data_score:
-            track = TRACK_WEB
-            confidence = min(0.6 + (web_score * 0.1), 0.95)
-            method = "pattern"
+        # Apply data boost when data is loaded
+        if data_loaded:
+            similarities["data"] += 0.2  # Significant boost
+        
+        # Determine track from similarities
+        max_sim = max(similarities.values())
+        
+        if max_sim > 0.5:  # Reasonable similarity threshold
+            if similarities["data"] >= max_sim:
+                track = TRACK_DATA
+                confidence = min(0.6 + similarities["data"] * 0.3, 0.95)
+                method = "spacy_similarity"
+            elif similarities["doc"] >= max_sim:
+                track = TRACK_DOC
+                confidence = min(0.6 + similarities["doc"] * 0.3, 0.95)
+                method = "spacy_similarity"
+            elif similarities["web"] >= max_sim:
+                track = TRACK_WEB
+                confidence = min(0.6 + similarities["web"] * 0.3, 0.95)
+                method = "spacy_similarity"
+            else:
+                track = TRACK_DATA if data_loaded else TRACK_DOC
+                confidence = 0.5
+                method = "default"
         else:
-            # Tie-breaker: prefer DATA track for analytical queries
-            track = TRACK_DATA
-            confidence = 0.6
-            method = "pattern_tiebreak"
+            # Low similarity - use LLM if available
+            if self._llm:
+                context = client_context or self._loaded_datasets_info or ""
+                if data_loaded and not context:
+                    context = "User has data loaded and ready for analysis."
+                return self._route_with_llm(query, context)
+            
+            # Default based on data availability
+            track = TRACK_DATA if data_loaded else TRACK_DOC
+            confidence = 0.5
+            method = "default_no_match"
 
         # Cache result
         self._route_cache[cache_key] = track
@@ -127,15 +185,11 @@ class RouterAgent:
             "track": track,
             "confidence": confidence,
             "method": method,
-            "scores": {
-                "data": data_score,
-                "doc": doc_score,
-                "web": web_score
-            }
+            "similarities": similarities
         }
 
     def _route_with_llm(self, query: str, client_context: Optional[str] = None) -> Dict[str, Any]:
-        """Use LLM for routing when patterns don't match."""
+        """Use LLM for routing when semantic similarity is low."""
         try:
             from app.core.prompts import get_router_prompt
 
@@ -152,10 +206,11 @@ class RouterAgent:
             elif "TRACK_WEB" in response_upper:
                 track = TRACK_WEB
             else:
-                # Default to data
-                track = TRACK_DATA
+                # Default to data if we have data loaded
+                track = TRACK_DATA if self._has_loaded_data else TRACK_DOC
 
-            self._route_cache[query.lower().strip()] = track
+            cache_key = f"{query.lower().strip()}:{self._has_loaded_data}"
+            self._route_cache[cache_key] = track
             
             return {
                 "track": track,
@@ -167,7 +222,7 @@ class RouterAgent:
         except Exception as e:
             logger.error(f"LLM routing failed: {e}")
             return {
-                "track": TRACK_DATA,
+                "track": TRACK_DATA if self._has_loaded_data else TRACK_DOC,
                 "confidence": 0.5,
                 "method": "fallback",
                 "error": str(e)

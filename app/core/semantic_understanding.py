@@ -228,10 +228,11 @@ class SemanticMatcher:
     """
 
     # Synonym groups for financial terms
+    # Synonym groups for financial terms
     SYNONYMS = {
         'revenue': {'sales', 'income', 'turnover', 'receipts', 'top line'},
-        'expense': {'cost', 'expenditure', 'outflow', 'spending'},
-        'profit': {'earnings', 'margin', 'income', 'net income'},
+        'expense': {'cost', 'expenditure', 'outflow', 'spending', 'burn'},
+        'profit': {'earnings', 'margin', 'income', 'net income', 'ebitda'},
         'growth': {'increase', 'change', 'delta', 'variance', 'difference'},
         'total': {'sum', 'aggregate', 'overall', 'cumulative', 'entire'},
         'percentage': {'percent', '%', 'rate', 'proportion'},
@@ -244,7 +245,13 @@ class SemanticMatcher:
         'collection': {'receipts', 'receivables', 'incoming'},
         'prepaid': {'advance', 'pre-paid', 'upfront'},
         'recorded': {'booked', 'registered', 'logged'},
+        'summary': {'overview', 'report', 'brief', 'synopsis'},
+        'metadata': {'structure', 'schema', 'columns', 'sheets', 'tables', 'names'},
     }
+    
+    # Class-level NLP model to share across instances
+    _nlp = None
+    _spacy_loaded = False
 
     def __init__(self):
         # Build reverse synonym map
@@ -256,6 +263,28 @@ class SemanticMatcher:
                     self._synonym_map[syn] = set()
                 self._synonym_map[syn].add(key)
                 self._synonym_map[syn].update(synonyms)
+        
+        # Load spaCy if not already loaded
+        if not SemanticMatcher._spacy_loaded:
+            self._load_spacy()
+
+    @classmethod
+    def _load_spacy(cls):
+        """Load spaCy model for semantic vectors."""
+        try:
+            import spacy
+            try:
+                cls._nlp = spacy.load("en_core_web_md")
+                logger.info("SemanticMatcher loaded spaCy: en_core_web_md")
+            except Exception:
+                try:
+                    cls._nlp = spacy.load("en_core_web_sm")
+                    logger.info("SemanticMatcher loaded spaCy: en_core_web_sm")
+                except Exception:
+                    logger.warning("No spaCy model found. Semantic matching will rely on synonyms only.")
+            cls._spacy_loaded = True
+        except ImportError:
+            logger.info("spaCy not installed. Usage restricted.")
 
     def get_synonyms(self, word: str) -> Set[str]:
         """Get all synonyms for a word."""
@@ -276,20 +305,31 @@ class SemanticMatcher:
     def calculate_similarity(self, query: str, target: str) -> float:
         """
         Calculate semantic similarity score between query and target.
+        Uses spaCy vectors if available, otherwise Jaccard/Synonym overlap.
         Returns 0.0 to 1.0.
         """
         query_lower = query.lower()
         target_lower = target.lower()
         
-        # Exact match
+        # 1. Exact match
         if query_lower == target_lower:
             return 1.0
         
-        # Substring match
+        # 2. Substring match
         if query_lower in target_lower or target_lower in query_lower:
-            return 0.9
+            return 0.95
+            
+        # 3. spaCy Vector Similarity (Semantic)
+        if self._nlp:
+            try:
+                doc1 = self._nlp(query_lower)
+                doc2 = self._nlp(target_lower)
+                if doc1.vector_norm and doc2.vector_norm:
+                    return doc1.similarity(doc2)
+            except Exception:
+                pass
         
-        # Word overlap with synonym expansion
+        # 4. Synonym-based Fallback
         query_words = self.expand_query(query)
         target_words = set(re.findall(r'\b\w{3,}\b', target_lower))
         
@@ -304,9 +344,37 @@ class SemanticMatcher:
         
         # Bonus for matching important financial terms
         important_matches = intersection & set(self.SYNONYMS.keys())
-        bonus = len(important_matches) * 0.1
+        bonus = len(important_matches) * 0.15
         
         return min(1.0, base_score + bonus)
+
+    def classify_intent(self, query: str, intents: Dict[str, List[str]]) -> Tuple[str, float]:
+        """
+        Classify query intent based on semantic similarity to exemplars.
+        
+        Args:
+            query: User query
+            intents: Dictionary of {intent_name: [list of example phrases]}
+            
+        Returns:
+            Tuple of (best_intent, confidence_score)
+        """
+        best_intent = "unknown"
+        best_score = 0.0
+        
+        for intent, exemplars in intents.items():
+            # Calculate max similarity to any exemplar in this intent
+            intent_score = 0.0
+            for ex in exemplars:
+                score = self.calculate_similarity(query, ex)
+                if score > intent_score:
+                    intent_score = score
+            
+            if intent_score > best_score:
+                best_score = intent_score
+                best_intent = intent
+                
+        return best_intent, best_score
 
     def find_best_match(
         self,
@@ -662,23 +730,35 @@ class QueryUnderstanding:
         return strategy
 
 
-# Global instances
-_ner = FinancialNER()
-_matcher = SemanticMatcher()
-_detector = StructureDetector()
-_query_understanding = QueryUnderstanding()
+# Global instances (lazy loaded)
+_ner = None
+_matcher = None
+_detector = None
+_query_understanding = None
 
 
 def get_financial_ner() -> FinancialNER:
+    global _ner
+    if _ner is None:
+        _ner = FinancialNER()
     return _ner
 
 def get_semantic_matcher() -> SemanticMatcher:
+    global _matcher
+    if _matcher is None:
+        _matcher = SemanticMatcher()
     return _matcher
 
 def get_structure_detector() -> StructureDetector:
+    global _detector
+    if _detector is None:
+        _detector = StructureDetector()
     return _detector
 
 def get_query_understanding() -> QueryUnderstanding:
+    global _query_understanding
+    if _query_understanding is None:
+        _query_understanding = QueryUnderstanding()
     return _query_understanding
 
 

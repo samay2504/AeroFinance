@@ -433,27 +433,20 @@ class DataAnalystAgent:
             if heuristic_summary:
                 return heuristic_summary
 
-        # Step 1: Try deterministic template
-        template_result = self._try_template_sql(query, df, df_id, schema)
-        if template_result and template_result.success:
-            return template_result
-
-        # Step 2: Try semantic Pandas (fast, deterministic, schema-based)
-        # This is more reliable than LLM for structured patterns
+        # Step 1: Try semantic Pandas (fast, deterministic, schema-based)
+        # Always try this first as it's the fastest and most reliable for simple lookups
         heuristic_result = self._try_heuristic_pandas(query, df, df_id)
         if heuristic_result and heuristic_result.success:
             return heuristic_result
 
-        # Step 3: Try LLM SQL generation
+        # Step 2: Try PandasAI (natural language to DataFrame queries)
+        # Prioritized per user request - excellent for complex analysis
         if self._llm:
-            llm_result = self._try_llm_sql(query, df, df_id, schema)
-            if llm_result and llm_result.success:
-                # Filter out "Data not found" type results
-                result_str = str(llm_result.result).lower()
-                if "not found" not in result_str and "no data" not in result_str:
-                    return llm_result
+            pandasai_result = self._try_pandasai(query, df, df_id)
+            if pandasai_result and pandasai_result.success:
+                return pandasai_result
 
-        # Step 4: Try LLM Python code generation
+        # Step 3: Try LLM Python code generation (Sandbox)
         if self._llm and self._sandbox:
             python_result = self._try_llm_python(query, df, df_id, schema)
             if python_result and python_result.success:
@@ -462,13 +455,19 @@ class DataAnalystAgent:
                 if "not found" not in result_str and "no data" not in result_str:
                     return python_result
 
-        # Step 5: Try PandasAI (natural language to DataFrame queries)
-        # PandasAI excels at complex analytical questions and can generate
-        # sophisticated code that our heuristics might miss
+        # Step 4: Try deterministic SQL template
+        template_result = self._try_template_sql(query, df, df_id, schema)
+        if template_result and template_result.success:
+            return template_result
+
+        # Step 5: Try LLM SQL generation
         if self._llm:
-            pandasai_result = self._try_pandasai(query, df, df_id)
-            if pandasai_result and pandasai_result.success:
-                return pandasai_result
+            llm_result = self._try_llm_sql(query, df, df_id, schema)
+            if llm_result and llm_result.success:
+                # Filter out "Data not found" type results
+                result_str = str(llm_result.result).lower()
+                if "not found" not in result_str and "no data" not in result_str:
+                    return llm_result
 
         return AnalysisResult(
             success=False,
@@ -545,7 +544,9 @@ class DataAnalystAgent:
             # Build data summary
             data_summary = f"DATASET: {df_id}\n"
             data_summary += f"Size: {len(df)} rows x {len(df.columns)} columns\n"
-            data_summary += f"Columns: {', '.join(list(df.columns)[:10])}"
+            # Convert column names to strings (may be integers if no header)
+            col_names = [str(c) for c in list(df.columns)[:10]]
+            data_summary += f"Columns: {', '.join(col_names)}"
             if len(df.columns) > 10:
                 data_summary += f" ... and {len(df.columns) - 10} more"
             data_summary += "\n\n"
@@ -647,33 +648,150 @@ Keep the summary concise but informative (3-5 paragraphs)."""
         df_id: str,
         client_id: Optional[str]
     ) -> Optional[AnalysisResult]:
-        """Handle metadata queries about sheets/structure."""
+        """
+        Handle metadata queries using LLM semantic understanding.
+        No hardcoded patterns - LLM determines if this is a metadata query.
+        """
         query_lower = query.lower()
 
-        # Sheet count query
-        if "how many sheets" in query_lower or "number of sheets" in query_lower:
-            datasets = self.list_datasets_for_client(client_id) if client_id else list(self.dataframes.keys())
-            count = len(datasets) if isinstance(datasets, list) else len(datasets)
+        # 1. STRICT EXCLUSION: If query is clearly about data analysis, SKIP metadata check
+        # This prevents "summary of sheet X" from being treated as "list sheet names"
+        # We perform this FIRST to override any weak semantic matches
+        if any(kw in query_lower for kw in [
+            'summary', 'analyze', 'show data', 'values', 'calculate', 
+            'give me the data', 'what is the', 'sum of', 'total', 'average',
+            'expense', 'revenue', 'profit', 'margin', 'cost', 'sales', 'growth'
+        ]):
+            # Only allow if it explicitly asks for names/count/structure
+            if not any(kw in query_lower for kw in ['sheet names', 'list of sheets', 'number of sheets', 'how many sheets', 'list tables']):
+                return None
+        
+        # 2. SEMANTIC INTENT CLASSIFICATION (No hardcoding)
+        # Use spaCy vectors to distinguish "metadata" (structure) from "analysis" (content)
+        if self._semantic_matcher:
+            intents = {
+                "metadata": ["list sheets", "what are the sheet names", "how many tables", "show current datasets", "list loaded files", "file structure"],
+                "analysis": ["summary of sheet", "analyze the data", "show me values", "calculate total", "average of column", "describe the content", "values in table"]
+            }
+            best_intent, score = self._semantic_matcher.classify_intent(query, intents)
             
+            # If clearly analysis, skip metadata check completely
+            if best_intent == "analysis" and score > 0.5:
+                 return None
+
+        # Get all dataset info for context
+        datasets = self.list_datasets_for_client(client_id) if client_id else []
+        if isinstance(datasets, list) and len(datasets) > 0:
+            sheet_names = [d.get("dataset_id", d) if isinstance(d, dict) else str(d) for d in datasets]
+        else:
+            sheet_names = list(self.dataframes.keys())
+        
+        # Build dataset info string
+        datasets_info = f"Total datasets loaded: {len(sheet_names)}\n"
+        datasets_info += "Dataset names:\n"
+        for i, name in enumerate(sheet_names, 1):
+            display_name = name.split(':')[-1] if ':' in name else name
+            datasets_info += f"  {i}. {display_name} (full ID: {name})\n"
+        
+        # Build schema info for current dataframe
+        schema_info = f"Current dataset: {df_id}\n"
+        schema_info += f"Rows: {len(df)}, Columns: {len(df.columns)}\n"
+        col_names = [str(c)[:30] for c in list(df.columns[:10])]
+        schema_info += f"Column names: {col_names}\n"
+        
+        # Use LLM to determine if this is a metadata query
+        if self._llm:
+            try:
+                from app.core.prompts import get_metadata_query_prompt
+                import json
+                
+                prompt = get_metadata_query_prompt(query, datasets_info, schema_info)
+                response = self._llm.invoke(prompt)
+                
+                # Try to parse JSON response
+                try:
+                    # Clean response
+                    response = response.strip()
+                    if response.startswith("```"):
+                        response = response.split("```")[1]
+                        if response.startswith("json"):
+                            response = response[4:]
+                    
+                    result = json.loads(response)
+                    
+                    if result.get("is_metadata_query"):
+                        answer = result.get("answer", "")
+                        if answer:
+                            return AnalysisResult(
+                                success=True,
+                                result=answer,
+                                value=float(len(sheet_names)),
+                                method="metadata_llm",
+                                explanation=f"Answered {result.get('query_type', 'metadata')} query using semantic understanding"
+                            )
+                except json.JSONDecodeError:
+                    # Ignore parsing errors - fallback to manual checks below
+                    pass
+                        
+            except Exception as e:
+                logger.debug(f"LLM metadata query failed: {e}")
+        
+        # Fallback: Semantic check for "sheet names" queries
+        # Only catch the most obvious metadata queries as fallback
+        if self._semantic_matcher:
+            intents = {
+                "sheet_count": ["how many sheets", "count the number of sheets", "number of tables"],
+                "sheet_names": ["what are the sheet names", "list sheets", "names of sheets", "show sheet list"]
+            }
+            intent, score = self._semantic_matcher.classify_intent(query, intents)
+            
+            if intent == "sheet_count" and score > 0.6:
+                 return AnalysisResult(
+                    success=True,
+                    result=f"There are {len(sheet_names)} sheets available.",
+                    value=float(len(sheet_names)),
+                    method="metadata_semantic",
+                    explanation="Counted registered datasets"
+                )
+            
+            if intent == "sheet_names" and score > 0.6:
+                result_text = f"There are {len(sheet_names)} sheets:\n"
+                for i, name in enumerate(sheet_names, 1):
+                    display_name = name.split(':')[-1] if ':' in name else name
+                    result_text += f"  {i}. {display_name}\n"
+                return AnalysisResult(
+                    success=True,
+                    result=result_text,
+                    value=float(len(sheet_names)),
+                    method="metadata_semantic",
+                    explanation="Listed all registered sheets"
+                )
+
+        # Legacy fallback (only if semantic matcher unavailable)
+        elif "how many" in query_lower and "sheet" in query_lower:
             return AnalysisResult(
                 success=True,
-                result=f"There are {count} sheets available.",
-                value=float(count),
+                result=f"There are {len(sheet_names)} sheets available.",
+                value=float(len(sheet_names)),
                 method="metadata",
                 explanation="Counted registered datasets"
             )
-
-        # List sheets query
-        if "list" in query_lower and "sheet" in query_lower:
-            datasets = self.list_datasets_for_client(client_id) if client_id else []
-            if isinstance(datasets, list):
-                sheet_names = [d.get("dataset_id", d) if isinstance(d, dict) else str(d) for d in datasets]
-            else:
-                sheet_names = list(self.dataframes.keys())
-            
+        
+        # Only match "sheet names" queries
+        is_names_query = (
+            ("names" in query_lower and "sheet" in query_lower and "of" not in query_lower) or
+            "list sheets" in query_lower
+        )
+        
+        if is_names_query:
+            result_text = f"There are {len(sheet_names)} sheets:\n"
+            for i, name in enumerate(sheet_names, 1):
+                display_name = name.split(':')[-1] if ':' in name else name
+                result_text += f"  {i}. {display_name}\n"
             return AnalysisResult(
                 success=True,
-                result=f"Available sheets: {', '.join(sheet_names)}",
+                result=result_text,
+                value=float(len(sheet_names)),
                 method="metadata",
                 explanation="Listed all registered sheets"
             )
@@ -692,15 +810,17 @@ Keep the summary concise but informative (3-5 paragraphs)."""
             return None
 
         try:
-            result = self._template_engine.generate_deterministic_sql(query, schema, df_id)
+            # Ensure DataFrame is registered first to get safe table name
+            _, _ = self._sql_engine.register_dataframe(df_id, df)
+            safe_table_name = self._sql_engine.get_safe_table_name(df_id)
+            
+            # Generate SQL using the correct table name
+            result = self._template_engine.generate_deterministic_sql(query, schema, safe_table_name)
             if not result:
                 return None
 
             sql, method = result
             logger.info(f"Template SQL: {sql[:100]}")
-
-            # Ensure DataFrame is registered
-            self._sql_engine.register_dataframe(df_id, df)
 
             # Execute SQL
             result_df = self._sql_engine.execute_df(sql)

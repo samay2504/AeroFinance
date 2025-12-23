@@ -56,6 +56,7 @@ _PROMPT_TEMPLATES = _load_yaml_templates()
 def get_router_prompt(query: str, client_context: str) -> str:
     """
     Classifies intent into: TRACK_DATA, TRACK_DOC, or TRACK_WEB.
+    Uses semantic understanding, not keyword matching.
     
     Args:
         query: User's question
@@ -67,26 +68,44 @@ def get_router_prompt(query: str, client_context: str) -> str:
     template_str = _PROMPT_TEMPLATES.get("router", """
 {guardrails}
 
-CLIENT CONTEXT:
+CLIENT/DATA CONTEXT:
 {context}
 
-USER QUERY: {query}
+USER QUERY: "{query}"
 
-CLASSIFY this query into exactly ONE track:
+UNDERSTAND THE USER'S INTENT semantically (not just keywords) and classify into ONE track:
 
-TRACK_DATA: For trends, growth rates, specific numbers, ledger scrutiny, period comparisons,
-            aggregations, or any question requiring calculation from structured data.
-            Keywords: what was, growth, total, sum, average, compare, variance, percentage.
+TRACK_DATA: Use when the user wants to:
+- Query, analyze, or explore LOADED DATA (spreadsheets, CSV, Excel files)
+- Get counts, sums, averages, totals, or any calculations FROM data
+- Find specific values, records, or metrics in datasets
+- Ask about sheet names, columns, rows, or data structure
+- Ask "what is [term]" when that term might exist in loaded data
+- Any question that can be answered by looking at tabular data
+EXAMPLES: "how many sheets", "what are the sheet names", "total revenue", 
+          "what is nifty", "show volume gainers", "list top stocks"
 
-TRACK_DOC: For policy definitions, contract clauses, notes to accounts, legal terms,
-           compliance requirements, or textual information lookup.
-           Keywords: what is the clause, policy, definition, terms, agreement.
+TRACK_DOC: Use when the user wants to:
+- Look up definitions, policies, or clauses from DOCUMENTS (PDFs, contracts)
+- Find legal terms, compliance text, or regulatory content
+- Search through unstructured text documents (not spreadsheets)
+- Answer questions about document content that requires reading prose
+EXAMPLES: "what does clause 5 say", "find the cancellation policy", 
+          "accounting policy for inventory"
 
-TRACK_WEB: For latest tax rates, budget news, external benchmarks, current regulations,
-           or any information requiring real-time/external data.
-           Keywords: current rate, latest, 2024/2025, budget, external, benchmark.
+TRACK_WEB: Use when the user wants to:
+- Get CURRENT, REAL-TIME, or LATEST information from the internet
+- Find external data not in loaded files (rates, news, regulations)
+- Answer questions requiring up-to-date information
+EXAMPLES: "current repo rate", "latest GST rules", "today's market news"
 
-OUTPUT FORMAT: Return ONLY the track code (TRACK_DATA, TRACK_DOC, or TRACK_WEB) with no explanation.
+DECISION PRIORITY:
+1. If data is loaded AND query seems related to analyzing that data → TRACK_DATA
+2. If asking about document content/policies → TRACK_DOC  
+3. If needing real-time/external info → TRACK_WEB
+4. When in doubt with loaded data → TRACK_DATA
+
+OUTPUT: Return ONLY the track code (TRACK_DATA, TRACK_DOC, or TRACK_WEB).
 """)
     
     template = PromptTemplate(
@@ -386,6 +405,65 @@ Return ONLY the dataset_id of the best match, or "NONE" if no match found.
     return template.format(datasets=datasets_info, query=query)
 
 
+def get_metadata_query_prompt(query: str, available_datasets: str, schema_info: str = "") -> str:
+    """
+    Generate prompt for understanding and answering metadata queries semantically.
+    No hardcoding - LLM determines if this is a metadata query and how to answer.
+    
+    Args:
+        query: User's question
+        available_datasets: List of available datasets/sheets
+        schema_info: Optional schema information
+        
+    Returns:
+        Formatted prompt for metadata query handling
+    """
+    template_str = _PROMPT_TEMPLATES.get("metadata_query", """
+You are a data assistant. Analyze the user's query and determine if they are asking about 
+the STRUCTURE or METADATA of loaded data (not the data values themselves).
+
+METADATA QUERIES include questions about:
+- Number of sheets/tables/datasets
+- Names of sheets/tables/datasets
+- Column names or structure
+- Data types or schema
+- File information
+
+AVAILABLE DATA:
+{datasets}
+
+{schema_section}
+
+USER QUERY: "{query}"
+
+INSTRUCTIONS:
+1. Determine if this is a METADATA query (about structure) or a DATA query (about values)
+   Matches METADATA: "what are the sheet names", "list all tables", "how many columns", "show me schema"
+   Matches DATA (NOT metadata): "summary of sheet X", "calculate total", "show me the data", "value of X", "analyze trends"
+
+2. If it is a DATA query (asking for summary, values, analysis), return "is_metadata_query": false
+3. If METADATA query, provide a direct, complete answer
+4. Include all relevant information (e.g., ALL sheet names, not just some)
+5. Format the answer clearly and professionally
+
+OUTPUT FORMAT:
+Return JSON:
+{{
+    "is_metadata_query": true/false,
+    "answer": "Your complete answer if metadata query, or null",
+    "query_type": "sheet_count|sheet_names|column_info|schema|other|not_metadata"
+}}
+""")
+    
+    schema_section = f"SCHEMA INFORMATION:\n{schema_info}" if schema_info else ""
+    
+    template = PromptTemplate(
+        input_variables=["datasets", "query", "schema_section"],
+        template=template_str
+    )
+    return template.format(datasets=available_datasets, query=query, schema_section=schema_section)
+
+
 # Tool placeholder descriptions for agent prompts
 TOOL_DESCRIPTIONS = {
     "tool_benford": "benford_test: Runs Benford's Law test on numeric column to detect anomalies/fraud",
@@ -624,6 +702,7 @@ __all__ = [
     "get_document_rag_prompt",
     "get_web_search_prompt",
     "get_dataset_match_prompt",
+    "get_metadata_query_prompt",
     "get_tool_description",
     "get_tool_selection_prompt",
     "get_fraud_analysis_prompt",

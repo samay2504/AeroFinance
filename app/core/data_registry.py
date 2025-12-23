@@ -81,8 +81,10 @@ class DataRegistry:
             logger.debug(f"Evicted LRU DataFrame: {oldest_key}")
 
     def _parquet_path(self, dataset_id: str) -> Path:
-        """Get parquet file path for dataset."""
-        safe_id = dataset_id.replace("/", "_").replace(":", "_")
+        """Get parquet file path for dataset with Windows-safe filename."""
+        # Sanitize all Windows-invalid filename characters: \ / : * ? " < > |
+        import re
+        safe_id = re.sub(r'[\\/:*?"<>|]', '_', dataset_id)
         return self.cache_dir / f"{safe_id}.parquet"
 
     def register(

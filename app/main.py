@@ -5,17 +5,12 @@ Production-grade Agentic AI Chartered Accountant RAG System.
 import sys
 import os
 
-# Windows DLL path fix for torch (must be before any other imports)
-if sys.platform == 'win32':
-    os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
-    # Add torch lib to DLL search path if needed
-    torch_lib = os.path.join(os.path.dirname(sys.executable), 'Lib', 'site-packages', 'torch', 'lib')
-    if os.path.exists(torch_lib):
-        os.environ['PATH'] = torch_lib + os.pathsep + os.environ.get('PATH', '')
-        try:
-            os.add_dll_directory(torch_lib)
-        except (AttributeError, OSError):
-            pass
+# Windows DLL path fix
+try:
+    from app.core.dll_fix import apply_dll_fix
+    apply_dll_fix()
+except ImportError:
+    pass
 
 import logging
 import argparse

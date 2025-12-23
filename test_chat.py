@@ -8,26 +8,19 @@ import os
 # Set environment for Windows DLL loading (MUST BE BEFORE ANY OTHER IMPORTS)
 if sys.platform == 'win32':
     os.environ['PYTHONIOENCODING'] = 'utf-8'
-    os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
-    
-    # Add torch DLL directory to PATH before importing torch
-    torch_lib = r'd:\Projects2.0\Valuenaire\.conda\Lib\site-packages\torch\lib'
-    if os.path.exists(torch_lib):
-        os.environ['PATH'] = torch_lib + os.pathsep + os.environ.get('PATH', '')
-        try:
-            os.add_dll_directory(torch_lib)
-        except Exception:
-            pass
-    
-    # Pre-import torch to ensure DLLs load correctly
-    try:
-        import torch  # noqa
-    except Exception:
-        pass
+
+# Windows DLL path fix for torch/spacy
+try:
+    from app.core.dll_fix import apply_dll_fix
+    apply_dll_fix()
+except ImportError:
+    pass
+
 
 from pathlib import Path
 import json
 import time
+import pandas as pd
 from typing import Optional, Dict, Any
 
 # Add project root to path
@@ -45,16 +38,102 @@ except ImportError as e:
     print("Make sure you're running from the Re directory")
     sys.exit(1)
 
-# Global state
+# ==============================================================================
+# CONVERSATION MEMORY - Sliding window with session management
+# ==============================================================================
+class ConversationMemory:
+    """
+    Production-grade conversation memory with:
+    - Sliding window (keeps last K messages)
+    - Session/document ID isolation
+    - LRU cache for memory efficiency
+    - Context summarization for long conversations
+    """
+    def __init__(self, window_size: int = 10, max_sessions: int = 100):
+        self.window_size = window_size
+        self.max_sessions = max_sessions
+        self._sessions: Dict[str, list] = {}
+        self._access_order: list = []  # LRU tracking
+        
+    def add_message(self, session_id: str, role: str, content: str):
+        """Add a message to session history."""
+        if session_id not in self._sessions:
+            self._sessions[session_id] = []
+            self._access_order.append(session_id)
+        
+        # LRU eviction if too many sessions
+        if len(self._sessions) > self.max_sessions:
+            oldest = self._access_order.pop(0)
+            del self._sessions[oldest]
+        
+        # Update access order
+        if session_id in self._access_order:
+            self._access_order.remove(session_id)
+        self._access_order.append(session_id)
+        
+        # Add message with sliding window
+        self._sessions[session_id].append({
+            "role": role,
+            "content": content[:1000],  # Truncate to save memory
+            "timestamp": time.time()
+        })
+        
+        # Keep only last window_size messages
+        if len(self._sessions[session_id]) > self.window_size:
+            self._sessions[session_id] = self._sessions[session_id][-self.window_size:]
+    
+    def get_history(self, session_id: str, last_n: int = None) -> list:
+        """Get conversation history for a session."""
+        if session_id not in self._sessions:
+            return []
+        history = self._sessions[session_id]
+        if last_n:
+            return history[-last_n:]
+        return history
+    
+    def get_context_string(self, session_id: str, last_n: int = 5) -> str:
+        """Get conversation context as formatted string for LLM."""
+        history = self.get_history(session_id, last_n)
+        if not history:
+            return ""
+        
+        context_parts = []
+        for msg in history:
+            role = "User" if msg["role"] == "user" else "Assistant"
+            context_parts.append(f"{role}: {msg['content'][:300]}")
+        
+        return "\n".join(context_parts)
+    
+    def clear_session(self, session_id: str):
+        """Clear a specific session."""
+        if session_id in self._sessions:
+            del self._sessions[session_id]
+            self._access_order.remove(session_id)
+    
+    def get_session_summary(self, session_id: str) -> Dict:
+        """Get session statistics."""
+        if session_id not in self._sessions:
+            return {"exists": False}
+        return {
+            "exists": True,
+            "message_count": len(self._sessions[session_id]),
+            "window_size": self.window_size
+        }
+
+# ==============================================================================
+# GLOBAL STATE
+# ==============================================================================
 loaded_files: Dict[str, Any] = {}
 data_analyst: Optional[DataAnalystAgent] = None
 router: Optional[RouterAgent] = None
 doc_ingestor: Optional[DocumentIngestor] = None
+conversation_memory: Optional[ConversationMemory] = None
+current_session_id: str = "default"
 
 
 def initialize_components():
     """Initialize all required components."""
-    global data_analyst, router, doc_ingestor
+    global data_analyst, router, doc_ingestor, conversation_memory
     
     print("\n⏳ Initializing AI components...")
     
@@ -79,6 +158,10 @@ def initialize_components():
             print(f"  ⚠️ Document Ingestor unavailable: {e}")
             doc_ingestor = None
         
+        # Initialize Conversation Memory
+        conversation_memory = ConversationMemory(window_size=10, max_sessions=100)
+        print("  ✅ Conversation Memory initialized (window=10)")
+        
         return True
         
     except Exception as e:
@@ -89,8 +172,6 @@ def initialize_components():
 def load_file(file_path: str) -> bool:
     """Load an Excel or CSV file for analysis."""
     global loaded_files, data_analyst
-    
-    import pandas as pd
     
     path = Path(file_path)
     if not path.exists():
@@ -139,6 +220,11 @@ def load_file(file_path: str) -> bool:
         else:
             print(f"❌ Unsupported file type: {path.suffix}")
             return False
+        
+        # Inform router that data is now available with context
+        if router and loaded_files:
+            datasets_info = ", ".join([f.split(':')[-1] for f in loaded_files.keys()])
+            router.set_data_context(True, f"Loaded datasets: {datasets_info}")
             
         return True
         
@@ -147,20 +233,152 @@ def load_file(file_path: str) -> bool:
         return False
 
 
-def ask_question(query: str) -> str:
-    """Process a user question through the AI pipeline."""
-    global data_analyst, router, loaded_files
+def ingest_document(file_path: str) -> bool:
+    """Ingest a document for RAG search."""
+    global doc_ingestor
+    
+    if not doc_ingestor:
+        print("❌ Document ingestor not available.")
+        return False
+    
+    path = Path(file_path)
+    if not path.exists():
+        print(f"❌ File not found: {file_path}")
+        return False
+    
+    print(f"\n📄 Ingesting document: {path.name}")
+    
+    try:
+        # Read file content based on type
+        text = ""
+        
+        if path.suffix.lower() == '.txt':
+            with open(path, 'r', encoding='utf-8') as f:
+                text = f.read()
+        
+        elif path.suffix.lower() == '.pdf':
+            try:
+                import PyPDF2
+                with open(path, 'rb') as f:
+                    pdf_reader = PyPDF2.PdfReader(f)
+                    text = "\n".join([page.extract_text() for page in pdf_reader.pages])
+            except ImportError:
+                print("❌ PyPDF2 not installed. Install with: pip install PyPDF2")
+                return False
+        
+        elif path.suffix.lower() in ['.docx', '.doc']:
+            try:
+                import docx
+                doc = docx.Document(path)
+                text = "\n".join([para.text for para in doc.paragraphs])
+            except ImportError:
+                print("❌ python-docx not installed. Install with: pip install python-docx")
+                return False
+        
+        else:
+            print(f"❌ Unsupported file type: {path.suffix}")
+            return False
+        
+        if not text.strip():
+            print("❌ No text content found in document")
+            return False
+        
+        # Ingest into RAG
+        client_id = "test_client"
+        doc_id = path.stem.replace(' ', '_').replace('-', '_').lower()
+        
+        result = doc_ingestor.ingest_text(
+            text=text,
+            client_id=client_id,
+            dataset_id=doc_id,
+            metadata={"filename": path.name, "path": str(path)}
+        )
+        
+        if result.get("success"):
+            chunks = result.get("chunks_created", 0)
+            print(f"  ✅ Ingested '{doc_id}' ({chunks} chunks created)")
+            print(f"  💡 You can now ask questions about this document!")
+            return True
+        else:
+            error = result.get("error", "Unknown error")
+            print(f"  ❌ Ingestion failed: {error}")
+            return False
+            
+    except Exception as e:
+        print(f"❌ Error ingesting document: {e}")
+        return False
+
+
+def ask_question(query: str, force_track: str = None) -> str:
+    """Process a user question through the AI pipeline with conversation context."""
+    global data_analyst, router, loaded_files, doc_ingestor, conversation_memory, current_session_id
     
     if not query.strip():
         return ""
     
     start_time = time.time()
     
+    # Add user query to conversation memory
+    if conversation_memory:
+        conversation_memory.add_message(current_session_id, "user", query)
+    
     try:
-        # Route the query
-        route_result = router.route(query)
-        track = route_result.get('track', TRACK_DATA)
-        confidence = route_result.get('confidence', 0.5)
+        query_lower = query.lower()
+        
+        # ==================================================================
+        # HANDLE METADATA QUERIES DIRECTLY (sheet names, column info, etc.)
+        # ==================================================================
+        if loaded_files:
+            # Sheet names query
+            if any(kw in query_lower for kw in ['sheet name', 'sheet names', 'names of sheet', 'what are the sheets']):
+                sheet_names = [info.get('sheet', df_id.split(':')[-1]) for df_id, info in loaded_files.items()]
+                response = f"📋 There are {len(loaded_files)} sheets:\n"
+                for i, name in enumerate(sheet_names, 1):
+                    response += f"  {i}. {name}\n"
+                if conversation_memory:
+                    conversation_memory.add_message(current_session_id, "assistant", response)
+                return response + f"\n  ⏱️ Time: {time.time() - start_time:.2f}s"
+        
+        # ==================================================================
+        # SMART ROUTING WITH DATA PRIORITY
+        # ==================================================================
+        if force_track:
+            track = force_track
+            confidence = 1.0
+            print(f"  🎯 Forced routing to: {force_track}")
+        else:
+            # Data-related keywords - route to DATA track
+            data_keywords = [
+                'sheet', 'column', 'row', 'data', 'file', 'excel', 'csv', 'table',
+                'value', 'total', 'sum', 'average', 'count', 'max', 'min',
+                'nifty', 'stock', 'price', 'volume', 'gain', 'loss', 'market',
+                'revenue', 'profit', 'expense', 'cost', 'growth', 'percent',
+                'this', 'loaded', 'show', 'list', 'top', 'bottom', 'first', 'last',
+                'many', 'how many', 'what is', 'what are', 'which', 'where'
+            ]
+            
+            has_data_keyword = any(kw in query_lower for kw in data_keywords)
+            
+            route_result = router.route(query)
+            track = route_result.get('track', TRACK_DATA)
+            confidence = route_result.get('confidence', 0.5)
+            
+            # Override to DATA if data is loaded and query seems data-related
+            if loaded_files and has_data_keyword and track != TRACK_DATA:
+                track = TRACK_DATA
+                confidence = 0.85
+                print(f"  📝 Redirected to data analysis (data keywords detected)")
+            
+            # Also override for context references
+            refers_to_loaded_data = any(phrase in query_lower for phrase in [
+                'this data', 'this file', 'this document', 'this sheet', 'this excel',
+                'loaded data', 'loaded file', 'the data', 'the file', 'my data',
+                'the sheet', 'these sheets', 'this table'
+            ])
+            
+            if track == TRACK_DOC and loaded_files and refers_to_loaded_data:
+                track = TRACK_DATA
+                confidence = 0.85
         
         track_display = {
             TRACK_DATA: "📊 Data Analysis",
@@ -168,78 +386,230 @@ def ask_question(query: str) -> str:
             TRACK_WEB: "🌐 Web Search"
         }.get(track, track)
         
-        print(f"\n  🎯 Routed to: {track_display} (confidence: {confidence:.0%})")
+        if not force_track:
+            print(f"\n  🎯 Routed to: {track_display} (confidence: {confidence:.0%})")
+        
+        # Get conversation context for LLM-based methods
+        context_str = ""
+        if conversation_memory:
+            context_str = conversation_memory.get_context_string(current_session_id, last_n=3)
         
         if track == TRACK_DATA:
-            # Try each loaded dataset
+            # Data analysis track
             if not loaded_files:
                 return "⚠️ No data files loaded. Use 'load <filepath>' to load data first."
             
-            # Try to find the best matching dataset
+            # Use smart dataset matching
+            datasets = [{"dataset_id": df_id, **info} for df_id, info in loaded_files.items()]
+            matched_df_id = data_analyst.match_dataset_by_query(query, datasets)
+            
+            # If no smart match, try all datasets to find best result
             best_result = None
             best_df_id = None
             
-            for df_id in loaded_files.keys():
-                result = data_analyst.execute_sql_query(query, df_id)
+            if matched_df_id:
+                print(f"  📂 Matched dataset: {matched_df_id}")
+                result = data_analyst.execute_sql_query(query, matched_df_id)
                 if result.success:
-                    if best_result is None or (hasattr(result, 'value') and result.value is not None):
-                        best_result = result
-                        best_df_id = df_id
+                    best_result = result
+                    best_df_id = matched_df_id
+            
+            # If matched dataset failed or no match, try all datasets
+            if not best_result or not best_result.success:
+                print(f"  � Trying all {len(loaded_files)} datasets...")
+                for df_id in loaded_files.keys():
+                    if df_id == matched_df_id:
+                        continue  # Already tried
+                    result = data_analyst.execute_sql_query(query, df_id)
+                    if result.success:
+                        # Prefer results with actual values
+                        if best_result is None:
+                            best_result = result
+                            best_df_id = df_id
+                        elif hasattr(result, 'value') and result.value is not None:
+                            if not hasattr(best_result, 'value') or best_result.value is None:
+                                best_result = result
+                                best_df_id = df_id
+                        # Prefer non-error methods
+                        elif 'error' not in result.method.lower():
+                            if 'error' in best_result.method.lower():
+                                best_result = result
+                                best_df_id = df_id
+            
+            elapsed = time.time() - start_time
             
             if best_result and best_result.success:
-                elapsed = time.time() - start_time
-                
                 # Format the result
                 result_str = str(best_result.result)
-                if len(result_str) > 500:
-                    result_str = result_str[:500] + "..."
+                if len(result_str) > 1500:
+                    result_str = result_str[:1500] + "..."
                 
                 response = f"📊 {result_str}"
                 response += f"\n\n  📁 Source: {best_df_id}"
                 response += f"\n  🔧 Method: {best_result.method}"
                 if best_result.explanation:
                     response += f"\n  💡 {best_result.explanation}"
+                if hasattr(best_result, 'value') and best_result.value is not None:
+                    response += f"\n  🔢 Value: {best_result.value}"
                 response += f"\n  ⏱️ Time: {elapsed:.2f}s"
                 return response
             else:
-                return f"⚠️ Could not process query. Tried {len(loaded_files)} datasets."
+                # Try LLM direct answer as final fallback
+                try:
+                    from app.core.llm_wrapper import get_llm_wrapper
+                    llm = get_llm_wrapper()
+                    
+                    # Get data sample from first dataset
+                    first_df_id = list(loaded_files.keys())[0]
+                    df = data_analyst._get_dataframe(first_df_id)
+                    if df is not None:
+                        data_sample = df.head(20).to_string()
+                        prompt = f"""Analyze this data and answer the question.
+
+DATA SAMPLE:
+{data_sample[:3000]}
+
+QUESTION: {query}
+
+Provide a direct, helpful answer based on the data."""
+                        
+                        answer = llm.invoke(prompt)
+                        return f"📊 {answer}\n\n  📁 Source: {first_df_id}\n  🔧 Method: llm_direct\n  ⏱️ Time: {elapsed:.2f}s"
+                except Exception as llm_error:
+                    pass
+                
+                error_msg = best_result.error if best_result else "No results from any dataset"
+                return f"⚠️ Query failed: {error_msg}\n  📂 Tried {len(loaded_files)} datasets\n  ⏱️ Time: {elapsed:.2f}s"
                 
         elif track == TRACK_WEB:
-            # Web search (placeholder - would need web search implementation)
-            return "🌐 Web search not implemented in this test client. Use the full API for web queries."
+            # Web search track
+            try:
+                # Import implementation directly, not the @tool decorated version
+                from app.tools.web_search import _web_search_impl as web_search_impl
+                from app.core.llm_wrapper import get_llm_wrapper
+                
+                print("  🔍 Searching the web...")
+                search_result = web_search_impl(query, num_results=3)
+                
+                if search_result.get("result") == "success":
+                    results = search_result.get("results", [])
+                    
+                    # Synthesize answer using LLM
+                    llm = get_llm_wrapper()
+                    snippets = "\n\n".join([
+                        f"**{r['title']}**\n{r['snippet']}\nSource: {r['url']}"
+                        for r in results[:3]
+                    ])
+                    
+                    prompt = f"""Based on the following web search results, answer this question: {query}
+
+Search Results:
+{snippets}
+
+Provide a concise, accurate answer based on the search results."""
+                    
+                    answer = llm.invoke(prompt)
+                    elapsed = time.time() - start_time
+                    
+                    response = f"🌐 {answer}"
+                    response += f"\n\n  📚 Sources:"
+                    for r in results[:3]:
+                        response += f"\n    • {r['title']}: {r['url']}"
+                    response += f"\n  ⏱️ Time: {elapsed:.2f}s"
+                    return response
+                else:
+                    return "⚠️ Web search returned no results."
+                    
+            except ImportError:
+                return "⚠️ Web search not available. Install required dependencies."
+            except Exception as e:
+                return f"❌ Web search error: {e}"
             
         elif track == TRACK_DOC:
-            # RAG search
-            if doc_ingestor:
-                return "📄 Document search not implemented in this test client. Use the full API for document queries."
-            else:
-                return "⚠️ RAG is not available. Load documents first."
+            # Document RAG track
+            if not doc_ingestor:
+                return "⚠️ Document ingestor not available."
+            
+            try:
+                from app.core.llm_wrapper import get_llm_wrapper
+                
+                print("  🔍 Searching documents...")
+                
+                # Search for relevant documents
+                # Use first loaded file's client_id or default
+                client_id = "test_client"
+                docs = doc_ingestor.search(query, client_id, top_k=5, score_threshold=0.3)
+                
+                if not docs:
+                    return "📄 No relevant documents found. Try loading some documents first."
+                
+                # Synthesize answer using LLM
+                llm = get_llm_wrapper()
+                context = "\n\n".join([
+                    f"Document {i+1}:\n{d.get('content', '')[:500]}"
+                    for i, d in enumerate(docs[:3])
+                ])
+                
+                prompt = f"""Based on the following document excerpts, answer this question: {query}
+
+Context:
+{context}
+
+Provide a comprehensive answer based on the documents."""
+                
+                answer = llm.invoke(prompt)
+                elapsed = time.time() - start_time
+                
+                response = f"📄 {answer}"
+                response += f"\n\n  📚 Found {len(docs)} relevant documents"
+                response += f"\n  ⏱️ Time: {elapsed:.2f}s"
+                return response
+                
+            except Exception as e:
+                return f"❌ Document search error: {e}"
         
         return "⚠️ Unknown route track"
         
     except Exception as e:
-        return f"❌ Error: {e}"
+        import traceback
+        error_details = traceback.format_exc()
+        return f"❌ Error: {e}\n\nDetails:\n{error_details[:500]}"
 
 
 def show_help():
     """Display help information."""
     print("""
-╔════════════════════════════════════════════════════════════════════╗
-║                    🤖 Re AI-CA Test Chat                           ║
-╠════════════════════════════════════════════════════════════════════╣
-║ COMMANDS:                                                          ║
-║   load <filepath>   - Load an Excel/CSV file for analysis          ║
-║   list              - Show loaded datasets                         ║
-║   clear             - Clear loaded datasets                        ║
-║   help              - Show this help message                       ║
-║   exit / quit       - Exit the chat                                ║
-║                                                                    ║
-║ EXAMPLES:                                                          ║
-║   load "D:\\Data\\MIS- report.xlsx"                                ║
-║   What is the total revenue for FY22?                              ║
-║   Calculate the growth from FY21 to FY22                           ║
-║   Show me the digital marketing expenses                           ║
-╚════════════════════════════════════════════════════════════════════╝
+╔════════════════════════════════════════════════════════════════════════╗
+║                    🤖 Re AI-CA Test Chat - Full Pipeline               ║
+╠════════════════════════════════════════════════════════════════════════╣
+║ DATA COMMANDS:                                                         ║
+║   load <filepath>       - Load an Excel/CSV file for analysis          ║
+║   list                  - Show loaded datasets                         ║
+║   summary               - Show summary of all loaded data              ║
+║   sample <dataset>      - Show sample rows from a dataset              ║
+║   columns <dataset>     - Show columns and types of a dataset          ║
+║   clear                 - Clear all loaded datasets                    ║
+║                                                                        ║
+║ DOCUMENT COMMANDS:                                                     ║
+║   ingest <filepath>     - Ingest PDF/DOCX/TXT for RAG search           ║
+║                                                                        ║
+║ MEMORY COMMANDS:                                                       ║
+║   history               - Show conversation history                    ║
+║   clearhistory          - Clear conversation history                   ║
+║                                                                        ║
+║ FORCE ROUTING (prefix your query with):                                ║
+║   @data <query>         - Force data analysis track                    ║
+║   @web <query>          - Force web search track                       ║
+║   @doc <query>          - Force document search track                  ║
+║                                                                        ║
+║ EXAMPLES:                                                              ║
+║   load "D:\\Data\\NSE-DATA.xlsx"                                       ║
+║   summary                                                              ║
+║   sample nifty                                                         ║
+║   What are the top 5 volume gainers?                                   ║
+║   What are the sheet names?                                            ║
+║   @web What is the current repo rate in India?                         ║
+╚════════════════════════════════════════════════════════════════════════╝
 """)
 
 
@@ -300,8 +670,9 @@ def chat():
             
             elif cmd_lower == 'clear':
                 loaded_files.clear()
-                data_analyst._registered_datasets.clear()
+                data_analyst.dataframes.clear()
                 router.clear_cache()
+                router.set_data_context(False)  # No data loaded anymore
                 print("\n🗑️ All datasets cleared.")
                 continue
             
@@ -310,9 +681,120 @@ def chat():
                 load_file(file_path)
                 continue
             
+            elif cmd_lower.startswith('ingest '):
+                file_path = user_input[7:].strip().strip('"').strip("'")
+                ingest_document(file_path)
+                continue
+            
+            elif cmd_lower == 'summary':
+                # Show summary of all loaded data
+                if not loaded_files:
+                    print("\n📂 No data loaded. Use 'load <filepath>' first.")
+                    continue
+                print("\n📊 Data Summary:")
+                for df_id, info in loaded_files.items():
+                    df = data_analyst._get_dataframe(df_id)
+                    if df is not None:
+                        print(f"\n  📁 {df_id}")
+                        print(f"     Rows: {len(df)}, Columns: {len(df.columns)}")
+                        
+                        # Check if columns are integer indices (no header) or named
+                        first_col = df.columns[0] if len(df.columns) > 0 else None
+                        if isinstance(first_col, int):
+                            # Try to detect header from first row
+                            first_row = df.iloc[0].tolist() if len(df) > 0 else []
+                            header_preview = [str(v)[:20] for v in first_row[:5] if pd.notna(v)]
+                            print(f"     Header (row 0): {header_preview}{'...' if len(first_row) > 5 else ''}")
+                        else:
+                            col_names = [str(c)[:20] for c in list(df.columns[:7])]
+                            print(f"     Columns: {col_names}{'...' if len(df.columns) > 7 else ''}")
+                        
+                        # Show numeric columns
+                        numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
+                        print(f"     Numeric columns: {len(numeric_cols)}")
+                continue
+            
+            elif cmd_lower.startswith('sample '):
+                # Show sample of specific dataset
+                dataset_part = user_input[7:].strip()
+                found = False
+                for df_id in loaded_files.keys():
+                    if dataset_part.lower() in df_id.lower():
+                        df = data_analyst._get_dataframe(df_id)
+                        if df is not None:
+                            print(f"\n📊 Sample from {df_id}:")
+                            print(df.head(10).to_string())
+                            found = True
+                            break
+                if not found:
+                    print(f"⚠️ Dataset matching '{dataset_part}' not found. Use 'list' to see available datasets.")
+                continue
+            
+            elif cmd_lower.startswith('columns '):
+                # Show columns of specific dataset
+                dataset_part = user_input[8:].strip()
+                found = False
+                for df_id in loaded_files.keys():
+                    if dataset_part.lower() in df_id.lower():
+                        df = data_analyst._get_dataframe(df_id)
+                        if df is not None:
+                            print(f"\n📋 Columns in {df_id}:")
+                            for i, col in enumerate(df.columns):
+                                dtype = df[col].dtype
+                                non_null = df[col].count()
+                                print(f"  {i+1}. {col} ({dtype}, {non_null} values)")
+                            found = True
+                            break
+                if not found:
+                    print(f"⚠️ Dataset matching '{dataset_part}' not found.")
+                continue
+            
+            elif cmd_lower == 'history':
+                # Show conversation history
+                if conversation_memory:
+                    history = conversation_memory.get_history(current_session_id)
+                    if history:
+                        print(f"\n📜 Conversation History ({len(history)} messages):")
+                        print("─" * 50)
+                        for msg in history:
+                            role = "👤 You" if msg["role"] == "user" else "🤖 AI"
+                            content = msg["content"][:100] + "..." if len(msg["content"]) > 100 else msg["content"]
+                            print(f"{role}: {content}")
+                        print("─" * 50)
+                    else:
+                        print("\n📜 No conversation history yet.")
+                else:
+                    print("\n⚠️ Conversation memory not initialized.")
+                continue
+            
+            elif cmd_lower == 'clearhistory':
+                # Clear conversation history
+                if conversation_memory:
+                    conversation_memory.clear_session(current_session_id)
+                    print("\n🗑️ Conversation history cleared.")
+                continue
+            
+            # Check for force-routing prefixes
+            force_track = None
+            actual_query = user_input
+            if user_input.lower().startswith('@data '):
+                force_track = TRACK_DATA
+                actual_query = user_input[6:].strip()
+            elif user_input.lower().startswith('@web '):
+                force_track = TRACK_WEB
+                actual_query = user_input[5:].strip()
+            elif user_input.lower().startswith('@doc '):
+                force_track = TRACK_DOC
+                actual_query = user_input[5:].strip()
+            
             # Regular question
             print("\n⏳ AI is thinking...")
-            response = ask_question(user_input)
+            response = ask_question(actual_query, force_track=force_track)
+            
+            # Save response to conversation memory
+            if conversation_memory and response:
+                conversation_memory.add_message(current_session_id, "assistant", response)
+            
             print(f"\n🤖 AI: {response}")
             
         except KeyboardInterrupt:

@@ -2,7 +2,7 @@
 import os
 import logging
 from typing import List, Optional, Dict, Any
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings
 from pathlib import Path
 import yaml
@@ -40,8 +40,18 @@ class LLMSettings(BaseSettings):
     openrouter_enabled: bool = Field(default=False)
     openrouter_model: str = Field(default="gpt-4o-mini")
     
-    class Config:
-        env_prefix = "LLM_"
+    model_config = {
+        "env_prefix": "LLM_",
+        "extra": "ignore",
+    }
+    
+    @field_validator('provider_preference', mode='before')
+    @classmethod
+    def parse_list(cls, v):
+        """Parse comma-separated string to list."""
+        if isinstance(v, str):
+            return [p.strip() for p in v.split(",") if p.strip()]
+        return v
 
 
 class VectorDBSettings(BaseSettings):
@@ -52,8 +62,10 @@ class VectorDBSettings(BaseSettings):
     chroma_persist_dir: str = Field(default=str(DATA_DIR / "chroma"))
     embedding_model: str = Field(default="all-MiniLM-L6-v2")
     
-    class Config:
-        env_prefix = "VECTORDB_"
+    model_config = {
+        "env_prefix": "VECTORDB_",
+        "extra": "ignore",
+    }
 
 
 class CacheSettings(BaseSettings):
@@ -124,9 +136,11 @@ class Settings(BaseSettings):
     sandbox: SandboxSettings = Field(default_factory=SandboxSettings)
     zmq: ZMQSettings = Field(default_factory=ZMQSettings)
     
-    class Config:
-        env_prefix = "AICA_"
-        env_nested_delimiter = "__"
+    model_config = {
+        "env_prefix": "AICA_",
+        "env_nested_delimiter": "__",
+        "extra": "ignore",
+    }
 
 
 def load_yaml_config(path: Optional[Path] = None) -> Dict[str, Any]:
@@ -142,8 +156,22 @@ def load_yaml_config(path: Optional[Path] = None) -> Dict[str, Any]:
     return {}
 
 
-# Global settings instance
-settings = Settings()
+# Global settings instance - wrapped to handle env parsing errors gracefully
+try:
+    settings = Settings()
+except Exception as e:
+    import logging
+    logging.warning(f"Settings initialization warning (using defaults): {e}")
+    # Use defaults without env parsing
+    settings = Settings.model_construct(
+        llm=LLMSettings.model_construct(),
+        vectordb=VectorDBSettings.model_construct(),
+        cache=CacheSettings.model_construct(),
+        storage=StorageSettings.model_construct(),
+        duckdb=DuckDBSettings.model_construct(),
+        sandbox=SandboxSettings.model_construct(),
+        zmq=ZMQSettings.model_construct(),
+    )
 
 # Apply YAML overlay if present
 yaml_config = load_yaml_config()

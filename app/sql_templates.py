@@ -152,23 +152,26 @@ class SQLTemplateEngine:
         column_type: Optional[str] = None
     ) -> Optional[str]:
         """Find best matching column from available columns."""
-        search_lower = search_term.lower()
+        search_lower = str(search_term).lower()
         
         # Direct match
         for col in available_columns:
-            if search_lower == col.lower():
+            col_str = str(col).lower()
+            if search_lower == col_str:
                 return col
 
         # Partial match
         for col in available_columns:
-            if search_lower in col.lower() or col.lower() in search_lower:
+            col_str = str(col).lower()
+            if search_lower in col_str or col_str in search_lower:
                 return col
 
         # Synonym match
         for synonym_key, synonyms in self.column_synonyms.items():
             if search_lower in synonyms or any(s in search_lower for s in synonyms):
                 for col in available_columns:
-                    if any(s in col.lower() for s in synonyms):
+                    col_str = str(col).lower()
+                    if any(s in col_str for s in synonyms):
                         return col
 
         return None

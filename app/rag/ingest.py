@@ -30,14 +30,13 @@ try:
 except ImportError:
     CHROMA_AVAILABLE = False
 
-# Embedding model - commented out to avoid torch dependency
-# To enable: uncomment and ensure torch is properly installed
-# try:
-#     from sentence_transformers import SentenceTransformer
-#     SENTENCE_TRANSFORMERS_AVAILABLE = True
-# except ImportError:
-#     SENTENCE_TRANSFORMERS_AVAILABLE = False
-SENTENCE_TRANSFORMERS_AVAILABLE = False
+# Embedding model - SentenceTransformers (works with Windows DLL fix)
+# Tested and verified working: test_embeddings.py passes all tests
+try:
+    from sentence_transformers import SentenceTransformer
+    SENTENCE_TRANSFORMERS_AVAILABLE = True
+except ImportError:
+    SENTENCE_TRANSFORMERS_AVAILABLE = False
 
 
 class SmartChunker:
@@ -174,17 +173,69 @@ class DocumentIngestor:
         self.collection_name = collection_name
         self.chunker = SmartChunker()
         
-        # Initialize embedding model
+        # Initialize embedding model with fallback chain
+        # Priority: SentenceTransformers (local/fast) > Ollama > HuggingFace API > OpenAI > Hash fallback
         self._embedder = None
-        self._embedding_dim = 384  # Default for MiniLM
+        self._embedder_type = None
+        self._embedding_dim = 384  # Default dimension
         
-        if SENTENCE_TRANSFORMERS_AVAILABLE:
+        # 1. Try SentenceTransformers first (local, fast, no API costs)
+        if SENTENCE_TRANSFORMERS_AVAILABLE and not self._embedder:
             try:
                 self._embedder = SentenceTransformer(embedding_model)
+                self._embedder_type = "sentence_transformers"
                 self._embedding_dim = self._embedder.get_sentence_embedding_dimension()
-                logger.info(f"Loaded embedding model: {embedding_model} (dim={self._embedding_dim})")
+                logger.info(f"Using SentenceTransformers: {embedding_model} (dim={self._embedding_dim})")
             except Exception as e:
-                logger.warning(f"Failed to load embedding model: {e}")
+                logger.warning(f"SentenceTransformers failed: {e}")
+        
+        # 2. Try Ollama embeddings (local, lightweight)
+        if not self._embedder:
+            try:
+                import requests
+                # Quick check if Ollama is running
+                resp = requests.get("http://localhost:11434/api/version", timeout=2)
+                if resp.status_code == 200:
+                    from langchain_community.embeddings import OllamaEmbeddings
+                    self._embedder = OllamaEmbeddings(model="nomic-embed-text")
+                    self._embedder_type = "ollama"
+                    self._embedding_dim = 768
+                    logger.info("Using Ollama embeddings (nomic-embed-text)")
+            except Exception as e:
+                logger.debug(f"Ollama embeddings unavailable: {e}")
+        
+        # 3. Try HuggingFace Inference API (remote, no torch needed)
+        hf_api_key = os.environ.get("HUGGINGFACEHUB_API_TOKEN") or os.environ.get("HF_API_KEY")
+        if hf_api_key and not self._embedder:
+            try:
+                from langchain_community.embeddings import HuggingFaceInferenceAPIEmbeddings
+                self._embedder = HuggingFaceInferenceAPIEmbeddings(
+                    api_key=hf_api_key,
+                    model_name="sentence-transformers/all-MiniLM-L6-v2"
+                )
+                self._embedder_type = "huggingface_api"
+                self._embedding_dim = 384
+                logger.info("Using HuggingFace Inference API embeddings")
+            except Exception as e:
+                logger.debug(f"HuggingFace API embeddings unavailable: {e}")
+        
+        # 4. Try OpenAI embeddings (remote)
+        openai_key = os.environ.get("OPENAI_API_KEY")
+        if openai_key and not self._embedder:
+            try:
+                from langchain_openai import OpenAIEmbeddings
+                self._embedder = OpenAIEmbeddings()
+                self._embedder_type = "openai"
+                self._embedding_dim = 1536
+                logger.info("Using OpenAI embeddings")
+            except Exception as e:
+                logger.debug(f"OpenAI embeddings unavailable: {e}")
+        
+        # Log final embedding status
+        if self._embedder:
+            logger.info(f"Embedding provider: {self._embedder_type} (dim={self._embedding_dim})")
+        else:
+            logger.warning("No embedding provider available. Using hash-based fallback.")
 
         # Initialize vector store
         self._qdrant = None
@@ -235,17 +286,36 @@ class DocumentIngestor:
             logger.info(f"Created Qdrant collection: {self.collection_name}")
 
     def _generate_embedding(self, text: str) -> List[float]:
-        """Generate embedding for text."""
-        if self._embedder is None:
-            # Return zero vector as fallback
-            return [0.0] * self._embedding_dim
+        """Generate embedding for text using available provider."""
+        if self._embedder is not None:
+            try:
+                # LangChain embeddings use embed_query
+                if self._embedder_type in ("huggingface_api", "ollama", "openai"):
+                    embedding = self._embedder.embed_query(text)
+                    return embedding
+                # SentenceTransformers uses encode
+                elif self._embedder_type == "sentence_transformers":
+                    embedding = self._embedder.encode(text, convert_to_numpy=True)
+                    return embedding.tolist()
+            except Exception as e:
+                logger.error(f"Embedding generation failed ({self._embedder_type}): {e}")
         
-        try:
-            embedding = self._embedder.encode(text, convert_to_numpy=True)
-            return embedding.tolist()
-        except Exception as e:
-            logger.error(f"Embedding generation failed: {e}")
-            return [0.0] * self._embedding_dim
+        # Fallback: simple hash-based embedding when no model available
+        # This provides basic semantic matching via word hashing
+        words = text.lower().split()[:100]  # Use first 100 words
+        embedding = [0.0] * self._embedding_dim
+        
+        for i, word in enumerate(words):
+            # Hash word to embedding dimension
+            word_hash = hash(word) % self._embedding_dim
+            embedding[word_hash] += 1.0 / (i + 1)  # Weight by position
+        
+        # Normalize
+        norm = sum(x * x for x in embedding) ** 0.5
+        if norm > 0:
+            embedding = [x / norm for x in embedding]
+        
+        return embedding
 
     def _generate_id(self, content: str, metadata: Dict) -> str:
         """Generate unique ID for chunk."""
