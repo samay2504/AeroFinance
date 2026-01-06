@@ -328,6 +328,7 @@ class LLMWrapper:
             "cache_hits": self._cache_hits,
         }
 
+
     def reset_metrics(self):
         """Reset telemetry counters."""
         self._call_count = 0
@@ -335,11 +336,19 @@ class LLMWrapper:
         self._cache_hits = 0
 
 
-class PandasAILLMAdapter:
+# Try to import PandasAI's base LLM class for proper inheritance
+_PandasAI_LLM_Base = None
+try:
+    from pandasai.llm.base import LLM as _PandasAI_LLM_Base
+except ImportError:
+    pass
+
+
+class PandasAILLMAdapter(_PandasAI_LLM_Base if _PandasAI_LLM_Base else object):
     """
     Adapter class to make LLMWrapper compatible with PandasAI 3.0.
     
-    PandasAI 3.0 expects an LLM object with specific interface methods.
+    PandasAI 3.0 expects an LLM object that inherits from pandasai.llm.base.LLM.
     This adapter wraps our multi-provider LLMWrapper to work with PandasAI.
     """
     
@@ -350,6 +359,9 @@ class PandasAILLMAdapter:
         Args:
             llm_wrapper: The existing LLMWrapper instance
         """
+        # Initialize base class if it exists
+        if _PandasAI_LLM_Base:
+            super().__init__()
         self._wrapper = llm_wrapper
         self._model = llm_wrapper.provider_name or "gemini"
         

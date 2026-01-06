@@ -164,19 +164,17 @@ async def upload_file(
     client_id: str = Form(...),
     ingest_all: bool = Form(True)
 ):
-    """Upload and ingest Excel/CSV file."""
+    """Upload and ingest Excel/CSV/JSON file."""
     try:
-        from app.ingest.excel_ingest import ExcelIngestor
         from app.core.data_registry import get_data_registry
         from app.agents.data_analyst import get_data_analyst_agent
         
         registry = get_data_registry()
         agent = get_data_analyst_agent()
-        ingestor = ExcelIngestor()
         
         # Read file content
         content = await file.read()
-        filename = file.filename or "uploaded.xlsx"
+        filename = file.filename or "uploaded_file"
         
         # Register callback
         def register_cb(dataset_id: str, df, metadata: dict):
@@ -186,33 +184,102 @@ async def upload_file(
                 client_id=client_id
             )
         
-        # Ingest
-        if ingest_all:
-            results = ingestor.ingest_all_sheets(
-                file_content=content,
-                filename=filename,
-                client_id=client_id,
-                register_callback=register_cb
-            )
-        else:
-            result = ingestor.ingest_best_sheet(
-                file_content=content,
-                filename=filename,
-                client_id=client_id,
-                register_callback=register_cb
-            )
-            results = [result]
+        # Detect file type and use appropriate ingestor
+        ext = filename.rsplit('.', 1)[-1].lower() if '.' in filename else ''
         
-        # Count successes
-        successes = [r for r in results if r.get("success")]
+        if ext == 'json':
+            # JSON file
+            from app.ingest.json_ingest import JSONIngestor
+            ingestor = JSONIngestor()
+            result = ingestor.ingest_json_file(
+                file_content=content,
+                filename=filename,
+                client_id=client_id,
+                register_callback=register_cb
+            )
+            results = result.get("datasets", [])
+            success = result.get("success", False)
+            
+        elif ext in ['xlsx', 'xls', 'csv']:
+            # Excel/CSV file
+            from app.ingest.excel_ingest import ExcelIngestor
+            ingestor = ExcelIngestor()
+            
+            if ingest_all:
+                results = ingestor.ingest_all_sheets(
+                    file_content=content,
+                    filename=filename,
+                    client_id=client_id,
+                    register_callback=register_cb
+                )
+            else:
+                result = ingestor.ingest_best_sheet(
+                    file_content=content,
+                    filename=filename,
+                    client_id=client_id,
+                    register_callback=register_cb
+                )
+                results = [result]
+            success = any(r.get("success") for r in results)
+            
+        else:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Unsupported file type: .{ext}. Supported: .xlsx, .xls, .csv, .json"
+            )
         
         return UploadResponse(
-            success=len(successes) > 0,
+            success=success,
             datasets=results
         )
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Upload error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class JSONIngestRequest(BaseModel):
+    """Request for ingesting raw JSON text."""
+    json_text: str
+    client_id: str
+    source_name: str = "pasted_json"
+
+
+@app.post("/v1/ai-ca/ingest-json", response_model=UploadResponse)
+async def ingest_json_text(request: JSONIngestRequest):
+    """Ingest raw JSON text directly (for pasted content)."""
+    try:
+        from app.ingest.json_ingest import JSONIngestor
+        from app.agents.data_analyst import get_data_analyst_agent
+        
+        agent = get_data_analyst_agent()
+        ingestor = JSONIngestor()
+        
+        # Register callback
+        def register_cb(dataset_id: str, df, metadata: dict):
+            agent.register_dataframe(
+                dataset_id, df,
+                preprocessing_report=metadata.get("preprocessing"),
+                client_id=request.client_id
+            )
+        
+        # Ingest JSON text
+        result = ingestor.ingest_json_text(
+            json_text=request.json_text,
+            source_name=request.source_name,
+            client_id=request.client_id,
+            register_callback=register_cb
+        )
+        
+        return UploadResponse(
+            success=result.get("success", False),
+            datasets=result.get("datasets", [])
+        )
+        
+    except Exception as e:
+        logger.error(f"JSON ingest error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

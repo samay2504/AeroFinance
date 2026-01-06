@@ -161,7 +161,8 @@ try:
     settings = Settings()
 except Exception as e:
     import logging
-    logging.warning(f"Settings initialization warning (using defaults): {e}")
+    # DEBUG level: This is expected when env variables aren't set. Fallback to defaults is intended.
+    logging.debug(f"Settings initialization using defaults (env parse: {e})")
     # Use defaults without env parsing
     settings = Settings.model_construct(
         llm=LLMSettings.model_construct(),

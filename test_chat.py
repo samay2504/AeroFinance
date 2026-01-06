@@ -170,13 +170,25 @@ def initialize_components():
 
 
 def load_file(file_path: str) -> bool:
-    """Load an Excel or CSV file for analysis."""
+    """Load an Excel, CSV, or JSON file for analysis. Also handles pasted JSON text."""
     global loaded_files, data_analyst
+    
+    # Check if this is JSON text pasted directly (not a file path)
+    stripped = file_path.strip()
+    if stripped.startswith('{') or stripped.startswith('['):
+        return load_json_text(stripped)
     
     path = Path(file_path)
     if not path.exists():
         print(f"❌ File not found: {file_path}")
         return False
+    
+    # INGESTION CACHING: Check if file already loaded
+    file_key = str(path.resolve())
+    already_loaded = [k for k, v in loaded_files.items() if v.get('path') == file_key]
+    if already_loaded:
+        print(f"✅ File already loaded ({len(already_loaded)} sheets). Use 'list' to see datasets.")
+        return True
     
     print(f"\n📂 Loading: {path.name}")
     
@@ -191,6 +203,9 @@ def load_file(file_path: str) -> bool:
                 df = pd.read_excel(path, sheet_name=sheet_name, header=None)
                 if df.empty:
                     continue
+                
+                # Detect and apply header row
+                df = _detect_and_apply_header(df)
                     
                 # Generate df_id
                 safe_name = path.stem.replace(' ', '_').replace('-', '_').lower()
@@ -200,7 +215,7 @@ def load_file(file_path: str) -> bool:
                 # Register with data analyst
                 data_analyst.register_dataframe(df_id, df)
                 loaded_files[df_id] = {
-                    'path': str(path),
+                    'path': file_key,
                     'sheet': sheet_name,
                     'rows': len(df),
                     'cols': len(df.columns)
@@ -212,11 +227,16 @@ def load_file(file_path: str) -> bool:
             df_id = path.stem.replace(' ', '_').replace('-', '_').lower()
             data_analyst.register_dataframe(df_id, df)
             loaded_files[df_id] = {
-                'path': str(path),
+                'path': file_key,
                 'rows': len(df),
                 'cols': len(df.columns)
             }
             print(f"  ✅ Loaded '{df_id}' ({len(df)} rows, {len(df.columns)} columns)")
+            
+        elif path.suffix.lower() == '.json':
+            # JSON file support
+            with open(path, 'r', encoding='utf-8') as f:
+                return load_json_text(f.read(), source_name=path.stem)
         else:
             print(f"❌ Unsupported file type: {path.suffix}")
             return False
@@ -231,6 +251,84 @@ def load_file(file_path: str) -> bool:
     except Exception as e:
         print(f"❌ Error loading file: {e}")
         return False
+
+
+def load_json_text(json_text: str, source_name: str = "json_data") -> bool:
+    """Load JSON text (pasted or from file) as DataFrame."""
+    global loaded_files, data_analyst
+    
+    try:
+        import json as json_lib
+        data = json_lib.loads(json_text)
+        
+        # Handle different JSON structures
+        if isinstance(data, list):
+            # List of records
+            df = pd.DataFrame(data)
+        elif isinstance(data, dict):
+            # Could be a single record or nested structure
+            if all(isinstance(v, (list, dict)) for v in data.values()):
+                # Nested - try to flatten or use first level
+                if all(isinstance(v, list) for v in data.values()):
+                    df = pd.DataFrame(data)
+                else:
+                    # Multiple tables in JSON
+                    count = 0
+                    for key, value in data.items():
+                        if isinstance(value, list):
+                            sub_df = pd.DataFrame(value)
+                            df_id = f"{source_name}:{key.lower().replace(' ', '_')}"
+                            data_analyst.register_dataframe(df_id, sub_df)
+                            loaded_files[df_id] = {'rows': len(sub_df), 'cols': len(sub_df.columns)}
+                            print(f"  ✅ Loaded JSON table '{key}' as '{df_id}' ({len(sub_df)} rows)")
+                            count += 1
+                    if count > 0:
+                        if router:
+                            router.set_data_context(True)
+                        return True
+                    df = pd.DataFrame([data])
+            else:
+                # Single record
+                df = pd.DataFrame([data])
+        else:
+            print(f"❌ Unsupported JSON structure")
+            return False
+        
+        df_id = source_name.lower().replace(' ', '_')
+        data_analyst.register_dataframe(df_id, df)
+        loaded_files[df_id] = {'rows': len(df), 'cols': len(df.columns)}
+        print(f"  ✅ Loaded JSON as '{df_id}' ({len(df)} rows, {len(df.columns)} columns)")
+        
+        if router:
+            router.set_data_context(True)
+        return True
+        
+    except Exception as e:
+        print(f"❌ Error parsing JSON: {e}")
+        return False
+
+
+def _detect_and_apply_header(df: pd.DataFrame) -> pd.DataFrame:
+    """Detect header row in DataFrame and apply it."""
+    if df.empty or len(df) < 2:
+        return df
+    
+    # Check first few rows for header patterns
+    for row_idx in range(min(5, len(df))):
+        row = df.iloc[row_idx]
+        # Count non-null string values
+        str_count = sum(1 for v in row if isinstance(v, str) and len(str(v).strip()) > 1)
+        # Count 'Unnamed' or empty
+        unnamed_count = sum(1 for v in row if pd.isna(v) or 'unnamed' in str(v).lower())
+        
+        if str_count > len(row) * 0.5 and unnamed_count < len(row) * 0.3:
+            # This looks like a header row
+            new_df = df.iloc[row_idx + 1:].copy()
+            new_df.columns = [str(v) if pd.notna(v) else f"Col_{i}" for i, v in enumerate(row)]
+            new_df.reset_index(drop=True, inplace=True)
+            return new_df
+    
+    return df
 
 
 def ingest_document(file_path: str) -> bool:

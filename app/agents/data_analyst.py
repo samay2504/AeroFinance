@@ -186,6 +186,9 @@ class DataAnalystAgent:
         if df is None or df.empty:
             return False
 
+        # PRODUCTION FIX: Sanitize column names (convert int/float to str)
+        df = self._sanitize_dataframe_columns(df)
+
         # Store locally
         self.dataframes[dataset_id] = df
 
@@ -208,10 +211,112 @@ class DataAnalystAgent:
         
         # Fallback to local dataframes
         return [
-            {"dataset_id": k, "rows": len(v), "columns": list(v.columns)}
+            {"dataset_id": k, "rows": len(v), "columns": [str(c) for c in v.columns]}
             for k, v in self.dataframes.items()
             if client_id in k
         ]
+
+    def _sanitize_dataframe_columns(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Sanitize DataFrame column names for SQL and string operations.
+        
+        Fixes:
+        - Integer/float column names → string
+        - Excel date serial numbers (35531.25) → readable date
+        - Empty column names → Col_N naming
+        - Duplicate column names → unique numbering
+        """
+        new_columns = []
+        seen = set()
+        
+        for i, col in enumerate(df.columns):
+            # Convert to string
+            if isinstance(col, (int, float)):
+                # Check if it looks like an Excel date serial (30000-50000 range)
+                if 30000 < col < 60000:
+                    try:
+                        from datetime import datetime, timedelta
+                        date_val = datetime(1899, 12, 30) + timedelta(days=col)
+                        col_str = date_val.strftime("%Y-%m-%d")
+                    except:
+                        col_str = f"Col_{i}"
+                else:
+                    col_str = str(col)
+            elif pd.isna(col) or str(col).strip() == '' or str(col).startswith('Unnamed'):
+                col_str = f"Col_{i}"
+            else:
+                col_str = str(col)
+            
+            # Handle duplicates
+            base_name = col_str
+            counter = 1
+            while col_str in seen:
+                col_str = f"{base_name}_{counter}"
+                counter += 1
+            seen.add(col_str)
+            new_columns.append(col_str)
+        
+        df.columns = new_columns
+        return df
+
+    def _detect_row_centric_structure(self, df: pd.DataFrame) -> Dict[str, Any]:
+        """
+        Detect if DataFrame has row-centric structure (common in CA financial statements).
+        
+        Row-centric pattern:
+        - First column contains text labels (Particulars, items, line items)
+        - Other columns are dates/periods (Mar'21, FY22, Q1 2023)
+        - Values are in cells at (row_label, period_column) intersections
+        
+        Returns:
+            Dict with keys:
+            - is_row_centric: bool
+            - label_column: column name for row labels
+            - period_columns: list of period column names
+            - confidence: float 0-1
+        """
+        result = {
+            "is_row_centric": False,
+            "label_column": None,
+            "period_columns": [],
+            "confidence": 0.0
+        }
+        
+        if df.empty or len(df.columns) < 2:
+            return result
+        
+        # Check first column for text labels
+        first_col = df.iloc[:, 0]
+        text_labels = sum(1 for v in first_col if isinstance(v, str) and len(str(v).strip()) > 3)
+        text_ratio = text_labels / len(first_col) if len(first_col) > 0 else 0
+        
+        # Check other columns for date/period patterns
+        period_pattern = re.compile(
+            r"(fy\s*\d{2,4}|q[1-4]\s*\d{2,4}|"
+            r"(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)['\s]*\d{2,4}|"
+            r"\d{4}[-/]\d{2}[-/]\d{2}|"
+            r"9m|6m|3m|ytd|mtd|qtr|quarter)",
+            re.IGNORECASE
+        )
+        
+        period_cols = []
+        for col in df.columns[1:]:
+            col_str = str(col).lower()
+            if period_pattern.search(col_str):
+                period_cols.append(col)
+        
+        period_ratio = len(period_cols) / (len(df.columns) - 1) if len(df.columns) > 1 else 0
+        
+        # Calculate confidence
+        confidence = (text_ratio * 0.6) + (period_ratio * 0.4)
+        
+        if text_ratio > 0.5 and (period_ratio > 0.3 or len(period_cols) >= 2):
+            result["is_row_centric"] = True
+            result["label_column"] = df.columns[0]
+            result["period_columns"] = period_cols if period_cols else list(df.columns[1:])
+            result["confidence"] = confidence
+        
+        return result
 
     def match_dataset_by_query(
         self,
@@ -363,10 +468,12 @@ class DataAnalystAgent:
 
     def _get_schema_info(self, df: pd.DataFrame, dataset_id: str) -> Dict[str, Any]:
         """Get schema information for a DataFrame."""
+        # PRODUCTION FIX: Ensure all column names are strings
+        columns_as_str = [str(c) for c in df.columns]
         return {
             "dataset_id": dataset_id,
             "rows": len(df),
-            "columns": list(df.columns),
+            "columns": columns_as_str,
             "dtypes": {str(k): str(v) for k, v in df.dtypes.items()},
             "sample": df.head(3).to_dict() if len(df) > 0 else {}
         }
@@ -469,12 +576,101 @@ class DataAnalystAgent:
                 if "not found" not in result_str and "no data" not in result_str:
                     return llm_result
 
+        # Step 6: MULTI-SHEET FALLBACK for large files
+        # When operating on a complex file with many sheets, search across related sheets
+        multi_sheet_result = self._try_multi_sheet_search(query, df_id, client_id)
+        if multi_sheet_result and multi_sheet_result.success:
+            return multi_sheet_result
+
         return AnalysisResult(
             success=False,
             error="Could not process query with any available method",
             method="exhausted",
-            explanation="Tried: template SQL, semantic Pandas, LLM SQL, LLM Python, PandasAI"
+            explanation="Tried: template SQL, semantic Pandas, LLM SQL, LLM Python, PandasAI, multi-sheet search"
         )
+    
+    def _try_multi_sheet_search(
+        self,
+        query: str,
+        original_df_id: str,
+        client_id: Optional[str]
+    ) -> Optional[AnalysisResult]:
+        """
+        Multi-sheet fallback for large files.
+        Searches across all sheets from the same file for relevant data.
+        """
+        try:
+            # Get all related sheets (same file prefix)
+            file_prefix = original_df_id.split(':')[0] if ':' in original_df_id else ""
+            if not file_prefix:
+                return None
+            
+            related_dfs = []
+            for df_id, df in self.dataframes.items():
+                if df_id.startswith(file_prefix):
+                    related_dfs.append((df_id, df))
+            
+            if len(related_dfs) <= 1:
+                return None  # Only one sheet, no multi-sheet search needed
+            
+            logger.debug(f"Multi-sheet search across {len(related_dfs)} related sheets")
+            
+            # Extract keywords from query
+            query_lower = query.lower()
+            keywords = set()
+            
+            # Extract important terms using simple word extraction
+            for word in re.findall(r'[a-zA-Z]{3,}', query_lower):
+                if word not in {'the', 'and', 'for', 'from', 'with', 'what', 'how', 'does', 'have'}:
+                    keywords.add(word)
+            
+            # Score each sheet by keyword relevance
+            scored_sheets = []
+            for df_id, df in related_dfs:
+                score = 0
+                sheet_name = df_id.split(':')[-1].lower()
+                
+                # Score based on sheet name matching keywords
+                for kw in keywords:
+                    if kw in sheet_name:
+                        score += 10  # High score for sheet name match
+                
+                # Score based on column names matching keywords
+                cols_str = ' '.join(str(c).lower() for c in df.columns)
+                for kw in keywords:
+                    if kw in cols_str:
+                        score += 5
+                
+                # Score based on data content (sample first column for label matches)
+                if len(df) > 0 and len(df.columns) > 0:
+                    first_col_vals = ' '.join(str(v).lower() for v in df.iloc[:, 0].head(50))
+                    for kw in keywords:
+                        if kw in first_col_vals:
+                            score += 3
+                
+                if score > 0:
+                    scored_sheets.append((score, df_id, df))
+            
+            # Try top 3 most relevant sheets
+            scored_sheets.sort(reverse=True, key=lambda x: x[0])
+            
+            for score, df_id, df in scored_sheets[:3]:
+                if score < 5:  # Skip low-relevance sheets
+                    continue
+                    
+                logger.debug(f"Trying sheet {df_id} (score={score})")
+                
+                # Try heuristic pandas on this sheet
+                result = self._try_heuristic_pandas(query, df, df_id)
+                if result and result.success:
+                    result.explanation = f"{result.explanation} (from multi-sheet search: {df_id.split(':')[-1]})"
+                    return result
+            
+            return None
+            
+        except Exception as e:
+            logger.debug(f"Multi-sheet search failed: {e}")
+            return None
     
     def _try_llm_summary(
         self,
@@ -653,14 +849,58 @@ Keep the summary concise but informative (3-5 paragraphs)."""
         No hardcoded patterns - LLM determines if this is a metadata query.
         """
         query_lower = query.lower()
+        
+        # Get sheet list EARLY for all metadata checks
+        datasets = self.list_datasets_for_client(client_id) if client_id else []
+        if isinstance(datasets, list) and len(datasets) > 0:
+            all_sheets = [d.get("dataset_id", d) if isinstance(d, dict) else str(d) for d in datasets]
+        else:
+            all_sheets = list(self.dataframes.keys())
+        
+        # FAST PATH: Handle common metadata queries FIRST before any exclusion logic
+        # This ensures "how many sheets" queries are never misrouted
+        if 'how many' in query_lower and 'sheet' in query_lower:
+            return AnalysisResult(
+                success=True,
+                result=f"There are {len(all_sheets)} sheets available in the loaded data.",
+                value=float(len(all_sheets)),
+                method="metadata_fast",
+                explanation="Counted registered datasets using fast path"
+            )
+        
+        if 'list' in query_lower and 'sheet' in query_lower:
+            result_text = f"There are {len(all_sheets)} sheets:\n"
+            for i, name in enumerate(all_sheets[:20], 1):  # Limit to 20
+                display_name = name.split(':')[-1] if ':' in name else name
+                result_text += f"  {i}. {display_name}\n"
+            if len(all_sheets) > 20:
+                result_text += f"  ... and {len(all_sheets) - 20} more\n"
+            return AnalysisResult(
+                success=True,
+                result=result_text,
+                value=float(len(all_sheets)),
+                method="metadata_fast",
+                explanation="Listed sheets using fast path"
+            )
 
         # 1. STRICT EXCLUSION: If query is clearly about data analysis, SKIP metadata check
         # This prevents "summary of sheet X" from being treated as "list sheet names"
-        # We perform this FIRST to override any weak semantic matches
+        # PRODUCTION FIX: 'value' alone is too broad (catches 'Equity Value')
+        
+        # Check for "what is X" pattern where X is a financial term (data lookup, not metadata)
+        what_is_match = re.search(r'what\s+(is|are)\s+(the\s+)?(\w+)', query_lower)
+        if what_is_match:
+            term = what_is_match.group(3)
+            # If the term is NOT a metadata term, this is a data query
+            metadata_terms = {'sheet', 'sheets', 'table', 'tables', 'column', 'columns', 'file', 'files', 'dataset', 'datasets'}
+            if term not in metadata_terms:
+                return None  # This is a data lookup like "what is Equity Value"
+        
         if any(kw in query_lower for kw in [
-            'summary', 'analyze', 'show data', 'values', 'calculate', 
-            'give me the data', 'what is the', 'sum of', 'total', 'average',
-            'expense', 'revenue', 'profit', 'margin', 'cost', 'sales', 'growth'
+            'summary', 'analyze', 'show data', 'value of', 'values in', 'calculate', 
+            'give me the data', 'sum of', 'total of', 'average of',
+            'expense', 'revenue', 'profit', 'margin', 'cost', 'sales', 'growth',
+            'wacc', 'ebitda', 'fcff', 'dcf', 'equity', 'debt', 'ratio', 'net worth'
         ]):
             # Only allow if it explicitly asks for names/count/structure
             if not any(kw in query_lower for kw in ['sheet names', 'list of sheets', 'number of sheets', 'how many sheets', 'list tables']):
@@ -670,13 +910,13 @@ Keep the summary concise but informative (3-5 paragraphs)."""
         # Use spaCy vectors to distinguish "metadata" (structure) from "analysis" (content)
         if self._semantic_matcher:
             intents = {
-                "metadata": ["list sheets", "what are the sheet names", "how many tables", "show current datasets", "list loaded files", "file structure"],
-                "analysis": ["summary of sheet", "analyze the data", "show me values", "calculate total", "average of column", "describe the content", "values in table"]
+                "metadata": ["list sheets", "what are the sheet names", "how many tables", "show current datasets", "list loaded files", "file structure", "count of sheets"],
+                "analysis": ["what is the equity value", "show me the profit", "calculate total revenue", "get the WACC", "find net worth", "lookup balance sheet item", "what is the revenue"]
             }
             best_intent, score = self._semantic_matcher.classify_intent(query, intents)
             
-            # If clearly analysis, skip metadata check completely
-            if best_intent == "analysis" and score > 0.5:
+            # If analysis intent detected with reasonable confidence, skip metadata
+            if best_intent == "analysis" and score > 0.4:
                  return None
 
         # Get all dataset info for context
