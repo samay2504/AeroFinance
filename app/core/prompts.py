@@ -1,31 +1,316 @@
 """
 CA Agent Prompts - The "Brain of Logic" for the Agent.
-All agent instructions come from this centralized registry.
-Supports dynamic prompt templates with YAML override capability.
+
+Production-grade prompt engineering with:
+- Token management and smart chunking
+- Progressive summarization to avoid rate limits
+- Dynamic prompt optimization
+- YAML override capability
 """
 import logging
-from typing import Dict, Any, Optional
+import re
+from typing import Dict, Any, Optional, List, Tuple
 from pathlib import Path
+from dataclasses import dataclass
+from functools import lru_cache
 import yaml
 from langchain_core.prompts import PromptTemplate
 
 logger = logging.getLogger(__name__)
 
-# --- Global CA System Guardrails ---
-CA_SYSTEM_GUARDRAILS = """
-You are a Senior Chartered Accountant (CA) and Financial Advisor with expertise in:
-- Financial Statement Analysis (GAAP/IFRS/Schedule III compliance)
-- Management Information Systems (MIS) reporting
-- Tax compliance and regulatory requirements
-- Forensic accounting and fraud detection
 
-STRICT RULES:
-1. ACCURACY: Never guess a number. Use provided data tools for ANY calculation.
-2. SOURCE-FIRST: Only answer based on provided data. If data missing, say "Data not found in records".
-3. COMPLIANCE: Adhere to standard accounting principles (GAAP/IFRS/Schedule III as applicable).
-4. VERIFICATION: If a numeric result cannot be verified, mark it as 'estimate' with disclaimer.
-5. OUTPUT FORMAT: Use Markdown. Currency in 'INR Mn' or 'Cr' as per source document's denomination.
-"""
+# ==============================================================================
+# TOKEN MANAGEMENT - Production-grade token counting and chunking
+# ==============================================================================
+@dataclass
+class TokenBudget:
+    """Token budget configuration for different LLM providers."""
+    max_context: int = 8192  # Default context window
+    max_output: int = 2048   # Max output tokens
+    reserved_system: int = 500  # Reserved for system prompt
+    reserved_response: int = 1000  # Reserved for response
+    
+    @property
+    def available_for_content(self) -> int:
+        """Tokens available for user content (data, context, query)."""
+        return self.max_context - self.reserved_system - self.reserved_response
+
+
+# Token budgets for different providers
+TOKEN_BUDGETS = {
+    "gemini": TokenBudget(max_context=32768, max_output=8192, reserved_system=800),
+    "gpt-4": TokenBudget(max_context=128000, max_output=4096, reserved_system=800),
+    "gpt-3.5": TokenBudget(max_context=16384, max_output=4096, reserved_system=500),
+    "claude": TokenBudget(max_context=200000, max_output=4096, reserved_system=1000),
+    "groq": TokenBudget(max_context=8192, max_output=2048, reserved_system=500),
+    "ollama": TokenBudget(max_context=4096, max_output=2048, reserved_system=400),
+    "default": TokenBudget(max_context=4096, max_output=2048, reserved_system=400),
+}
+
+
+class TokenManager:
+    """
+    Production-grade token management with:
+    - Accurate token estimation (tiktoken-compatible)
+    - Smart chunking strategies
+    - Progressive summarization
+    - Rate limit protection
+    """
+    
+    # Average characters per token (empirical for English text)
+    CHARS_PER_TOKEN = 4.0
+    
+    def __init__(self, provider: str = "default"):
+        self.provider = provider
+        self.budget = TOKEN_BUDGETS.get(provider, TOKEN_BUDGETS["default"])
+        self._tiktoken_available = False
+        self._encoder = None
+        
+        # Try to load tiktoken for accurate counting
+        try:
+            import tiktoken
+            self._encoder = tiktoken.get_encoding("cl100k_base")
+            self._tiktoken_available = True
+        except ImportError:
+            logger.debug("tiktoken not available, using character-based estimation")
+    
+    def count_tokens(self, text: str) -> int:
+        """Count tokens in text (accurate with tiktoken, estimated otherwise)."""
+        if not text:
+            return 0
+        if self._tiktoken_available and self._encoder:
+            return len(self._encoder.encode(text))
+        # Fallback: character-based estimation
+        return int(len(text) / self.CHARS_PER_TOKEN)
+    
+    def fits_in_context(self, text: str, reserved: int = 0) -> bool:
+        """Check if text fits in available context window."""
+        tokens = self.count_tokens(text)
+        available = self.budget.available_for_content - reserved
+        return tokens <= available
+    
+    def truncate_to_fit(self, text: str, max_tokens: int) -> str:
+        """Truncate text to fit within token limit, preserving structure."""
+        current_tokens = self.count_tokens(text)
+        if current_tokens <= max_tokens:
+            return text
+        
+        # Estimate characters to keep
+        ratio = max_tokens / current_tokens
+        target_chars = int(len(text) * ratio * 0.95)  # 5% safety margin
+        
+        # Try to truncate at a natural boundary
+        truncated = text[:target_chars]
+        
+        # Try to end at sentence or line boundary
+        for boundary in ['\n\n', '\n', '. ', ', ']:
+            last_boundary = truncated.rfind(boundary)
+            if last_boundary > len(truncated) * 0.7:
+                truncated = truncated[:last_boundary + len(boundary)]
+                break
+        
+        return truncated + "\n...[truncated]"
+    
+    def smart_chunk(
+        self,
+        text: str,
+        chunk_size: int,
+        overlap: int = 100,
+        preserve_structure: bool = True
+    ) -> List[str]:
+        """
+        Smart chunking with structure awareness.
+        
+        Args:
+            text: Text to chunk
+            chunk_size: Target tokens per chunk
+            overlap: Token overlap between chunks (for context continuity)
+            preserve_structure: Try to preserve paragraph/section boundaries
+            
+        Returns:
+            List of text chunks
+        """
+        if self.count_tokens(text) <= chunk_size:
+            return [text]
+        
+        chunks = []
+        
+        if preserve_structure:
+            # Split on structural boundaries first
+            sections = re.split(r'\n\n+', text)
+            current_chunk = []
+            current_tokens = 0
+            
+            for section in sections:
+                section_tokens = self.count_tokens(section)
+                
+                if current_tokens + section_tokens <= chunk_size:
+                    current_chunk.append(section)
+                    current_tokens += section_tokens
+                else:
+                    # Save current chunk
+                    if current_chunk:
+                        chunks.append('\n\n'.join(current_chunk))
+                    
+                    # Handle large sections
+                    if section_tokens > chunk_size:
+                        # Further split large sections
+                        sub_chunks = self._split_large_section(section, chunk_size)
+                        chunks.extend(sub_chunks[:-1])
+                        current_chunk = [sub_chunks[-1]] if sub_chunks else []
+                        current_tokens = self.count_tokens(current_chunk[0]) if current_chunk else 0
+                    else:
+                        current_chunk = [section]
+                        current_tokens = section_tokens
+            
+            if current_chunk:
+                chunks.append('\n\n'.join(current_chunk))
+        else:
+            # Simple sliding window
+            char_chunk_size = int(chunk_size * self.CHARS_PER_TOKEN)
+            char_overlap = int(overlap * self.CHARS_PER_TOKEN)
+            
+            start = 0
+            while start < len(text):
+                end = min(start + char_chunk_size, len(text))
+                chunks.append(text[start:end])
+                start = end - char_overlap
+        
+        return chunks
+    
+    def _split_large_section(self, section: str, max_tokens: int) -> List[str]:
+        """Split a large section that exceeds max_tokens."""
+        lines = section.split('\n')
+        chunks = []
+        current_chunk = []
+        current_tokens = 0
+        
+        for line in lines:
+            line_tokens = self.count_tokens(line)
+            if current_tokens + line_tokens <= max_tokens:
+                current_chunk.append(line)
+                current_tokens += line_tokens
+            else:
+                if current_chunk:
+                    chunks.append('\n'.join(current_chunk))
+                current_chunk = [line]
+                current_tokens = line_tokens
+        
+        if current_chunk:
+            chunks.append('\n'.join(current_chunk))
+        
+        return chunks
+    
+    def summarize_for_context(
+        self,
+        text: str,
+        target_tokens: int,
+        preserve_key_info: bool = True
+    ) -> str:
+        """
+        Compress text while preserving key information.
+        
+        Uses extractive summarization (no LLM call) for speed.
+        """
+        current_tokens = self.count_tokens(text)
+        if current_tokens <= target_tokens:
+            return text
+        
+        lines = text.split('\n')
+        
+        if preserve_key_info:
+            # Score lines by importance heuristics
+            scored_lines = []
+            for i, line in enumerate(lines):
+                score = 0
+                line_lower = line.lower().strip()
+                
+                # Boost for key patterns
+                if any(kw in line_lower for kw in ['total', 'sum', 'result', 'output', 'answer']):
+                    score += 10
+                if any(kw in line_lower for kw in ['error', 'warning', 'important', 'note']):
+                    score += 8
+                if re.search(r'\d+\.?\d*', line):  # Contains numbers
+                    score += 5
+                if line.startswith('#') or line.startswith('**'):  # Headers
+                    score += 7
+                if i < 3 or i >= len(lines) - 3:  # First/last lines
+                    score += 3
+                
+                scored_lines.append((score, i, line))
+            
+            # Sort by score, keep highest
+            scored_lines.sort(reverse=True)
+            
+            # Keep lines until we hit target
+            kept_lines = []
+            kept_tokens = 0
+            
+            for score, idx, line in scored_lines:
+                line_tokens = self.count_tokens(line)
+                if kept_tokens + line_tokens <= target_tokens:
+                    kept_lines.append((idx, line))
+                    kept_tokens += line_tokens
+            
+            # Sort by original order
+            kept_lines.sort()
+            result = '\n'.join(line for _, line in kept_lines)
+            
+            if kept_tokens < current_tokens:
+                result += f"\n...[summarized from {current_tokens} to {kept_tokens} tokens]"
+            
+            return result
+        else:
+            # Simple truncation
+            return self.truncate_to_fit(text, target_tokens)
+    
+    def prepare_data_context(
+        self,
+        data_sample: str,
+        schema: str,
+        query: str,
+        max_data_tokens: Optional[int] = None
+    ) -> Tuple[str, str]:
+        """
+        Prepare data context optimized for LLM consumption.
+        
+        Returns (optimized_sample, optimized_schema)
+        """
+        max_tokens = max_data_tokens or (self.budget.available_for_content // 2)
+        
+        # Schema is usually smaller and more important
+        schema_tokens = self.count_tokens(schema)
+        sample_budget = max_tokens - min(schema_tokens, max_tokens // 3)
+        
+        optimized_sample = self.summarize_for_context(data_sample, sample_budget)
+        optimized_schema = self.truncate_to_fit(schema, max_tokens // 3)
+        
+        return optimized_sample, optimized_schema
+
+
+# Global token manager instance
+_token_manager: Optional[TokenManager] = None
+
+
+def get_token_manager(provider: str = "default") -> TokenManager:
+    """Get or create token manager singleton."""
+    global _token_manager
+    if _token_manager is None or _token_manager.provider != provider:
+        _token_manager = TokenManager(provider)
+    return _token_manager
+
+
+# --- Global CA System Guardrails (Optimized for token efficiency) ---
+CA_SYSTEM_GUARDRAILS = """You are a Senior Chartered Accountant (CA) expert in:
+- Financial Analysis (GAAP/IFRS/Schedule III)
+- MIS reporting & Tax compliance
+- Forensic accounting
+
+RULES:
+1. ACCURACY: Never guess numbers - use data tools
+2. SOURCE-FIRST: Only answer from provided data
+3. COMPLIANCE: Follow accounting standards
+4. FORMAT: Markdown, INR Mn/Cr as per source"""
 
 # --- Track Classification ---
 TRACK_DATA = "TRACK_DATA"  # SQL/Pandas analytics
@@ -41,7 +326,7 @@ def _load_yaml_templates() -> Dict[str, str]:
     yaml_path = Path(__file__).parent.parent / "prompts" / "templates.yaml"
     if yaml_path.exists():
         try:
-            with open(yaml_path) as f:
+            with open(yaml_path, encoding='utf-8') as f:
                 data = yaml.safe_load(f) or {}
                 return data.get("templates", {})
         except Exception as e:

@@ -84,14 +84,16 @@ class SQLEngine:
             new_columns[col] = new_name
         df.columns = [new_columns[c] for c in df.columns]
 
-        # Clean values
+        # Clean values (with future-proof pandas API)
         for col in df.columns:
             if df[col].dtype == object:
-                # Handle NA-like values
+                # Handle NA-like values - use new API to avoid FutureWarning
                 df[col] = df[col].replace(
                     ["Na/p", "N/A", "n/a", "NA", "-", "--", "None", "none", "NULL", "null", ""],
                     np.nan
                 )
+                # Explicitly infer types to avoid deprecation warning
+                df[col] = df[col].infer_objects(copy=False)
                 
                 # Try numeric conversion for string columns
                 sample = df[col].dropna().head(10)

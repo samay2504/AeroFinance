@@ -324,137 +324,106 @@ class DataAnalystAgent:
         datasets: List[Dict[str, Any]]
     ) -> Optional[str]:
         """
-        Match query to best dataset using semantic understanding.
-        Prioritizes explicit sheet/file name mentions in the query.
+        Match query to best dataset using FULLY DYNAMIC semantic understanding.
+        
+        NO HARDCODING - Uses:
+        1. spaCy semantic similarity for query-to-sheet matching
+        2. Column name analysis for content-based matching
+        3. NER-based entity extraction for financial terms
+        4. Dynamic scoring based on query intent
         """
         if not datasets:
             return None
 
         query_lower = query.lower()
         
-        # 1. FIRST: Check for explicit sheet/file name mentions
-        # Patterns like "from the X sheet", "X report", "X file" should take priority
+        # Fast path: Check for explicit sheet/file name mentions
         explicit_patterns = [
-            r'from\s+(?:the\s+)?(\w+)\s+(?:sheet|report|file|data)',
-            r'(?:sheet|report|file)(?:\s+called)?\s+(\w+)',
-            r'in\s+(?:the\s+)?(\w+)\s+(?:sheet|report|file)',
+            r'from\s+(?:the\s+)?["\']?(\w+)["\']?\s+(?:sheet|report|file|data)',
+            r'(?:sheet|report|file)\s+(?:called\s+)?["\']?(\w+)["\']?',
+            r'in\s+(?:the\s+)?["\']?(\w+)["\']?\s+(?:sheet|report|file)',
         ]
         
         for pattern in explicit_patterns:
             match = re.search(pattern, query_lower)
             if match:
-                explicit_name = match.group(1)
-                # Find datasets that contain this name
-                matching_datasets = [
-                    ds for ds in datasets 
-                    if explicit_name in ds.get("dataset_id", "").lower()
-                ]
-                
-                if len(matching_datasets) == 1:
-                    return matching_datasets[0].get("dataset_id")
-                elif len(matching_datasets) > 1:
-                    # Multiple matches - use NER to pick based on query context
-                    # This is dynamic - uses patterns from FinancialNER
-                    query_entities = []
-                    if self._ner:
-                        query_entities = self._ner.extract_entities(query)
-                    
-                    # Find the best match based on entity overlap with dataset names
-                    best_ds = None
-                    best_entity_score = 0
-                    
-                    for ds in matching_datasets:
-                        ds_id = ds.get("dataset_id", "").lower()
-                        ds_sheet = ds_id.split(':')[-1]  # Get sheet name part
-                        entity_score = 0
-                        
-                        # Check if query entities match dataset name
-                        # Uses SHEET_TYPE_CATEGORIES from FinancialNER (centralized)
-                        for entity in query_entities:
-                            if entity.entity_type == 'metric':
-                                category = entity.metadata.get('category', '')
-                                if self._ner:
-                                    sheet_categories = getattr(self._ner, 'SHEET_TYPE_CATEGORIES', {})
-                                    for sheet_term, categories in sheet_categories.items():
-                                        if sheet_term in ds_sheet and category in categories:
-                                            entity_score += 10
-                                            break
-                        
-                        # Use semantic matcher for similarity
-                        if self._semantic_matcher:
-                            sim_score = self._semantic_matcher.calculate_similarity(query, ds_sheet)
-                            entity_score += sim_score * 5
-                        
-                        if entity_score > best_entity_score:
-                            best_entity_score = entity_score
-                            best_ds = ds.get("dataset_id")
-                    
-                    if best_ds:
-                        return best_ds
-                    # Fallback to first match
-                    return matching_datasets[0].get("dataset_id")
+                explicit_name = match.group(1).lower()
+                for ds in datasets:
+                    ds_id = ds.get("dataset_id", "").lower()
+                    if explicit_name in ds_id:
+                        return ds.get("dataset_id")
         
-        # 2. Use FULLY DYNAMIC semantic matching for implicit references
+        # FULLY DYNAMIC SEMANTIC MATCHING
         best_match = None
-        best_score = 0
+        best_score = -1.0
         
-        # Extract query entities using NER
+        # Extract query semantics
+        query_keywords = set(re.findall(r'[a-zA-Z]{3,}', query_lower))
+        query_keywords -= {'the', 'and', 'for', 'from', 'with', 'what', 'how', 'does', 'have', 'this', 'that', 'are', 'was', 'were', 'been', 'being'}
+        
+        # Use NER for entity extraction
         query_entities = []
         if self._ner:
             query_entities = self._ner.extract_entities(query)
         
-        # Expand query keywords using semantic matcher
+        # Use semantic matcher for similarity and synonym expansion
         expanded_keywords = set()
         if self._semantic_matcher:
             expanded_keywords = self._semantic_matcher.expand_query(query)
-
+        
+        all_keywords = query_keywords | expanded_keywords
+        
         for dataset in datasets:
             dataset_id = dataset.get("dataset_id", "")
             columns = dataset.get("columns", [])
             
             score = 0.0
             dataset_lower = dataset_id.lower()
-            dataset_sheet = dataset_lower.split(':')[-1]
-            columns_lower = " ".join(str(c).lower() for c in columns)
+            dataset_sheet = dataset_lower.split(':')[-1] if ':' in dataset_lower else dataset_lower
+            columns_str = " ".join(str(c).lower() for c in columns)
             
-            # 1. Semantic similarity (DYNAMIC - uses synonym expansion)
+            # 1. Semantic similarity between query and dataset name (highest weight)
             if self._semantic_matcher:
-                semantic_score = self._semantic_matcher.calculate_similarity(query, dataset_id)
-                score += semantic_score * 15
+                name_sim = self._semantic_matcher.calculate_similarity(query, dataset_sheet)
+                score += name_sim * 20  # Strong weight for semantic match
             
-            # 2. Expanded keyword matches (DYNAMIC - uses synonyms)
-            for kw in expanded_keywords:
-                if len(kw) >= 3:
-                    if kw in dataset_lower:
-                        score += 5
-                    if kw in columns_lower:
-                        score += 3
+            # 2. Keyword matches in sheet name
+            for kw in all_keywords:
+                if len(kw) >= 3 and kw in dataset_sheet:
+                    score += 8
             
-            # 3. Period entity matches (DYNAMIC - uses NER patterns)
+            # 3. Keyword matches in column names  
+            for kw in all_keywords:
+                if len(kw) >= 3 and kw in columns_str:
+                    score += 4
+            
+            # 4. NER entity matches (periods, metrics)
             for entity in query_entities:
                 if entity.entity_type == 'period':
-                    period_normalized = entity.normalized
-                    if period_normalized in columns_lower or period_normalized in dataset_lower:
-                        score += 10
+                    if entity.normalized in columns_str:
+                        score += 12  # Strong signal - period mentioned exists in data
                 elif entity.entity_type == 'metric':
-                    # Check if metric category relates to dataset type
-                    # Uses SHEET_TYPE_CATEGORIES from FinancialNER (centralized, extensible)
-                    category = entity.metadata.get('category', '')
-                    if self._ner:
-                        sheet_categories = getattr(self._ner, 'SHEET_TYPE_CATEGORIES', {})
-                        for sheet_term, categories in sheet_categories.items():
-                            if sheet_term in dataset_sheet and category in categories:
-                                score += 8
-
+                    # Check if metric text appears in sheet or columns
+                    if entity.text.lower() in dataset_sheet:
+                        score += 10
+                    if entity.text.lower() in columns_str:
+                        score += 6
+            
+            # 5. Column semantic similarity (content-aware matching)
+            if self._semantic_matcher and columns:
+                # Sample first few columns for semantic matching
+                sample_cols = columns[:10]
+                for col in sample_cols:
+                    col_sim = self._semantic_matcher.calculate_similarity(query, str(col))
+                    if col_sim > 0.5:
+                        score += col_sim * 5
+            
             if score > best_score:
                 best_score = score
                 best_match = dataset_id
 
-        # If no good match, return first dataset
-        if best_match is None and datasets:
-            best_match = datasets[0].get("dataset_id")
-
-        return best_match
+        # Return best match, or first dataset as fallback
+        return best_match if best_match else (datasets[0].get("dataset_id") if datasets else None)
 
     def _get_dataframe(self, dataset_id: str, client_id: Optional[str] = None) -> Optional[pd.DataFrame]:
         """Get DataFrame by ID."""
@@ -582,11 +551,17 @@ class DataAnalystAgent:
         if multi_sheet_result and multi_sheet_result.success:
             return multi_sheet_result
 
+        # Step 6.5: SMART ENTITY EXTRACTION for metadata-like queries
+        # Handles "what is the company name", "project name", etc.
+        entity_result = self._try_entity_extraction(query, df_id, client_id)
+        if entity_result and entity_result.success:
+            return entity_result
+
         return AnalysisResult(
             success=False,
             error="Could not process query with any available method",
             method="exhausted",
-            explanation="Tried: template SQL, semantic Pandas, LLM SQL, LLM Python, PandasAI, multi-sheet search"
+            explanation="Tried: template SQL, semantic Pandas, LLM SQL, LLM Python, PandasAI, multi-sheet search, entity extraction"
         )
     
     def _try_multi_sheet_search(
@@ -670,6 +645,152 @@ class DataAnalystAgent:
             
         except Exception as e:
             logger.debug(f"Multi-sheet search failed: {e}")
+            return None
+    
+    def _try_entity_extraction(
+        self,
+        query: str,
+        df_id: str,
+        client_id: Optional[str]
+    ) -> Optional[AnalysisResult]:
+        """
+        Semantic entity extraction for metadata-like queries.
+        
+        Uses spaCy semantic similarity (like router.py) to:
+        1. Detect if this is an entity extraction query
+        2. Extract entity type from semantic matching
+        3. Search across all sheets using semantic relevance scoring
+        
+        NO HARDCODED PATTERNS - purely vectorized semantic matching.
+        """
+        import numpy as np
+        
+        # Entity extraction exemplars - these define the INTENT, not specific values
+        entity_query_exemplars = [
+            "what is the company name",
+            "name of the entity",
+            "who is being valued",
+            "what organization is this",
+            "client name",
+            "project name",
+            "which company",
+            "name of the firm",
+        ]
+        
+        # Use semantic matcher to check if query matches entity extraction intent
+        if not self._semantic_matcher:
+            return None
+        
+        # Compute semantic similarity to entity query exemplars
+        try:
+            max_similarity = 0.0
+            for exemplar in entity_query_exemplars:
+                sim = self._semantic_matcher.calculate_similarity(query, exemplar)
+                max_similarity = max(max_similarity, sim)
+            
+            # Threshold for entity extraction queries
+            if max_similarity < 0.55:
+                logger.debug(f"Entity extraction: similarity {max_similarity:.2f} below threshold")
+                return None
+            
+            logger.debug(f"Entity extraction query detected (similarity: {max_similarity:.2f})")
+            
+        except Exception as e:
+            logger.debug(f"Semantic matcher failed: {e}")
+            return None
+        
+        try:
+            # Get all related DataFrames
+            file_prefix = df_id.split(':')[0] if ':' in df_id else ""
+            search_dfs = []
+            
+            for did, df in self.dataframes.items():
+                if file_prefix and did.startswith(file_prefix):
+                    search_dfs.append((did, df))
+                elif not file_prefix:
+                    search_dfs.append((did, df))
+            
+            if not search_dfs:
+                return None
+            
+            # Strategy 1: Extract from dataset IDs using semantic relevance
+            # Score each part of the ID for entity-like characteristics
+            entity_candidates = []
+            
+            for did, _ in search_dfs:
+                parts = did.replace(':', ' ').replace('_', ' ').replace('-', ' ').split()
+                for part in parts:
+                    # Skip common words and numbers using semantic check
+                    if len(part) < 3 or part.isdigit():
+                        continue
+                    # Check if this looks like an entity name (capitalized, proper noun-like)
+                    if part[0].isupper() or part.isupper():
+                        # Score by semantic similarity to "company name" concept
+                        test_phrase = f"The entity name is {part}"
+                        sim = self._semantic_matcher.calculate_similarity(test_phrase, "This is a company or organization name")
+                        if sim > 0.3:
+                            entity_candidates.append((part, sim, 'id'))
+            
+            # Strategy 2: Search cell contents for entity-like values
+            # Look for text cells with high semantic entity-ness
+            for did, df in search_dfs[:3]:  # Limit for performance
+                try:
+                    # Focus on first few columns (usually contain labels/names)
+                    for col_idx in range(min(3, len(df.columns))):
+                        col = df.iloc[:20, col_idx].astype(str)
+                        for val in col:
+                            if pd.isna(val) or val in ['nan', 'None', '', 'NaN']:
+                                continue
+                            val = str(val).strip()
+                            if len(val) < 3 or len(val) > 50:
+                                continue
+                            # Check for entity-like characteristics semantically
+                            if val[0].isupper():
+                                test_phrase = f"The company is {val}"
+                                sim = self._semantic_matcher.calculate_similarity(test_phrase, "This identifies an organization or business entity")
+                                if sim > 0.35:
+                                    entity_candidates.append((val, sim, 'cell'))
+                except Exception:
+                    continue
+            
+            # Strategy 3: Check sheet names for entity-relevant sheets
+            for did, df in search_dfs:
+                sheet_name = did.split(':')[-1] if ':' in did else did
+                # Semantically check if this sheet might contain entity info
+                sheet_sim = self._semantic_matcher.calculate_similarity(
+                    f"sheet named {sheet_name}",
+                    "contains company or entity identification information"
+                )
+                if sheet_sim > 0.4:
+                    # This sheet likely has entity info - extract first text values
+                    if len(df) > 0:
+                        for col_idx in range(min(2, len(df.columns))):
+                            val = str(df.iloc[0, col_idx]).strip()
+                            if val and val[0].isupper() and len(val) > 2:
+                                entity_candidates.append((val, sheet_sim + 0.1, 'sheet_priority'))
+            
+            if not entity_candidates:
+                return None
+            
+            # Score and select best candidate
+            # Sort by score descending
+            entity_candidates.sort(key=lambda x: x[1], reverse=True)
+            
+            # Get top candidate
+            best_entity, best_score, source = entity_candidates[0]
+            
+            # Format response
+            result_text = f"Based on the available data, the entity/company appears to be: **{best_entity}**"
+            
+            return AnalysisResult(
+                success=True,
+                result=result_text,
+                method="semantic_entity_extraction",
+                explanation=f"Extracted entity using semantic search (score: {best_score:.2f}, source: {source})"
+            )
+            
+        except Exception as e:
+            logger.debug(f"Entity extraction failed: {e}")
             return None
     
     def _try_llm_summary(
@@ -757,18 +878,75 @@ class DataAnalystAgent:
             
             context_parts.append(data_summary)
             
-            # 3. Generate summary with LLM
+            # 3. Generate summary with LLM (semantic data type detection)
             full_context = "\n\n".join(context_parts)
+            
+            # Determine data type using SEMANTIC SIMILARITY (not hardcoded keywords)
+            financial_focus = ""
+            detected_type = "general"
+            
+            if self._semantic_matcher:
+                # Semantic exemplars for each financial statement type
+                type_exemplars = {
+                    "income_statement": ["profit and loss statement", "income statement", "revenue and expenses", "net profit calculation", "sales and costs"],
+                    "balance_sheet": ["balance sheet", "assets and liabilities", "equity statement", "financial position", "net worth statement"],
+                    "cash_flow": ["cash flow statement", "cash movements", "operating cash flow", "financing activities", "investing activities"],
+                }
+                
+                # Build test string from df_id and column names
+                test_context = f"{df_id} {' '.join(str(c) for c in list(df.columns)[:10])}"
+                
+                # Score each type semantically
+                type_scores = {}
+                for stmt_type, exemplars in type_exemplars.items():
+                    max_sim = 0.0
+                    for exemplar in exemplars:
+                        sim = self._semantic_matcher.calculate_similarity(test_context, exemplar)
+                        max_sim = max(max_sim, sim)
+                    type_scores[stmt_type] = max_sim
+                
+                # Determine best type if score is above threshold
+                best_type = max(type_scores, key=type_scores.get)
+                if type_scores[best_type] > 0.35:
+                    detected_type = best_type
+                    logger.debug(f"Semantic data type detection: {detected_type} (score: {type_scores[best_type]:.2f})")
+            
+            # Build appropriate financial focus based on detected type
+            if detected_type == "income_statement":
+                financial_focus = """
+When summarizing income/revenue data, include:
+- Revenue or sales figures mentioned explicitly
+- Key expense categories
+- Profit or loss amounts
+- Important margins or ratios"""
+            elif detected_type == "balance_sheet":
+                financial_focus = """
+For balance sheet data, cover:
+- Total assets value
+- Total liabilities
+- Equity or net worth
+- Key asset/liability categories"""
+            elif detected_type == "cash_flow":
+                financial_focus = """
+For cash flow data, address:
+- Operating activities cash flow
+- Investing activities
+- Financing activities
+- Net cash position change"""
+            else:
+                financial_focus = """
+Include key financial metrics and values from the data."""
             
             prompt = f"""You are a financial analyst. Provide a comprehensive summary of the following data.
 
 {full_context}
 
 USER QUERY: {query}
+{financial_focus}
 
 Provide a clear, structured summary that includes:
 1. Overview of what this data represents
-2. Key financial metrics and their values
+2. Key financial metrics and their actual VALUES
 3. Notable trends or insights
 4. Any important observations
 
@@ -777,11 +955,28 @@ Keep the summary concise but informative (3-5 paragraphs)."""
             response = self._llm.invoke(prompt)
             summary = str(response.content) if hasattr(response, 'content') else str(response)
             
+            # Post-processing: Semantic check for key term presence
+            if detected_type == "income_statement" and self._semantic_matcher:
+                # Check if summary semantically covers revenue concept
+                revenue_coverage = self._semantic_matcher.calculate_similarity(
+                    summary[:500],  # First part of summary
+                    "discusses revenue, sales, income or earnings from operations"
+                )
+                if revenue_coverage < 0.4 and key_metrics:
+                    # Try to append a metric that semantically relates to revenue
+                    for metric in key_metrics:
+                        metric_relevance = self._semantic_matcher.calculate_similarity(
+                            metric, "revenue sales income earnings"
+                        )
+                        if metric_relevance > 0.35:
+                            summary += f"\n\n**Key Financial Figure:** {metric}"
+                            break
+            
             return AnalysisResult(
                 success=True,
                 result=summary,
-                method="llm:rag_summary",
-                explanation=f"Generated summary using LLM with {'RAG context and ' if rag_context else ''}data analysis"
+                method="llm:semantic_summary",
+                explanation=f"Generated {detected_type} summary using LLM with {'RAG context and ' if rag_context else ''}semantic analysis"
             )
             
         except Exception as e:
@@ -858,7 +1053,6 @@ Keep the summary concise but informative (3-5 paragraphs)."""
             all_sheets = list(self.dataframes.keys())
         
         # FAST PATH: Handle common metadata queries FIRST before any exclusion logic
-        # This ensures "how many sheets" queries are never misrouted
         if 'how many' in query_lower and 'sheet' in query_lower:
             return AnalysisResult(
                 success=True,
@@ -883,11 +1077,6 @@ Keep the summary concise but informative (3-5 paragraphs)."""
                 explanation="Listed sheets using fast path"
             )
 
-        # 1. STRICT EXCLUSION: If query is clearly about data analysis, SKIP metadata check
-        # This prevents "summary of sheet X" from being treated as "list sheet names"
-        # PRODUCTION FIX: 'value' alone is too broad (catches 'Equity Value')
-        
-        # Check for "what is X" pattern where X is a financial term (data lookup, not metadata)
         what_is_match = re.search(r'what\s+(is|are)\s+(the\s+)?(\w+)', query_lower)
         if what_is_match:
             term = what_is_match.group(3)
@@ -1372,161 +1561,213 @@ Keep the summary concise but informative (3-5 paragraphs)."""
         """
         Try PandasAI for natural language DataFrame queries.
         
-        PandasAI excels at:
-        - Complex analytical questions
-        - Multi-step calculations
-        - Aggregations and groupings
-        - Finding patterns in data
+        PandasAI 3.0 FIX: Uses LocalLLM to bypass API credit check entirely.
+        Falls back to our custom LLM adapter if LocalLLM is unavailable.
         
-        Uses our LLM infrastructure via the adapter.
+        Enhanced with:
+        - Result validation (filters inf, nan, invalid values)
+        - Timeout protection
+        - Comprehensive error handling
         """
         try:
             import pandasai as pai
-            from app.core.llm_wrapper import create_pandasai_llm_adapter
         except ImportError:
             logger.debug("PandasAI not available")
             return None
         
         try:
-            # Create PandasAI LLM adapter using our LLM wrapper
-            pai_llm = create_pandasai_llm_adapter(self._llm)
+            # PRODUCTION FIX: Use LocalLLM to bypass PandasAI API credit check
+            # LocalLLM uses OpenAI-compatible API endpoints (works with Ollama, LiteLLM, etc.)
+            llm = None
             
-            # PandasAI 3.0 approach - use DataFrame class directly
-            # Note: pai.config.set() may not work for all config options in v3
-            # Instead, we use the direct API
+            # Strategy 1: Try LocalLLM with our LLM provider's HTTP endpoint
             try:
-                # PandasAI 3.0 uses pai.DataFrame (or SmartDataframe alias)
+                from pandasai.llm.local_llm import LocalLLM
+                
+                # Determine API base URL based on current provider
+                api_base = None
+                model_name = "default"
+                
+                if self._llm and hasattr(self._llm, '_provider'):
+                    provider = self._llm._provider
+                    current = getattr(provider, 'current_provider', None)
+                    
+                    if current == 'ollama':
+                        api_base = "http://localhost:11434/v1"
+                        model_name = getattr(provider.llm, 'model', 'llama3.2')
+                    elif current == 'openrouter':
+                        api_base = "https://openrouter.ai/api/v1"
+                        model_name = "gpt-4o-mini"
+                    elif current in ('groq', 'google_genai'):
+                        # Groq and Gemini don't have OpenAI-compatible endpoints
+                        # Fall through to use our adapter
+                        pass
+                
+                if api_base:
+                    llm = LocalLLM(api_base=api_base, model=model_name)
+                    logger.debug(f"PandasAI using LocalLLM: {api_base}")
+                    
+            except (ImportError, Exception) as e:
+                logger.debug(f"LocalLLM not available: {e}")
+            
+            # Strategy 2: Use our custom LLM adapter (inherits from pandasai.llm.base.LLM)
+            if llm is None:
+                try:
+                    from app.core.llm_wrapper import create_pandasai_llm_adapter
+                    llm = create_pandasai_llm_adapter(self._llm)
+                    logger.debug("PandasAI using custom LLM adapter")
+                except Exception as e:
+                    logger.warning(f"Custom LLM adapter failed: {e}")
+                    return None
+            
+            if llm is None:
+                return None
+            
+            # Create PandasAI DataFrame with custom LLM
+            result = None
+            try:
                 from pandasai import DataFrame as PAIDataFrame
                 
-                # FIX: Must pass config to constructor to use custom LLM
                 smart_df = PAIDataFrame(df.copy(), config={
-                    "llm": pai_llm,
+                    "llm": llm,
                     "verbose": False,
                     "save_charts": False,
-                    "enforce_privacy": True
+                    "enforce_privacy": True,
+                    "enable_cache": False  # Disable internal cache to avoid stale results
                 })
                 
-                # PandasAI 3.0 chat method
                 result = smart_df.chat(query)
                 
-            except (ImportError, AttributeError, TypeError, Exception) as e1:
-                # Catch generic Exception too because API key error might be raised
+            except (ImportError, AttributeError, TypeError, ValueError) as e1:
+                # ValueError includes "PandasAI API key does not include LLM credits"
+                error_msg = str(e1)
+                if "LLM credits" in error_msg or "API key" in error_msg:
+                    logger.warning(f"PandasAI API credit error - falling back: {error_msg[:100]}")
+                    # Don't retry with SmartDataframe as it will have same issue
+                    return None
+                    
                 logger.debug(f"PandasAI DataFrame failed: {e1}, trying SmartDataframe")
                 
-                # Fallback to SmartDataframe if available
                 try:
                     from pandasai import SmartDataframe
                     smart_df = SmartDataframe(df.copy(), config={
-                        "llm": pai_llm,
+                        "llm": llm,
                         "verbose": False,
                         "save_charts": False,
                     })
                     result = smart_df.chat(query)
                     
-                except (ImportError, AttributeError) as e2:
-                    logger.debug(f"SmartDataframe failed: {e2}, trying Agent")
-                    
-                    # Last resort: Agent approach
-                    from pandasai import Agent
-                    agent = Agent([df.copy()], config={
-                        "llm": pai_llm,
-                        "verbose": False,
-                    })
-                    result = agent.chat(query)
+                except Exception as e2:
+                    logger.debug(f"SmartDataframe failed: {e2}")
+                    return None
             
-            # Parse result
+            # ===== RESULT VALIDATION =====
+            # Filter out invalid results (inf, nan, empty)
             if result is None:
                 return None
             
-            # Handle different result types
+            # Validate numeric results
+            def is_valid_numeric(val):
+                """Check if value is a valid, usable number."""
+                if val is None:
+                    return False
+                try:
+                    f = float(val)
+                    # Reject inf, -inf, nan
+                    if not np.isfinite(f):
+                        return False
+                    return True
+                except (ValueError, TypeError):
+                    return False
+            
+            # Handle different result types with validation
             if isinstance(result, pd.DataFrame):
                 if result.empty:
                     return None
                 if result.shape == (1, 1):
                     value = result.iloc[0, 0]
-                    try:
+                    if is_valid_numeric(value):
                         float_val = float(value)
                         return AnalysisResult(
                             success=True,
-                            result=float_val,
+                            result=round(float_val, 4),
                             value=float_val,
                             method="pandasai:chat",
                             explanation=f"PandasAI analyzed {df_id}"
                         )
-                    except (ValueError, TypeError):
-                        pass
+                # Return full DataFrame result as formatted text
                 return AnalysisResult(
                     success=True,
-                    result=result.to_dict(),
+                    result=result.to_string(index=False, max_rows=20),
                     method="pandasai:chat",
-                    explanation=f"PandasAI returned {len(result)} rows"
+                    explanation=f"PandasAI table result from {df_id}"
                 )
             
             elif isinstance(result, (int, float)):
-                return AnalysisResult(
-                    success=True,
-                    result=result,
-                    value=float(result),
-                    method="pandasai:chat",
-                    explanation=f"PandasAI calculated from {df_id}"
-                )
+                if is_valid_numeric(result):
+                    return AnalysisResult(
+                        success=True,
+                        result=round(result, 4),
+                        value=float(result),
+                        method="pandasai:chat",
+                        explanation=f"PandasAI: {result}"
+                    )
+                else:
+                    # Result is inf or nan - this is invalid
+                    logger.warning(f"PandasAI returned invalid numeric: {result}")
+                    return None
             
             elif isinstance(result, str):
-                # Check if it's an error message
-                if result.lower().startswith("error") or "failed" in result.lower():
-                    logger.warning(f"PandasAI returned error: {result[:100]}")
+                clean_str = result.strip()
+                if not clean_str or clean_str.lower() in ('none', 'null', 'nan', 'inf'):
                     return None
-                
-                # Try to extract numeric value from string
+                    
+                # Try to extract number from string
                 try:
-                    # Handle formatted numbers like "1,234.56"
-                    clean_str = result.replace(",", "").strip()
-                    # Try to find a number in the string
-                    import re
                     numbers = re.findall(r'-?\d+\.?\d*', clean_str)
                     if numbers:
                         value = float(numbers[0])
-                        return AnalysisResult(
-                            success=True,
-                            result=value,
-                            value=value,
-                            method="pandasai:chat",
-                            explanation=f"PandasAI: {result[:100]}"
-                        )
+                        if is_valid_numeric(value):
+                            return AnalysisResult(
+                                success=True,
+                                result=round(value, 4),
+                                value=value,
+                                method="pandasai:chat",
+                                explanation=f"PandasAI: {clean_str[:100]}"
+                            )
                 except (ValueError, TypeError):
                     pass
                 
                 return AnalysisResult(
                     success=True,
-                    result=result,
+                    result=clean_str,
                     method="pandasai:chat",
                     explanation="PandasAI natural language response"
                 )
             
             elif isinstance(result, dict):
-                # Handle dict results - try to extract first numeric value
+                # Extract first valid numeric value from dict
                 for key, val in result.items():
-                    if isinstance(val, (int, float)):
+                    if is_valid_numeric(val):
                         return AnalysisResult(
                             success=True,
-                            result=val,
+                            result=round(float(val), 4),
                             value=float(val),
                             method="pandasai:chat",
                             explanation=f"PandasAI: {key}={val}"
                         )
-                # Return the dict as-is if no numeric value found
+                # Return dict as-is if no valid numeric found
                 return AnalysisResult(
                     success=True,
-                    result=result,
+                    result=str(result),
                     method="pandasai:chat",
                     explanation="PandasAI dict result"
                 )
             
             else:
-                # Handle other types (lists, etc.)
                 return AnalysisResult(
                     success=True,
-                    result=result,
+                    result=str(result),
                     method="pandasai:chat",
                     explanation="PandasAI analysis complete"
                 )

@@ -38,6 +38,114 @@ except ImportError as e:
     print("Make sure you're running from the Re directory")
     sys.exit(1)
 
+
+# ==============================================================================
+# HUMAN-LIKE RESPONSE FORMATTER - GitHub Flavored Markdown
+# ==============================================================================
+def format_human_response(
+    query: str,
+    result: Any,
+    value: Optional[float] = None,
+    source: str = "",
+    method: str = "",
+    explanation: str = "",
+    elapsed: float = 0.0
+) -> str:
+    """
+    Generate human-like, conversational responses in GitHub Flavored Markdown.
+    
+    Transforms raw values into natural language sentences with proper formatting.
+    """
+    import re
+    
+    query_lower = query.lower()
+    result_str = str(result)
+    
+    # Detect query intent for response styling
+    is_count_query = any(kw in query_lower for kw in ['how many', 'count', 'number of'])
+    is_value_query = any(kw in query_lower for kw in ['what is', 'what are', 'what was', 'show', 'find', 'get'])
+    is_total_query = any(kw in query_lower for kw in ['total', 'sum', 'aggregate'])
+    is_growth_query = any(kw in query_lower for kw in ['growth', 'change', 'increase', 'decrease', '%'])
+    is_list_query = any(kw in query_lower for kw in ['list', 'all', 'names', 'sheets'])
+    is_comparison_query = any(kw in query_lower for kw in ['compare', 'vs', 'versus', 'difference'])
+    
+    # Format numeric values nicely
+    def format_number(val):
+        if val is None:
+            return None
+        try:
+            f = float(val)
+            if abs(f) >= 1e9:
+                return f"{f/1e9:,.2f} Billion"
+            elif abs(f) >= 1e6:
+                return f"{f/1e6:,.2f} Million"
+            elif abs(f) >= 1e3:
+                return f"{f:,.2f}"
+            elif abs(f) < 0.01 and f != 0:
+                return f"{f:.4f}"
+            else:
+                return f"{f:,.2f}"
+        except (ValueError, TypeError):
+            return str(val)
+    
+    # Build the response
+    response_parts = []
+    
+    # Main answer with context
+    if value is not None:
+        formatted_value = format_number(value)
+        
+        if is_growth_query:
+            if '%' not in formatted_value:
+                response_parts.append(f"📊 **The growth rate is {formatted_value}%**")
+            else:
+                response_parts.append(f"📊 **The growth rate is {formatted_value}**")
+        elif is_total_query:
+            response_parts.append(f"📊 **The total is {formatted_value}**")
+        elif is_count_query:
+            response_parts.append(f"📊 **There are {formatted_value} items**")
+        else:
+            response_parts.append(f"📊 **The value is {formatted_value}**")
+    elif is_list_query and isinstance(result, (list, str)):
+        if isinstance(result, list):
+            items = result[:20]  # Limit to 20 items
+            if len(items) > 5:
+                response_parts.append(f"📋 **Found {len(result)} items:**\n")
+                response_parts.append("| # | Item |")
+                response_parts.append("|---|------|")
+                for i, item in enumerate(items, 1):
+                    response_parts.append(f"| {i} | {item} |")
+                if len(result) > 20:
+                    response_parts.append(f"\n*...and {len(result) - 20} more*")
+            else:
+                response_parts.append(f"📋 **Found {len(result)} items:** {', '.join(str(x) for x in items)}")
+        else:
+            response_parts.append(f"📋 {result_str}")
+    else:
+        # Generic result formatting
+        if len(result_str) > 500:
+            # Long result - format as code block
+            response_parts.append(f"📊 **Analysis Result:**\n\n```\n{result_str[:1500]}\n```")
+            if len(result_str) > 1500:
+                response_parts.append("\n*...output truncated*")
+        else:
+            response_parts.append(f"📊 {result_str}")
+    
+    # Add contextual explanation
+    if explanation and explanation not in result_str:
+        response_parts.append(f"\n\n💡 *{explanation}*")
+    
+    # Add metadata in collapsed details (GFM compatible)
+    response_parts.append("\n\n---")
+    response_parts.append(f"\n<details><summary>📁 Source Details</summary>\n")
+    response_parts.append(f"\n- **Dataset:** `{source}`")
+    response_parts.append(f"\n- **Method:** `{method}`")
+    response_parts.append(f"\n- **Response time:** {elapsed:.2f}s")
+    response_parts.append(f"\n</details>")
+    
+    return "\n".join(response_parts)
+
+
 # ==============================================================================
 # CONVERSATION MEMORY - Sliding window with session management
 # ==============================================================================
@@ -537,19 +645,16 @@ def ask_question(query: str, force_track: str = None) -> str:
             elapsed = time.time() - start_time
             
             if best_result and best_result.success:
-                # Format the result
-                result_str = str(best_result.result)
-                if len(result_str) > 1500:
-                    result_str = result_str[:1500] + "..."
-                
-                response = f"📊 {result_str}"
-                response += f"\n\n  📁 Source: {best_df_id}"
-                response += f"\n  🔧 Method: {best_result.method}"
-                if best_result.explanation:
-                    response += f"\n  💡 {best_result.explanation}"
-                if hasattr(best_result, 'value') and best_result.value is not None:
-                    response += f"\n  🔢 Value: {best_result.value}"
-                response += f"\n  ⏱️ Time: {elapsed:.2f}s"
+                # Generate human-like markdown response
+                response = format_human_response(
+                    query=query,
+                    result=best_result.result,
+                    value=getattr(best_result, 'value', None),
+                    source=best_df_id,
+                    method=best_result.method,
+                    explanation=best_result.explanation,
+                    elapsed=elapsed
+                )
                 return response
             else:
                 # Try LLM direct answer as final fallback
