@@ -252,9 +252,14 @@ OUTPUT (JSON only, no explanation):
                     schema.label_column = df.columns[label_idx]
                     schema.columns[label_idx].semantic_type = "metric_label"
 
-                schema.header_row_index = response.get("header_row_index", 0)
-                schema.data_start_row = response.get("data_start_row", schema.header_row_index + 1)
-                schema.summary = response.get("summary", "")
+                # Handle None returns explicitly - LLM may return null/None instead of int
+                header_idx = response.get("header_row_index")
+                schema.header_row_index = int(header_idx) if header_idx is not None else 0
+                
+                data_start = response.get("data_start_row")
+                schema.data_start_row = int(data_start) if data_start is not None else (schema.header_row_index + 1)
+                
+                schema.summary = response.get("summary", "") or ""
 
                 # Map period columns
                 period_cols = response.get("period_columns", {})

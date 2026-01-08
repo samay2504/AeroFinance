@@ -84,15 +84,15 @@ class SQLEngine:
             new_columns[col] = new_name
         df.columns = [new_columns[c] for c in df.columns]
 
-        # Clean values (with future-proof pandas API)
+        # Clean values (with future-proof pandas API - avoids FutureWarning)
+        na_values = {"Na/p", "N/A", "n/a", "NA", "-", "--", "None", "none", "NULL", "null", ""}
         for col in df.columns:
             if df[col].dtype == object:
-                # Handle NA-like values - use new API to avoid FutureWarning
-                df[col] = df[col].replace(
-                    ["Na/p", "N/A", "n/a", "NA", "-", "--", "None", "none", "NULL", "null", ""],
-                    np.nan
-                )
-                # Explicitly infer types to avoid deprecation warning
+                # Use boolean mask instead of replace() to avoid FutureWarning
+                # This is the pandas 2.x production-grade approach
+                mask = df[col].isin(na_values) | df[col].isna()
+                df.loc[mask, col] = np.nan
+                # Explicitly infer types after NA replacement
                 df[col] = df[col].infer_objects(copy=False)
                 
                 # Try numeric conversion for string columns
@@ -244,14 +244,67 @@ class SQLEngine:
 
         # Try DuckDB first
         if self._connection:
-            try:
-                if params:
-                    result = self._connection.execute(sql, params).fetchdf()
-                else:
-                    result = self._connection.execute(sql).fetchdf()
-                return result
-            except Exception as e:
-                logger.warning(f"DuckDB execution failed: {e}, trying Pandas")
+            current_sql = sql
+            max_retries = 3
+            
+            for attempt in range(max_retries + 1):
+                try:
+                    if params:
+                        result = self._connection.execute(current_sql, params).fetchdf()
+                    else:
+                        result = self._connection.execute(current_sql).fetchdf()
+                    return result
+                except Exception as e:
+                    # If this was the last attempt, log and break to fallback
+                    if attempt == max_retries:
+                        logger.warning(f"DuckDB execution failed after {max_retries} auto-fixes: {e}, trying Pandas")
+                        break
+
+                    # AUTO-FIX: Check for common column naming mismatch (numeric columns)
+                    error_str = str(e)
+                    fixed_sql = None
+                    
+                    if 'Referenced column' in error_str:
+                        try:
+                            # 1. Extract missing column
+                            missing_match = re.search(r'Referenced column "([^"]+)" not found', error_str)
+                            if missing_match:
+                                missing = missing_match.group(1)
+                                target_candidate = None
+                                
+                                # 2. Extract potential candidates from error
+                                candidates_match = re.search(r'Candidate bindings: (.*)', error_str)
+                                if candidates_match:
+                                    # Parse list of candidates: "col_0", "col_1"
+                                    candidate_list = re.findall(r'"([^"]+)"', candidates_match.group(1))
+                                    
+                                    # Search for a good match in candidates
+                                    for cand in candidate_list:
+                                        if cand == f"col_{missing}" or missing in cand or cand.endswith(missing):
+                                            target_candidate = cand
+                                            break
+                                
+                                # 3. FALLBACK: If matching numeric pattern (e.g. "1") and no generic candidate found,
+                                # force 'col_1' pattern which is our standard sanitization
+                                if not target_candidate and missing.isdigit():
+                                    target_candidate = f"col_{missing}"
+
+                                if target_candidate:
+                                    logger.warning(f"Auto-fixing SQL column mismatch ({attempt+1}/{max_retries}): '{missing}' -> '{target_candidate}'")
+                                    fixed_sql = current_sql.replace(f'"{missing}"', f'"{target_candidate}"')
+                                    # Also fix unquoted variants
+                                    fixed_sql = re.sub(rf'\b{re.escape(missing)}\b', target_candidate, fixed_sql)
+                        except Exception as e_fix:
+                            logger.warning(f"Auto-fix logic failed: {e_fix}")
+                            pass
+                    
+                    if fixed_sql and fixed_sql != current_sql:
+                        current_sql = fixed_sql
+                        continue # Retry with new SQL
+                    else:
+                        # Cannot fix, break to fallback
+                        logger.warning(f"DuckDB execution failed: {e}, trying Pandas")
+                        break
 
         # Pandas fallback
         return self._execute_pandas_fallback(sql)

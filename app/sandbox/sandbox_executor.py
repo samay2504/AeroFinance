@@ -287,6 +287,24 @@ class SandboxExecutor:
             result["stdout"] = stdout_capture.getvalue()
             result["stderr"] = stderr_capture.getvalue()
 
+        except IndexError as e:
+            # Common error: accessing empty DataFrame rows/columns
+            result["error"] = f"IndexError: {str(e)} (DataFrame may be empty or row/column doesn't exist)"
+            result["stderr"] = stderr_capture.getvalue() + "\n" + traceback.format_exc()
+            logger.warning(f"Sandbox execution failed: {e}")
+            
+        except KeyError as e:
+            # Common error: column doesn't exist
+            result["error"] = f"KeyError: {str(e)} (Column or key not found in data)"
+            result["stderr"] = stderr_capture.getvalue() + "\n" + traceback.format_exc()
+            logger.warning(f"Sandbox execution failed: {e}")
+            
+        except (ValueError, TypeError) as e:
+            # Common error: type conversion failures
+            result["error"] = f"{type(e).__name__}: {str(e)}"
+            result["stderr"] = stderr_capture.getvalue() + "\n" + traceback.format_exc()
+            logger.warning(f"Sandbox execution failed: {e}")
+
         except Exception as e:
             result["error"] = f"{type(e).__name__}: {str(e)}"
             result["stderr"] = stderr_capture.getvalue() + "\n" + traceback.format_exc()

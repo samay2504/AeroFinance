@@ -249,9 +249,12 @@ class SemanticMatcher:
         'metadata': {'structure', 'schema', 'columns', 'sheets', 'tables', 'names'},
     }
     
-    # Class-level NLP model to share across instances
+    # Class-level NLP models to share across instances
     _nlp = None
     _spacy_loaded = False
+    _nltk_loaded = False
+    _lemmatizer = None
+    _wordnet_ready = False
 
     def __init__(self):
         # Build reverse synonym map
@@ -264,13 +267,16 @@ class SemanticMatcher:
                 self._synonym_map[syn].add(key)
                 self._synonym_map[syn].update(synonyms)
         
-        # Load spaCy if not already loaded
+        # Load NLP libraries
         if not SemanticMatcher._spacy_loaded:
             self._load_spacy()
+        
+        if not SemanticMatcher._nltk_loaded:
+            self._load_nltk()
 
     @classmethod
     def _load_spacy(cls):
-        """Load spaCy model for semantic vectors."""
+        """Load spaCy model for semantic vectors and NER."""
         try:
             import spacy
             try:
@@ -285,6 +291,300 @@ class SemanticMatcher:
             cls._spacy_loaded = True
         except ImportError:
             logger.info("spaCy not installed. Usage restricted.")
+
+    @classmethod
+    def _load_nltk(cls):
+        """Load NLTK resources for lemmatization and WordNet synonyms."""
+        try:
+            import nltk
+            from nltk.stem import WordNetLemmatizer
+            from nltk.corpus import wordnet
+            
+            # Download required NLTK data silently
+            for resource in ['wordnet', 'averaged_perceptron_tagger', 'punkt', 'omw-1.4']:
+                try:
+                    nltk.data.find(f'corpora/{resource}' if resource != 'punkt' else f'tokenizers/{resource}')
+                except LookupError:
+                    try:
+                        nltk.download(resource, quiet=True)
+                    except Exception:
+                        pass
+            
+            cls._lemmatizer = WordNetLemmatizer()
+            cls._wordnet_ready = True
+            cls._nltk_loaded = True
+            logger.info("SemanticMatcher loaded NLTK: WordNet + Lemmatizer")
+        except ImportError:
+            logger.info("NLTK not installed. Advanced lemmatization unavailable.")
+            cls._nltk_loaded = True  # Mark as attempted
+
+    # ================================================================
+    # NLTK METHODS - WordNet Synonyms and Lemmatization
+    # ================================================================
+    
+    def _get_wordnet_pos(self, treebank_tag: str) -> str:
+        """Convert TreeBank POS tag to WordNet POS tag."""
+        tag_map = {
+            'J': 'a',  # Adjective
+            'V': 'v',  # Verb
+            'N': 'n',  # Noun
+            'R': 'r',  # Adverb
+        }
+        return tag_map.get(treebank_tag[0], 'n')
+    
+    def lemmatize(self, text: str) -> str:
+        """
+        Lemmatize text using NLTK WordNet with POS tagging.
+        This converts words to their base form considering context.
+        """
+        if not self._lemmatizer:
+            return text.lower()
+        
+        try:
+            import nltk
+            words = nltk.word_tokenize(text.lower())
+            pos_tags = nltk.pos_tag(words)
+            
+            lemmatized = []
+            for word, pos in pos_tags:
+                wn_pos = self._get_wordnet_pos(pos)
+                lemma = self._lemmatizer.lemmatize(word, wn_pos)
+                lemmatized.append(lemma)
+            
+            return ' '.join(lemmatized)
+        except Exception:
+            return text.lower()
+    
+    def get_wordnet_synonyms(self, word: str, limit: int = 10) -> Set[str]:
+        """
+        Get synonyms from WordNet for a given word.
+        Includes financial domain filtering.
+        """
+        synonyms = set()
+        
+        if not self._wordnet_ready:
+            return synonyms
+        
+        try:
+            from nltk.corpus import wordnet
+            
+            for synset in wordnet.synsets(word):
+                for lemma in synset.lemmas():
+                    synonym = lemma.name().replace('_', ' ').lower()
+                    if synonym != word.lower() and len(synonym) > 2:
+                        synonyms.add(synonym)
+                        if len(synonyms) >= limit:
+                            return synonyms
+        except Exception:
+            pass
+        
+        return synonyms
+    
+    def get_financial_synonyms(self, word: str) -> Set[str]:
+        """
+        Get synonyms with financial domain priority.
+        Combines manual financial synonyms with WordNet.
+        """
+        # Start with our curated financial synonyms
+        synonyms = self.get_synonyms(word)
+        
+        # Add WordNet synonyms
+        wn_syns = self.get_wordnet_synonyms(word)
+        synonyms.update(wn_syns)
+        
+        # Financial-specific expansions
+        financial_expansions = {
+            'yoy': {'year on year', 'year over year', 'y-o-y', 'annual growth'},
+            'qoq': {'quarter on quarter', 'quarter over quarter', 'q-o-q'},
+            'mom': {'month on month', 'month over month', 'm-o-m'},
+            'cagr': {'compound annual growth rate', 'compound growth'},
+            'ebitda': {'earnings before interest tax depreciation amortization', 'operating profit'},
+            'ebit': {'earnings before interest tax', 'operating income'},
+            'pat': {'profit after tax', 'net profit', 'net income'},
+            'pbt': {'profit before tax', 'pretax profit'},
+            'roe': {'return on equity'},
+            'roa': {'return on assets'},
+            'roce': {'return on capital employed'},
+            'ev': {'enterprise value', 'firm value'},
+            'fcf': {'free cash flow'},
+            'fcff': {'free cash flow to firm'},
+            'fcfe': {'free cash flow to equity'},
+            'wacc': {'weighted average cost of capital'},
+            'dcf': {'discounted cash flow'},
+            'nwc': {'net working capital', 'working capital'},
+            'capex': {'capital expenditure', 'capital expense'},
+            'opex': {'operating expenditure', 'operating expense'},
+            'gmv': {'gross merchandise value', 'gross value'},
+            'arpu': {'average revenue per user'},
+            'ltv': {'lifetime value', 'customer lifetime value'},
+            'cac': {'customer acquisition cost'},
+            'churn': {'attrition', 'customer churn', 'churn rate'},
+        }
+        
+        word_lower = word.lower()
+        if word_lower in financial_expansions:
+            synonyms.update(financial_expansions[word_lower])
+        
+        return synonyms
+    
+    # ================================================================
+    # SPACY METHODS - NER and Entity Extraction
+    # ================================================================
+    
+    def extract_entities(self, text: str) -> List[Dict[str, Any]]:
+        """
+        Extract named entities using spaCy.
+        Returns entities with their labels, positions, and confidence.
+        """
+        entities = []
+        
+        if not self._nlp:
+            return entities
+        
+        try:
+            doc = self._nlp(text)
+            
+            for ent in doc.ents:
+                entities.append({
+                    'text': ent.text,
+                    'label': ent.label_,
+                    'start': ent.start_char,
+                    'end': ent.end_char,
+                    'description': self._get_entity_description(ent.label_)
+                })
+        except Exception as e:
+            logger.debug(f"Entity extraction failed: {e}")
+        
+        return entities
+    
+    def _get_entity_description(self, label: str) -> str:
+        """Get human-readable description for spaCy entity labels."""
+        descriptions = {
+            'MONEY': 'Monetary value',
+            'PERCENT': 'Percentage',
+            'DATE': 'Date or time period',
+            'ORG': 'Organization/Company',
+            'GPE': 'Geo-Political Entity (Country/City)',
+            'CARDINAL': 'Numeric value',
+            'ORDINAL': 'Ordinal number',
+            'QUANTITY': 'Quantity/Measurement',
+            'PERSON': 'Person name',
+            'TIME': 'Time expression',
+        }
+        return descriptions.get(label, label)
+    
+    def extract_noun_chunks(self, text: str) -> List[str]:
+        """
+        Extract noun chunks (meaningful phrases) from text using spaCy.
+        Useful for identifying metric names and concepts.
+        """
+        chunks = []
+        
+        if not self._nlp:
+            return chunks
+        
+        try:
+            doc = self._nlp(text)
+            for chunk in doc.noun_chunks:
+                chunks.append(chunk.text.lower())
+        except Exception:
+            pass
+        
+        return chunks
+    
+    def get_dependency_relations(self, text: str) -> List[Dict[str, str]]:
+        """
+        Parse dependency relations to understand query structure.
+        Helps identify what the user is asking about.
+        """
+        relations = []
+        
+        if not self._nlp:
+            return relations
+        
+        try:
+            doc = self._nlp(text)
+            for token in doc:
+                if token.dep_ in ['nsubj', 'dobj', 'pobj', 'attr', 'ROOT']:
+                    relations.append({
+                        'word': token.text,
+                        'lemma': token.lemma_,
+                        'pos': token.pos_,
+                        'dep': token.dep_,
+                        'head': token.head.text,
+                    })
+        except Exception:
+            pass
+        
+        return relations
+    
+    # ================================================================
+    # ADVANCED QUERY UNDERSTANDING
+    # ================================================================
+    
+    def parse_financial_query(self, query: str) -> Dict[str, Any]:
+        """
+        Comprehensive financial query parsing using NLTK + spaCy.
+        Extracts metric, period, operation, and other components.
+        """
+        result = {
+            'metric': None,
+            'period': None,
+            'operation': None,
+            'entities': [],
+            'noun_chunks': [],
+            'lemmatized': '',
+            'dependencies': [],
+        }
+        
+        try:
+            # Lemmatize the query
+            result['lemmatized'] = self.lemmatize(query)
+            
+            # Extract spaCy entities
+            result['entities'] = self.extract_entities(query)
+            
+            # Extract noun chunks
+            result['noun_chunks'] = self.extract_noun_chunks(query)
+            
+            # Get dependency parse
+            result['dependencies'] = self.get_dependency_relations(query)
+            
+            # Detect operation type
+            query_lower = query.lower()
+            if any(w in query_lower for w in ['sum', 'total', 'add']):
+                result['operation'] = 'sum'
+            elif any(w in query_lower for w in ['average', 'mean', 'avg']):
+                result['operation'] = 'average'
+            elif any(w in query_lower for w in ['growth', 'change', 'difference', 'variance']):
+                result['operation'] = 'growth'
+            elif any(w in query_lower for w in ['compare', 'versus', 'vs']):
+                result['operation'] = 'compare'
+            elif any(w in query_lower for w in ['list', 'show', 'display']):
+                result['operation'] = 'list'
+            else:
+                result['operation'] = 'lookup'
+            
+            # Extract period mentions using FinancialNER
+            ner = FinancialNER()
+            period_entities = ner.extract_periods(query)
+            if period_entities:
+                result['period'] = period_entities[0].normalized
+            
+            # Extract metric (most likely noun chunk)
+            for chunk in result['noun_chunks']:
+                # Skip chunks that are periods
+                if re.match(r'\d{4}|fy\d{2}|q[1-4]', chunk):
+                    continue
+                # Skip common stop phrases
+                if chunk not in ['what', 'which', 'how much', 'how many']:
+                    result['metric'] = chunk
+                    break
+                    
+        except Exception as e:
+            logger.debug(f"Query parsing failed: {e}")
+        
+        return result
 
     def get_synonyms(self, word: str) -> Set[str]:
         """Get all synonyms for a word."""
@@ -305,33 +605,60 @@ class SemanticMatcher:
     def calculate_similarity(self, query: str, target: str) -> float:
         """
         Calculate semantic similarity score between query and target.
-        Uses spaCy vectors if available, otherwise Jaccard/Synonym overlap.
+        Uses multiple strategies:
+        1. Exact/substring matching
+        2. Financial acronym expansion (PAT -> profit after tax)
+        3. spaCy vector similarity
+        4. Synonym-based fallback with Jaccard similarity
         Returns 0.0 to 1.0.
         """
         query_lower = query.lower()
         target_lower = target.lower()
         
+        # NORMALIZE: Convert underscored identifiers to space-separated words
+        # e.g., "equity_value" -> "equity value", "summary_pl" -> "summary pl"
+        query_normalized = re.sub(r'[_\-\.]', ' ', query_lower).strip()
+        target_normalized = re.sub(r'[_\-\.]', ' ', target_lower).strip()
+        
         # 1. Exact match
-        if query_lower == target_lower:
+        if query_normalized == target_normalized:
             return 1.0
         
-        # 2. Substring match
-        if query_lower in target_lower or target_lower in query_lower:
+        # 2. Substring match (use normalized versions)
+        if query_normalized in target_normalized or target_normalized in query_normalized:
             return 0.95
+        
+        # 3. FINANCIAL ACRONYM EXPANSION
+        # If either side is a known acronym, expand it for better matching
+        query_expanded = self._expand_financial_acronyms(query_normalized)
+        target_expanded = self._expand_financial_acronyms(target_normalized)
+        
+        # Check expanded forms for matches
+        if query_expanded == target_expanded:
+            return 0.92
+        if query_expanded in target_expanded or target_expanded in query_expanded:
+            return 0.88
             
-        # 3. spaCy Vector Similarity (Semantic)
+        # 4. spaCy Vector Similarity (Semantic) - use EXPANDED text for better acronym handling
         if self._nlp:
             try:
-                doc1 = self._nlp(query_lower)
-                doc2 = self._nlp(target_lower)
+                doc1 = self._nlp(query_expanded)
+                doc2 = self._nlp(target_expanded)
                 if doc1.vector_norm and doc2.vector_norm:
-                    return doc1.similarity(doc2)
+                    spacy_sim = doc1.similarity(doc2)
+                    # If spaCy gives reasonable similarity, use it
+                    if spacy_sim > 0.3:
+                        return spacy_sim
             except Exception:
                 pass
         
-        # 4. Synonym-based Fallback
+        # 5. Synonym-based Fallback with Financial Term Expansion
         query_words = self.expand_query(query)
-        target_words = set(re.findall(r'\b\w{3,}\b', target_lower))
+        target_words = set(re.findall(r'\b\w{2,}\b', target_lower))
+        
+        # Add expanded acronym words
+        query_words.update(set(query_expanded.split()))
+        target_words.update(set(target_expanded.split()))
         
         if not query_words or not target_words:
             return 0.0
@@ -347,6 +674,61 @@ class SemanticMatcher:
         bonus = len(important_matches) * 0.15
         
         return min(1.0, base_score + bonus)
+    
+    def _expand_financial_acronyms(self, text: str) -> str:
+        """
+        Expand financial acronyms in text.
+        E.g., 'PAT' -> 'profit after tax', 'EBITDA' -> 'earnings before interest...'
+        """
+        # Financial acronym mapping (both directions)
+        acronym_expansions = {
+            'yoy': 'year on year',
+            'qoq': 'quarter on quarter',
+            'mom': 'month on month',
+            'cagr': 'compound annual growth rate',
+            'ebitda': 'earnings before interest tax depreciation amortization',
+            'ebit': 'earnings before interest tax',
+            'pat': 'profit after tax',
+            'pbt': 'profit before tax',
+            'roe': 'return on equity',
+            'roa': 'return on assets',
+            'roce': 'return on capital employed',
+            'ev': 'enterprise value',
+            'fcf': 'free cash flow',
+            'fcff': 'free cash flow to firm',
+            'fcfe': 'free cash flow to equity',
+            'wacc': 'weighted average cost of capital',
+            'dcf': 'discounted cash flow',
+            'nwc': 'net working capital',
+            'capex': 'capital expenditure',
+            'opex': 'operating expenditure',
+            'gmv': 'gross merchandise value',
+            'arpu': 'average revenue per user',
+            'ltv': 'lifetime value',
+            'cac': 'customer acquisition cost',
+            'pl': 'profit and loss',
+            'pnl': 'profit and loss',
+            'bs': 'balance sheet',
+            'cf': 'cash flow',
+            'valuation': 'enterprise value equity value',  # Map valuation to main value metrics
+        }
+        
+        # Check if entire text is an acronym
+        text_clean = re.sub(r'[^a-z0-9]', '', text.lower())
+        if text_clean in acronym_expansions:
+            return acronym_expansions[text_clean]
+        
+        # Expand individual acronym words in text
+        words = text.split()
+        expanded_words = []
+        for word in words:
+            word_clean = re.sub(r'[^a-z0-9]', '', word.lower())
+            if word_clean in acronym_expansions:
+                expanded_words.append(acronym_expansions[word_clean])
+            else:
+                expanded_words.append(word)
+        
+        return ' '.join(expanded_words)
 
     def classify_intent(self, query: str, intents: Dict[str, List[str]]) -> Tuple[str, float]:
         """

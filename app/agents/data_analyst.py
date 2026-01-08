@@ -241,11 +241,14 @@ class DataAnalystAgent:
                     except:
                         col_str = f"Col_{i}"
                 else:
-                    col_str = str(col)
+                    col_str = f"Col_{i}" # Always use Col_i for pure numbers to match SQL Engine
             elif pd.isna(col) or str(col).strip() == '' or str(col).startswith('Unnamed'):
                 col_str = f"Col_{i}"
             else:
                 col_str = str(col)
+                # Ensure it doesn't start with a number for SQL compatibility
+                if col_str and col_str[0].isdigit():
+                     col_str = f"Col_{col_str}"
             
             # Handle duplicates
             base_name = col_str
@@ -418,6 +421,41 @@ class DataAnalystAgent:
                     if col_sim > 0.5:
                         score += col_sim * 5
             
+            # 6. FINANCIAL DOMAIN SEMANTIC MATCHING
+            # Use semantic similarity to match query intent to sheet purpose
+            if self._semantic_matcher:
+                # Financial domain exemplars for common sheet types
+                financial_sheet_intents = {
+                    "valuation": ["what is the valuation", "enterprise value", "equity value", "dcf value", "company worth"],
+                    "revenue": ["total revenue", "sales figures", "income from operations", "top line"],
+                    "ebitda": ["ebitda margin", "operating profit", "earnings before interest"],
+                    "profit_loss": ["profit and loss", "income statement", "net income", "profit margin"],
+                    "balance": ["balance sheet", "assets and liabilities", "total assets", "net worth"],
+                    "cashflow": ["cash flow", "operating cash flow", "free cash flow", "fcff"],
+                    "growth": ["growth rate", "year on year", "yoy growth", "revenue growth"],
+                    "projection": ["projections", "forecast", "projected values", "future estimates"],
+                    "assumptions": ["assumptions", "parameters", "inputs", "base case"],
+                }
+                
+                # Score query against each intent
+                query_intents = {}
+                for intent, exemplars in financial_sheet_intents.items():
+                    max_intent_sim = 0.0
+                    for ex in exemplars:
+                        sim = self._semantic_matcher.calculate_similarity(query, ex)
+                        max_intent_sim = max(max_intent_sim, sim)
+                    if max_intent_sim > 0.5:
+                        query_intents[intent] = max_intent_sim
+                
+                # Match sheet name against detected intents
+                for intent, intent_score in query_intents.items():
+                    # Check if sheet name semantically matches the intent
+                    sheet_intent_sim = self._semantic_matcher.calculate_similarity(dataset_sheet, intent)
+                    if sheet_intent_sim > 0.4:
+                        # Strong bonus: query intent matches sheet purpose
+                        bonus = intent_score * sheet_intent_sim * 25
+                        score += bonus
+            
             if score > best_score:
                 best_score = score
                 best_match = dataset_id
@@ -477,6 +515,16 @@ class DataAnalystAgent:
         meta_result = self._handle_metadata_query(query, df, df_id, client_id)
         if meta_result:
             return meta_result
+
+        # ==== SMART SEMANTIC DIRECT LOOKUP (PRIORITY 0) ====
+        # For simple value queries, try to understand user's natural language
+        # and match it semantically to actual row/column headers.
+        # Example: "Year on Year growth in 2025" -> finds "YoY growth (%)" row, "2025" column
+        # This is FAST and avoids unnecessary SQL/code generation
+        if self._semantic_matcher:
+            direct_result = self._try_semantic_direct_lookup(query, df, df_id)
+            if direct_result and direct_result.success:
+                return direct_result
 
         # ==== SUMMARY QUERIES: LLM FIRST with RAG ====
         # For summary/overview queries, use LLM first (better quality)
@@ -561,8 +609,296 @@ class DataAnalystAgent:
             success=False,
             error="Could not process query with any available method",
             method="exhausted",
-            explanation="Tried: template SQL, semantic Pandas, LLM SQL, LLM Python, PandasAI, multi-sheet search, entity extraction"
+            explanation="Tried: semantic lookup, template SQL, semantic Pandas, LLM SQL, LLM Python, PandasAI, multi-sheet search, entity extraction"
         )
+    
+    def _try_semantic_direct_lookup(
+        self,
+        query: str,
+        df: pd.DataFrame,
+        df_id: str
+    ) -> Optional[AnalysisResult]:
+        """
+        SMART SEMANTIC DIRECT LOOKUP - Priority 0 for value queries.
+        
+        Uses semantic similarity to understand natural language queries and match them
+        to actual row/column headers in the data. This avoids unnecessary SQL/code generation.
+        
+        Example: User asks "Year on Year growth in 2025"
+                 Data has row "YoY growth (%)" and column "2025"
+                 This method directly fetches that value.
+        
+        Strategy:
+        1. Extract semantic concepts from query (metric concept, period concept)
+        2. Match metric concept to row headers using semantic similarity
+        3. Match period concept to column headers using semantic similarity  
+        4. Retrieve value directly from matched cell
+        
+        NO HARDCODING - Uses spaCy semantic vectors for intelligent matching.
+        """
+        if not self._semantic_matcher:
+            return None
+        
+        try:
+            import numpy as np
+            
+            # ================================================================
+            # STEP 1: DETECT IF THIS IS A DIRECT LOOKUP QUERY
+            # ================================================================
+            # Lookup queries typically ask for a specific value with metric + period
+            lookup_indicators = [
+                "what is", "show me", "give me", "find", "get", 
+                "value of", "value for", "how much", "tell me"
+            ]
+            query_lower = query.lower()
+            is_lookup_query = any(ind in query_lower for ind in lookup_indicators)
+            
+            # Also check for period mentions (years, quarters, dates)
+            period_pattern = r'(\d{4}|fy\d{2,4}|q[1-4]|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|\d{1,2}mfy\d{2})'
+            has_period = bool(re.search(period_pattern, query_lower))
+            
+            # Financial metric synonyms for semantic expansion
+            metric_synonyms = {
+                "year on year growth": ["yoy growth", "y-o-y growth", "yoy change", "annual growth", "year over year"],
+                "revenue": ["turnover", "sales", "income from operations", "top line"],
+                "profit": ["net income", "earnings", "bottom line", "pat", "profit after tax"],
+                "margin": ["profit margin", "operating margin", "ebitda margin", "gross margin"],
+                "cost": ["expense", "expenditure", "cogs", "cost of goods"],
+                "growth rate": ["growth %", "growth percentage", "cagr", "increase %"],
+                "total": ["sum", "aggregate", "overall", "grand total"],
+                "ebitda": ["operating profit", "earnings before interest"],
+                "valuation": ["enterprise value", "equity value", "fair value"],
+            }
+            
+            # Skip if doesn't look like a lookup query
+            if not (is_lookup_query or has_period):
+                logger.debug("Semantic lookup: Not a direct lookup query")
+                return None
+            
+            # ================================================================
+            # NEW: SEARCH STRATEGY FOR COMPLEX EXCEL FILES
+            # 1. First try the passed dataframe
+            # 2. If no match, search ALL dataframes if query contains "total", "value", etc.
+            # 3. Prioritize sheets whose names match query terms
+            # ================================================================
+            
+            search_dfs = [(df_id, df)]
+            
+            # If current DF doesn't look promising or we want to be thorough, 
+            # search other probable sheets
+            metric_keywords = [
+                ('enterprise value', 'equity'),
+                ('equity value', 'equity'),
+                ('ebitda', 'ebitda'),
+                ('revenue', 'pl'),
+                ('profit', 'pl'),
+                ('growth', 'fcff'),
+                ('cash flow', 'cf'),
+                ('balance sheet', 'bs'),
+            ]
+            
+            # Identify high-priority additional sheets to search
+            priority_sheets = []
+            for query_term, sheet_term in metric_keywords:
+                if query_term in query_lower:
+                    for did, d in self.dataframes.items():
+                        if sheet_term in did.lower() and did != df_id:
+                            priority_sheets.append((did, d))
+            
+            # Add unique priority sheets to search list
+            seen_ids = {df_id}
+            for did, d in priority_sheets:
+                if did not in seen_ids:
+                    search_dfs.append((did, d))
+                    seen_ids.add(did)
+
+            # Limit search depth for performance
+            if len(search_dfs) > 5:
+                search_dfs = search_dfs[:5]
+                
+            best_result = None
+            best_score = 0.0
+
+            for current_df_id, current_df in search_dfs:
+                # ================================================================
+                # STEP 2: IDENTIFY LABEL COLUMN (Smart Detection)
+                # ================================================================
+                # Scan first 3 columns to find the one with most string labels
+                label_col_idx = 0
+                max_strings = 0
+                
+                if len(current_df.columns) > 0:
+                    for idx in range(min(3, len(current_df.columns))):
+                        col_data = current_df.iloc[:, idx].astype(str)
+                        # Count non-empty, non-numeric strings
+                        string_count = sum(1 for x in col_data 
+                                         if len(x) > 2 and not self._is_numeric_like(x) and x.lower() != 'nan')
+                        
+                        if string_count > max_strings:
+                            max_strings = string_count
+                            label_col_idx = idx
+                
+                label_col = current_df.columns[label_col_idx]
+                
+                # ================================================================
+                # STEP 3: SEMANTIC ROW MATCHING
+                # Find the row that best matches the user's metric query
+                # ================================================================
+                current_best_row_idx = None
+                current_best_row_score = 0.0
+                current_best_row_label = None
+                
+                # Build list of unique row labels
+                row_labels = []
+                for idx, row in current_df.iterrows():
+                    label_val = str(row[label_col]).strip()
+                    if label_val and label_val.lower() not in ['nan', 'none', '']:
+                        row_labels.append((idx, label_val))
+                
+                # Expand query with synonyms
+                query_expanded = query_lower
+                for full_term, synonyms in metric_synonyms.items():
+                    for syn in synonyms:
+                        if syn in query_lower:
+                            query_expanded += f" {full_term}"
+                            break
+                
+                # Score each row label using semantic similarity
+                for idx, label in row_labels:
+                    # Normalize label
+                    label_normalized = re.sub(r'[_\-\.\(\)\%]', ' ', label.lower()).strip()
+                    
+                    # Calculate semantic similarity
+                    sim = self._semantic_matcher.calculate_similarity(query_expanded, label_normalized)
+                    
+                    # Sheet context bonus: if sheet name matches query, boost score
+                    if current_df_id.split(':')[-1].lower() in query_lower:
+                        sim += 0.1
+                    
+                    # Exact word match bonus
+                    if any(word in label.lower() for word in query_lower.split() if len(word) > 3):
+                        sim += 0.15
+                    
+                    # Special handling for key metrics
+                    if 'growth' in query_lower and 'growth' in label.lower():
+                        sim += 0.2
+                    if 'yoy' in query_lower and ('yoy' in label.lower() or 'year on year' in label.lower()):
+                        sim += 0.3
+                    if 'enterprise value' in query_lower and 'enterprise value' in label.lower():
+                        sim += 0.4
+                        
+                    if sim > current_best_row_score:
+                        current_best_row_score = sim
+                        current_best_row_idx = idx
+                        current_best_row_label = label
+                
+                # If this match is better than previous best, keep it
+                if current_best_row_score > best_score and current_best_row_score > 0.4:
+                    
+                    # Now try to find column
+                    # ================================================================
+                    # STEP 4: SEMANTIC COLUMN MATCHING  
+                    # ================================================================
+                    current_best_col_idx = None
+                    current_best_col_score = 0.0
+                    current_best_col_name = None
+                    
+                    # Check period matches
+                    period_matches = re.findall(period_pattern, query_lower)
+                    period_query = ' '.join(period_matches) if period_matches else query_lower
+                    
+                    # Look for column headers
+                    for c_idx, col in enumerate(current_df.columns):
+                        if c_idx == label_col_idx:
+                            continue
+                        
+                        col_str = str(col).lower().strip()
+                        sim = 0.0
+                        
+                        # Year matching
+                        years_in_query = re.findall(r'20\d{2}', query_lower)
+                        if years_in_query:
+                            for yr in years_in_query:
+                                if yr in col_str:
+                                    sim = 0.9
+                        # Period matching
+                        elif period_matches:
+                            for pm in period_matches:
+                                if pm in col_str:
+                                    sim = 0.8
+                        # Fallback for "current" or "latest" -> last column
+                        elif any(x in query_lower for x in ['current', 'latest', 'now', 'total']):
+                            sim = 0.5 + (c_idx / len(current_df.columns)) * 0.1
+                            
+                        if sim > current_best_col_score:
+                            current_best_col_score = sim
+                            current_best_col_idx = c_idx
+                            current_best_col_name = col
+                    
+                    # If high row score but no column processing, assume value is in a nearby numeric column
+                    if current_best_col_idx is None:
+                         for c_idx in range(label_col_idx + 1, len(current_df.columns)):
+                            val = current_df.iloc[current_best_row_idx, c_idx]
+                            if pd.notna(val) and self._is_numeric_like(str(val)):
+                                current_best_col_idx = c_idx
+                                current_best_col_name = current_df.columns[c_idx]
+                                break
+
+                    if current_best_col_idx is not None:
+                        # Found a full match
+                        best_score = current_best_row_score
+                        best_result = (current_df, current_best_row_idx, current_best_col_idx, current_best_row_label, current_best_col_name, current_df_id)
+
+            if best_result:
+                df_match, r_idx, c_idx, r_label, c_name, df_id_match = best_result
+                
+                # Retrieve value
+                value = df_match.iloc[r_idx, c_idx]
+                if pd.isna(value):
+                    return None
+                
+                numeric_value = None
+                try:
+                    val_str = str(value).replace(',', '').replace('%', '').strip()
+                    numeric_value = float(val_str)
+                except:
+                    pass
+                
+                # Format result
+                if numeric_value is not None:
+                    if '%' in str(value) or 'growth' in r_label.lower() or 'margin' in r_label.lower():
+                        result_text = f"{numeric_value * 100:.2f}%" if numeric_value < 1.0 else f"{numeric_value:.2f}%"
+                    else:
+                        result_text = f"{numeric_value:,.2f}"
+                else:
+                    result_text = str(value)
+                    
+                explanation = f"Found '{r_label}' in sheet '{df_id_match.split(':')[-1]}' (column '{c_name}'): {result_text}"
+                
+                return AnalysisResult(
+                    success=True,
+                    result=result_text,
+                    value=numeric_value,
+                    method="pandas:semantic_direct_lookup",
+                    explanation=explanation
+                )
+
+            return None
+            
+        except Exception as e:
+            logger.debug(f"Semantic direct lookup failed: {e}")
+            return None
+    
+    def _is_numeric_like(self, val: str) -> bool:
+        """Check if a string value looks like a number."""
+        try:
+            cleaned = val.replace(',', '').replace('%', '').replace('$', '').replace('₹', '').strip()
+            if cleaned.lower() in ['nan', 'none', '-', '', 'na', 'n/a']:
+                return False
+            float(cleaned)
+            return True
+        except (ValueError, TypeError):
+            return False
     
     def _try_multi_sheet_search(
         self,
@@ -681,19 +1017,45 @@ class DataAnalystAgent:
         if not self._semantic_matcher:
             return None
         
+        # NEGATIVE exemplars - queries that ask for VALUES, not entity names
+        # These should NOT trigger entity extraction
+        value_query_exemplars = [
+            "what is the valuation",
+            "what is the enterprise value",
+            "what is the equity value",
+            "what is the total revenue",
+            "what is the growth rate",
+            "what is the EBITDA",
+            "what is the net worth",
+            "calculate the total",
+            "show me the numbers",
+            "what are the financials",
+        ]
+        
         # Compute semantic similarity to entity query exemplars
         try:
-            max_similarity = 0.0
+            max_entity_similarity = 0.0
             for exemplar in entity_query_exemplars:
                 sim = self._semantic_matcher.calculate_similarity(query, exemplar)
-                max_similarity = max(max_similarity, sim)
+                max_entity_similarity = max(max_entity_similarity, sim)
             
-            # Threshold for entity extraction queries
-            if max_similarity < 0.55:
-                logger.debug(f"Entity extraction: similarity {max_similarity:.2f} below threshold")
+            # Check if query is actually asking for a VALUE (negative check)
+            max_value_similarity = 0.0
+            for exemplar in value_query_exemplars:
+                sim = self._semantic_matcher.calculate_similarity(query, exemplar)
+                max_value_similarity = max(max_value_similarity, sim)
+            
+            # If query is MORE similar to value queries than entity queries, reject
+            if max_value_similarity > max_entity_similarity:
+                logger.debug(f"Entity extraction skipped: value query detected (entity={max_entity_similarity:.2f}, value={max_value_similarity:.2f})")
                 return None
             
-            logger.debug(f"Entity extraction query detected (similarity: {max_similarity:.2f})")
+            # Threshold for entity extraction queries (must be clearly about entity names)
+            if max_entity_similarity < 0.65:  # Raised threshold for stricter matching
+                logger.debug(f"Entity extraction: similarity {max_entity_similarity:.2f} below threshold")
+                return None
+            
+            logger.debug(f"Entity extraction query detected (similarity: {max_entity_similarity:.2f})")
             
         except Exception as e:
             logger.debug(f"Semantic matcher failed: {e}")
@@ -733,29 +1095,80 @@ class DataAnalystAgent:
             
             # Strategy 2: Search cell contents for entity-like values
             # Look for text cells with high semantic entity-ness
-            for did, df in search_dfs[:3]:  # Limit for performance
+            blacklist_terms = ['date', 'historical', 'financials', 'period', 'year', 'month', 'quarter', 
+                             'sheet', 'model', 'valuation', 'forecast', 'summary', 'analysis', 'total', 'average',
+                             'inr', 'usd', 'eur', 'gbp', 'currency', 'millions', 'lakhs', 'crores', 'thousands', 'units']
+            
+            # Prioritize the "Summary" or "Cover" or "Intro" sheets if possible
+            sorted_dfs = sorted(search_dfs, key=lambda x: 1 if any(t in x[0].lower() for t in ['summary', 'cover', 'intro', 'company']) else 0, reverse=True)
+            
+            for did, df in sorted_dfs[:5]:  # Check top 5 relevant sheets
                 try:
-                    # Focus on first few columns (usually contain labels/names)
-                    for col_idx in range(min(3, len(df.columns))):
-                        col = df.iloc[:20, col_idx].astype(str)
-                        for val in col:
-                            if pd.isna(val) or val in ['nan', 'None', '', 'NaN']:
-                                continue
-                            val = str(val).strip()
-                            if len(val) < 3 or len(val) > 50:
-                                continue
-                            # Check for entity-like characteristics semantically
-                            if val[0].isupper():
-                                test_phrase = f"The company is {val}"
-                                sim = self._semantic_matcher.calculate_similarity(test_phrase, "This identifies an organization or business entity")
-                                if sim > 0.35:
-                                    entity_candidates.append((val, sim, 'cell'))
+                    # Focus on VERY top-left (first 2x2) which usually holds Company Name in models
+                    # Then check first few columns
+                    cells_to_check = []
+                    
+                    # Top-left priority
+                    if len(df) > 0 and len(df.columns) > 0:
+                        # Add column headers to check list (crucial if title is parsed as header)
+                        for col in df.columns[:3]:
+                            cells_to_check.append((col, 1.2))
+                            
+                        for r in range(min(5, len(df))):
+                            for c in range(min(3, len(df.columns))):
+                                cells_to_check.append((df.iloc[r, c], 1.2)) # Boost score for top-left
+                                
+                    for val_raw, location_boost in cells_to_check:
+                        if pd.isna(val_raw) or val_raw in ['nan', 'None', '', 'NaN']:
+                            continue
+                        
+                        val = str(val_raw).strip()
+                        val_lower = val.lower()
+                        
+                        # Filter out short/long garbage
+                        if len(val) < 3 or len(val) > 100:
+                            continue
+                            
+                        # Filter out blocklisted generic terms
+                        if any(term in val_lower for term in blacklist_terms):
+                            continue
+
+                        # Base semantic score
+                        sim = 0.0
+                        if val[0].isupper():
+                            test_phrase = f"The company is {val}"
+                            sim = self._semantic_matcher.calculate_similarity(test_phrase, "This identifies an organization or business entity")
+                        
+                        # NER verification (Strong Signal)
+                        ner_boost = 0.0
+                        if self._ner:
+                            entities = self._ner.extract_entities(val)
+                            # spaCy usage: entity dict has 'label' key
+                            if any(ent.get('label') == 'ORG' for ent in entities):
+                                ner_boost = 0.4
+                        
+                        # Suffix check (Strong Signal)
+                        suffix_boost = 0.0
+                        if any(s in val_lower for s in [' pvt ', ' private ', ' ltd', ' limited', ' inc', ' corp', ' llc', ' s.a.', ' gmbh']):
+                            suffix_boost = 0.5
+                            
+                        # Final Score Calculation
+                        final_score = (sim * location_boost) + ner_boost + suffix_boost
+                        
+                        if final_score > 0.45:
+                            entity_candidates.append((val, final_score, f'cell (boost={location_boost})'))
+
                 except Exception:
                     continue
             
             # Strategy 3: Check sheet names for entity-relevant sheets
             for did, df in search_dfs:
                 sheet_name = did.split(':')[-1] if ':' in did else did
+                # Check for explicit company name in sheet
+                # e.g. "Dhandhania Infotech PL"
+                if any(s in sheet_name.lower() for s in [' pvt ', ' private ', ' ltd', ' limited', ' inc']):
+                     entity_candidates.append((sheet_name, 0.8, 'sheet_name_suffix'))
+                
                 # Semantically check if this sheet might contain entity info
                 sheet_sim = self._semantic_matcher.calculate_similarity(
                     f"sheet named {sheet_name}",
@@ -767,7 +1180,9 @@ class DataAnalystAgent:
                         for col_idx in range(min(2, len(df.columns))):
                             val = str(df.iloc[0, col_idx]).strip()
                             if val and val[0].isupper() and len(val) > 2:
-                                entity_candidates.append((val, sheet_sim + 0.1, 'sheet_priority'))
+                                # Apply same filtering as above
+                                if not any(term in val.lower() for term in blacklist_terms):
+                                    entity_candidates.append((val, sheet_sim + 0.1, 'sheet_priority'))
             
             if not entity_candidates:
                 return None
@@ -1403,8 +1818,77 @@ Keep the summary concise but informative (3-5 paragraphs)."""
                     wrong_name = safe_table_name.replace("__", "_")
                     if wrong_name in sql:
                         sql = sql.replace(wrong_name, safe_table_name)
-                    # Remove backticks which DuckDB doesn't use
-                    sql = sql.replace("`", "")
+                
+                # Remove backticks which DuckDB doesn't use
+                sql = sql.replace("`", "")
+                
+                # ================================================================
+                # PRODUCTION-GRADE SQL COLUMN SANITIZATION
+                # Fixes all common LLM column naming errors:
+                # 1. "1", "2" -> "col_1", "col_2"
+                # 2. col.3 -> col_3 (wrong syntax)
+                # 3. "label" -> actual label column name
+                # 4. Missing quotes around column names
+                # ================================================================
+                import re
+                actual_columns = [str(c) for c in schema["columns"]]
+                actual_columns_lower = {c.lower(): c for c in actual_columns}
+                
+                # Build column index map (0-indexed and 1-indexed)
+                col_by_index = {}
+                for i, col in enumerate(actual_columns):
+                    col_by_index[str(i)] = col      # 0-indexed
+                    col_by_index[str(i+1)] = col   # 1-indexed fallback
+                
+                # FIX 1: Fix "col.N" syntax -> "col_N" (LLM often uses dots)
+                sql = re.sub(r'\bcol\.(\d+)\b', r'col_\1', sql, flags=re.IGNORECASE)
+                
+                # FIX 2: Fix quoted numeric column names: "1", "2", "7" -> proper column
+                for match in re.findall(r'"(\d+)"', sql):
+                    if match in col_by_index:
+                        sql = sql.replace(f'"{match}"', f'"{col_by_index[match]}"')
+                    elif f"col_{match}" in actual_columns_lower:
+                        sql = sql.replace(f'"{match}"', f'"col_{match}"')
+                    else:
+                        # Default to col_N pattern
+                        sql = sql.replace(f'"{match}"', f'"col_{match}"')
+                
+                # FIX 3: Fix unquoted numeric column references in SQL keywords
+                # Pattern: WHERE 1 LIKE, SELECT 2 FROM, AND 7 =
+                def fix_unquoted_col(m):
+                    keyword = m.group(1)
+                    num = m.group(2)
+                    if num in col_by_index:
+                        return f'{keyword} "{col_by_index[num]}"'
+                    elif f"col_{num}" in actual_columns_lower:
+                        return f'{keyword} "col_{num}"'
+                    else:
+                        return f'{keyword} "col_{num}"'
+                
+                sql = re.sub(
+                    r'\b(SELECT|WHERE|AND|OR|,)\s+(\d+)(?=\s+(?:LIKE|FROM|AS|=|<|>|IS|,|\)|$))',
+                    fix_unquoted_col,
+                    sql,
+                    flags=re.IGNORECASE
+                )
+                
+                # FIX 4: Fix common hallucinated column names like "label", "metric", "column"
+                hallucinated_cols = ['label', 'metric', 'column', 'row', 'value', 'item', 'name']
+                for hc in hallucinated_cols:
+                    if f'"{hc}"' in sql.lower() and hc not in actual_columns_lower:
+                        # Find the most likely actual label column (usually col_0 or first string column)
+                        label_col = actual_columns[0] if actual_columns else 'col_0'
+                        sql = re.sub(rf'"{hc}"', f'"{label_col}"', sql, flags=re.IGNORECASE)
+                
+                # FIX 5: Ensure column names that exist are properly quoted if they contain special chars
+                for col in actual_columns:
+                    # If column appears unquoted and has special chars, quote it
+                    if any(c in col for c in [' ', '-', '.']):
+                        unquoted_pattern = re.escape(col)
+                        sql = re.sub(rf'\b{unquoted_pattern}\b(?!")', f'"{col}"', sql)
+                
+                # FIX 6: Fix {col N} patterns (curly brace syntax LLM sometimes generates)
+                sql = re.sub(r'\{col\s*(\d+)\}', lambda m: f'"col_{m.group(1)}"', sql)
                 
                 # Validate SQL
                 is_valid, error = self._sql_engine.validate_sql(sql)
