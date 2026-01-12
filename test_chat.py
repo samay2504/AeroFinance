@@ -36,6 +36,7 @@ try:
     from app.core.llm_wrapper import LLMWrapper, get_llm_wrapper
     from app.agents.router import RouterAgent, get_router_agent, TRACK_DATA, TRACK_DOC, TRACK_WEB
     from app.rag.ingest import DocumentIngestor, get_document_ingestor
+    from app.core.id_generator import normalize_client_id, generate_session_id
 except ImportError as e:
     print(f"Import error: {e}")
     print("Make sure you're running from the Re directory")
@@ -240,15 +241,19 @@ router: Optional[RouterAgent] = None
 doc_ingestor: Optional[DocumentIngestor] = None
 conversation_memory: Optional[ConversationMemory] = None
 current_session_id: str = "default"
+current_client_id: str = "test_client"
 
 
 def initialize_components():
     """Initialize all required components."""
-    global data_analyst, router, doc_ingestor, conversation_memory
+    global data_analyst, router, doc_ingestor, conversation_memory, current_session_id, current_client_id
     
     print("\n⏳ Initializing AI components...")
     
     try:
+        # Generate session and normalize client
+        current_session_id = generate_session_id()
+        current_client_id = normalize_client_id("Test Client")
         # Initialize LLM
         llm = get_llm_wrapper()
         print(f"  ✅ LLM initialized ({llm.provider_name})")
@@ -324,7 +329,8 @@ def load_file(file_path: str) -> bool:
                 df_id = f"{safe_name}:{safe_sheet}"
                 
                 # Register with data analyst
-                data_analyst.register_dataframe(df_id, df)
+                # Register with data analyst
+                data_analyst.register_dataframe(df_id, df, client_id=current_client_id)
                 loaded_files[df_id] = {
                     'path': file_key,
                     'sheet': sheet_name,
@@ -336,7 +342,7 @@ def load_file(file_path: str) -> bool:
         elif path.suffix.lower() == '.csv':
             df = pd.read_csv(path)
             df_id = path.stem.replace(' ', '_').replace('-', '_').lower()
-            data_analyst.register_dataframe(df_id, df)
+            data_analyst.register_dataframe(df_id, df, client_id=current_client_id)
             loaded_files[df_id] = {
                 'path': file_key,
                 'rows': len(df),
@@ -390,7 +396,7 @@ def load_json_text(json_text: str, source_name: str = "json_data") -> bool:
         
         # Define callback to register DataFrames with data analyst
         def register_df(dataset_id, df, metadata):
-            data_analyst.register_dataframe(dataset_id, df)
+            data_analyst.register_dataframe(dataset_id, df, client_id=current_client_id)
             loaded_files[dataset_id] = {
                 'rows': len(df),
                 'cols': len(df.columns),
@@ -403,7 +409,7 @@ def load_json_text(json_text: str, source_name: str = "json_data") -> bool:
             result = json_ingestor.ingest_to_rag(
                 data=data,
                 source_name=source_name,
-                client_id="json_data",
+                client_id=current_client_id,
                 rag_pipeline=rag_pipeline
             )
             
@@ -411,7 +417,7 @@ def load_json_text(json_text: str, source_name: str = "json_data") -> bool:
             regular_result = json_ingestor.ingest_json(
                 data=data,
                 source_name=source_name,
-                client_id="json_data",
+                client_id=current_client_id,
                 register_callback=register_df
             )
             
@@ -422,7 +428,7 @@ def load_json_text(json_text: str, source_name: str = "json_data") -> bool:
             result = json_ingestor.ingest_json(
                 data=data,
                 source_name=source_name,
-                client_id="json_data",
+                client_id=current_client_id,
                 register_callback=register_df
             )
         
@@ -513,12 +519,11 @@ def ingest_document(file_path: str) -> bool:
             return False
         
         # Ingest into RAG
-        client_id = "test_client"
         doc_id = path.stem.replace(' ', '_').replace('-', '_').lower()
         
         result = doc_ingestor.ingest_text(
             text=text,
-            client_id=client_id,
+            client_id=current_client_id,
             dataset_id=doc_id,
             metadata={"filename": path.name, "path": str(path)}
         )
@@ -725,7 +730,7 @@ def ask_question(query: str, force_track: str = None) -> str:
                         print("  🔍 Trying RAG semantic search...")
                         rag_results = rag._ingestor.search(
                             query=query,
-                            client_id="json_data",
+                            client_id=current_client_id,
                             top_k=3,
                             score_threshold=0.3
                         )

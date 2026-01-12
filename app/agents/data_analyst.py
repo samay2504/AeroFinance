@@ -186,6 +186,15 @@ class DataAnalystAgent:
         if df is None or df.empty:
             return False
 
+        # PRODUCTION FIX: Normalize client_id for consistent filtering
+        safe_client_id = client_id
+        if client_id:
+            try:
+                from app.core.id_generator import normalize_client_id
+                safe_client_id = normalize_client_id(client_id)
+            except ImportError:
+                safe_client_id = client_id.lower().replace(' ', '_').replace(':', '_')
+
         # PRODUCTION FIX: Sanitize column names (convert int/float to str)
         df = self._sanitize_dataframe_columns(df)
 
@@ -199,21 +208,30 @@ class DataAnalystAgent:
         # Register with data registry
         if self._data_registry:
             metadata = {"preprocessing": preprocessing_report} if preprocessing_report else {}
-            self._data_registry.register(dataset_id, df, metadata, client_id)
+            self._data_registry.register(dataset_id, df, metadata, safe_client_id)
 
         logger.info(f"Registered dataset: {dataset_id} ({len(df)} rows)")
         return True
 
     def list_datasets_for_client(self, client_id: str) -> List[Dict[str, Any]]:
         """List datasets for a client."""
+        # Normalize client_id for consistent filtering
+        safe_client_id = client_id
+        if client_id:
+            try:
+                from app.core.id_generator import normalize_client_id
+                safe_client_id = normalize_client_id(client_id)
+            except ImportError:
+                safe_client_id = client_id.lower().replace(' ', '_').replace(':', '_')
+        
         if self._data_registry:
-            return self._data_registry.list_for_client(client_id)
+            return self._data_registry.list_for_client(safe_client_id)
         
         # Fallback to local dataframes
         return [
             {"dataset_id": k, "rows": len(v), "columns": [str(c) for c in v.columns]}
             for k, v in self.dataframes.items()
-            if client_id in k
+            if safe_client_id in k
         ]
 
     def _sanitize_dataframe_columns(self, df: pd.DataFrame) -> pd.DataFrame:

@@ -81,11 +81,47 @@ class DataRegistry:
             logger.debug(f"Evicted LRU DataFrame: {oldest_key}")
 
     def _parquet_path(self, dataset_id: str) -> Path:
-        """Get parquet file path for dataset with Windows-safe filename."""
-        # Sanitize all Windows-invalid filename characters: \ / : * ? " < > |
+        """
+        Get parquet file path for dataset for tiered storage.
+        
+        Structure: cache_dir / client_id / doc_id / sheet_name.parquet
+        This mimics S3 object key structure for easy migration.
+        """
         import re
-        safe_id = re.sub(r'[\\/:*?"<>|]', '_', dataset_id)
-        return self.cache_dir / f"{safe_id}.parquet"
+        from app.core.id_generator import parse_dataset_id
+        
+        # Parse components
+        try:
+            parts = parse_dataset_id(dataset_id)
+            client_id = parts.get("client_id", "unknown_client")
+            doc_id = parts.get("doc_id", "unknown_doc")
+            sheet_name = parts.get("sheet_name", dataset_id)
+        except Exception:
+            # Fallback for legacy IDs
+            client_id = "misc"
+            doc_id = "misc"
+            sheet_name = dataset_id
+
+        # Sanitize components for filesystem/S3 safety
+        safe_client = re.sub(r'[\\/:*?"<>|]', '_', client_id)
+        safe_doc = re.sub(r'[\\/:*?"<>|]', '_', doc_id)
+        safe_sheet = re.sub(r'[\\/:*?"<>|]', '_', sheet_name)
+        
+        # Create hierarchical directory structure
+        target_dir = self.cache_dir / safe_client / safe_doc
+        target_dir.mkdir(parents=True, exist_ok=True)
+        
+        return target_dir / f"{safe_sheet}.parquet"
+
+    def _normalize_client_id(self, client_id: Optional[str]) -> Optional[str]:
+        """Normalize client ID for consistent filtering."""
+        if not client_id:
+            return None
+        try:
+            from app.core.id_generator import normalize_client_id
+            return normalize_client_id(client_id)
+        except ImportError:
+            return client_id.lower().replace(' ', '_').replace(':', '_')
 
     def register(
         self,
@@ -110,11 +146,14 @@ class DataRegistry:
             logger.warning(f"Attempted to register empty DataFrame: {dataset_id}")
             return False
 
+        # Normalize client_id for consistent filtering
+        safe_client_id = self._normalize_client_id(client_id)
+
         # Build metadata first
         meta = metadata or {}
         meta.update({
             "dataset_id": dataset_id,
-            "client_id": client_id,
+            "client_id": safe_client_id,
             "rows": len(df),
             "columns": list(df.columns),
             "dtypes": {str(k): str(v) for k, v in df.dtypes.items()},
@@ -151,7 +190,7 @@ class DataRegistry:
         # Redis metadata (optional)
         if self._redis:
             try:
-                redis_key = f"dataset:{client_id}:{dataset_id}"
+                redis_key = f"dataset:{safe_client_id}:{dataset_id}"
                 self._redis.setex(redis_key, 86400, json.dumps(meta, default=str))
             except Exception as e:
                 logger.warning(f"Redis set failed: {e}")
@@ -170,10 +209,11 @@ class DataRegistry:
         Returns:
             DataFrame or None if not found/unauthorized
         """
-        # Check ownership
+        # Normalize client_id and check ownership
         if client_id:
+            safe_client_id = self._normalize_client_id(client_id)
             meta = self._metadata.get(dataset_id)
-            if meta and meta.get("client_id") != client_id:
+            if meta and meta.get("client_id") != safe_client_id:
                 logger.warning(f"Client {client_id} unauthorized for {dataset_id}")
                 return None
 
@@ -212,8 +252,10 @@ class DataRegistry:
             List of dataset metadata dicts
         """
         results = []
+        # Normalize client_id for matching
+        safe_client_id = self._normalize_client_id(client_id)
         for dataset_id, meta in self._metadata.items():
-            if meta.get("client_id") == client_id:
+            if meta.get("client_id") == safe_client_id:
                 results.append(meta)
         return results
 
@@ -224,8 +266,9 @@ class DataRegistry:
     def delete(self, dataset_id: str, client_id: Optional[str] = None) -> bool:
         """Delete a dataset with ownership check."""
         if client_id:
+            safe_client_id = self._normalize_client_id(client_id)
             meta = self._metadata.get(dataset_id)
-            if meta and meta.get("client_id") != client_id:
+            if meta and meta.get("client_id") != safe_client_id:
                 logger.warning(f"Unauthorized delete attempt: {dataset_id}")
                 return False
 

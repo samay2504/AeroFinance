@@ -584,8 +584,42 @@ CORS_ORIGINS=["http://localhost:3000","http://localhost:5173"]
 
 ---
 
+## Infrastructure & Deployment
+
+### File Storage Structure (S3 Compatible)
+
+The system uses a hierarchical directory structure for file storage, which maps 1:1 to S3 object keys for easy migration and partitioning.
+
+```
+data/dataframe_cache/
+├── {client_id}/               # Normalized Client ID (S3 Prefix)
+│   ├── {doc_id}/              # Unique Document ID
+│   │   ├── {sheet_name}.parquet  # Actual Data File
+│   │   └── metadata.json         # (Optional) Sidecar metadata
+```
+
+**S3 Migration Strategy:**
+1. Mount S3 bucket using `s3fs` or EFS to `data/dataframe_cache`
+2. Configure `FILE_STORE_PATH` to point to the mount
+3. System automatically partitions data by client for security and performance
+
+### Vector Database Architecture
+
+| Environment | Recommended Setup |
+|-------------|-------------------|
+| **Dev/Test** | ChromaDB (Local persistent) |
+| **Production** | Qdrant Cloud (Managed Cluster) |
+
+**Scaling Qdrant:**
+- Enable `ENFORCE_TENANT_FILTERING=true`
+- Use `client_id` as the payload filter key (automatically handled by ID generator)
+- Shard collection by `client_id` for massive scale
+
+---
+
 ## Version History
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 1.1.0 | 2026-01-12 | Added S3-compatible hierarchical storage & hierarchical ID system |
 | 1.0.0 | 2026-01-12 | Initial release with unique ID system |
