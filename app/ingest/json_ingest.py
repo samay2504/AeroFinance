@@ -296,6 +296,149 @@ class JSONIngestor:
     def get_last_ingest_info(self) -> Dict[str, Any]:
         """Get info from last ingestion."""
         return self._last_ingest_info
+    
+    def generate_text_representation(self, df: pd.DataFrame, table_name: str = "") -> str:
+        """
+        Generate a rich text representation of a DataFrame for RAG embedding.
+        Creates natural language descriptions of the data.
+        """
+        lines = []
+        
+        # Table header
+        if table_name:
+            lines.append(f"Table: {table_name}")
+        
+        # Column summary
+        columns = list(df.columns)
+        lines.append(f"Columns: {', '.join(str(c) for c in columns)}")
+        lines.append(f"Rows: {len(df)}")
+        
+        # Generate natural language for each row
+        for idx, row in df.iterrows():
+            row_parts = []
+            for col in columns:
+                val = row[col]
+                if pd.notna(val):
+                    row_parts.append(f"{col}: {val}")
+            if row_parts:
+                lines.append(f"Row {idx + 1}: {'; '.join(row_parts)}")
+        
+        # Generate summary statistics for numeric columns
+        numeric_cols = df.select_dtypes(include=['number']).columns
+        if len(numeric_cols) > 0:
+            lines.append("\nSummary Statistics:")
+            for col in numeric_cols:
+                total = df[col].sum()
+                mean = df[col].mean()
+                lines.append(f"  {col}: Total={total:,.2f}, Average={mean:,.2f}")
+        
+        return "\n".join(lines)
+    
+    def ingest_to_rag(
+        self,
+        data: Any,
+        source_name: str,
+        client_id: str,
+        rag_pipeline = None
+    ) -> Dict[str, Any]:
+        """
+        Ingest JSON data into both DataFrames AND RAG vector storage.
+        
+        Args:
+            data: Parsed JSON data
+            source_name: Name for the source
+            client_id: Client identifier
+            rag_pipeline: RAG pipeline instance for vector storage
+        
+        Returns:
+            Dict with ingestion results including RAG status
+        """
+        results = {
+            "success": True,
+            "datasets": [],
+            "rag_chunks": 0,
+            "error": None
+        }
+        
+        try:
+            structure = self._detect_structure(data)
+            safe_name = source_name.lower().replace(' ', '_').replace('-', '_')
+            
+            dataframes = []  # Collect (name, df) tuples
+            
+            if structure == "records":
+                df = pd.DataFrame(data)
+                df = self._normalize_column_names(df)
+                df = self._coerce_types(df)
+                dataframes.append((safe_name, df))
+                
+            elif structure == "columnar":
+                df = pd.DataFrame(data)
+                df = self._normalize_column_names(df)
+                df = self._coerce_types(df)
+                dataframes.append((safe_name, df))
+                
+            elif structure == "nested_tables":
+                for key, value in data.items():
+                    if isinstance(value, list) and len(value) > 0:
+                        if isinstance(value[0], dict):
+                            df = pd.DataFrame(value)
+                        else:
+                            df = pd.DataFrame({key: value})
+                        df = self._normalize_column_names(df)
+                        df = self._coerce_types(df)
+                        safe_key = key.lower().replace(' ', '_').replace('-', '_')
+                        dataframes.append((f"{safe_name}:{safe_key}", df))
+                        
+            elif structure == "single_record":
+                df = pd.DataFrame([data])
+                df = self._normalize_column_names(df)
+                df = self._coerce_types(df)
+                dataframes.append((safe_name, df))
+            
+            # Process each DataFrame
+            for table_name, df in dataframes:
+                dataset_id = f"{client_id}:{table_name}"
+                
+                results["datasets"].append({
+                    "dataset_id": dataset_id,
+                    "rows": len(df),
+                    "columns": len(df.columns)
+                })
+                
+                # Ingest into RAG if available
+                if rag_pipeline and rag_pipeline.is_available:
+                    text_repr = self.generate_text_representation(df, table_name)
+                    
+                    # Create metadata for RAG (use primitive types only)
+                    metadata = {
+                        "source_type": "json",
+                        "table_name": table_name,
+                        "structure": structure,
+                        "rows": len(df),
+                        "columns": ", ".join(str(c) for c in df.columns)  # String, not list
+                    }
+                    
+                    try:
+                        rag_result = rag_pipeline.ingest_document(
+                            text=text_repr,
+                            client_id=client_id,
+                            doc_id=dataset_id,
+                            metadata=metadata
+                        )
+                        if rag_result.get("success"):
+                            results["rag_chunks"] += rag_result.get("chunks_created", 1)
+                    except Exception as e:
+                        logger.warning(f"RAG ingestion failed for {dataset_id}: {e}")
+            
+            self._last_ingest_info = results
+            
+        except Exception as e:
+            logger.error(f"JSON RAG ingestion failed: {e}")
+            results["success"] = False
+            results["error"] = str(e)
+        
+        return results
 
 
 __all__ = ["JSONIngestor"]

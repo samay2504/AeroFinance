@@ -239,16 +239,16 @@ class DataAnalystAgent:
                         date_val = datetime(1899, 12, 30) + timedelta(days=col)
                         col_str = date_val.strftime("%Y-%m-%d")
                     except:
-                        col_str = f"Col_{i}"
+                        col_str = f"col_{i}"
                 else:
-                    col_str = f"Col_{i}" # Always use Col_i for pure numbers to match SQL Engine
+                    col_str = f"col_{i}" # Always use Col_i for pure numbers to match SQL Engine
             elif pd.isna(col) or str(col).strip() == '' or str(col).startswith('Unnamed'):
-                col_str = f"Col_{i}"
+                col_str = f"col_{i}"
             else:
                 col_str = str(col)
                 # Ensure it doesn't start with a number for SQL compatibility
                 if col_str and col_str[0].isdigit():
-                     col_str = f"Col_{col_str}"
+                     col_str = f"col_{col_str}"
             
             # Handle duplicates
             base_name = col_str

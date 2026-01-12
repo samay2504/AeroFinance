@@ -20,8 +20,11 @@ except ImportError:
 from pathlib import Path
 import json
 import time
+import logging
 import pandas as pd
 from typing import Optional, Dict, Any
+
+logger = logging.getLogger(__name__)
 
 # Add project root to path
 PROJECT_ROOT = Path(__file__).parent
@@ -362,57 +365,77 @@ def load_file(file_path: str) -> bool:
 
 
 def load_json_text(json_text: str, source_name: str = "json_data") -> bool:
-    """Load JSON text (pasted or from file) as DataFrame."""
-    global loaded_files, data_analyst
+    """Load JSON text (pasted or from file) as DataFrame with RAG support."""
+    global loaded_files, data_analyst, doc_ingestor
     
     try:
-        import json as json_lib
-        data = json_lib.loads(json_text)
+        from app.ingest.json_ingest import JSONIngestor
+        from app.rag.ingest import get_rag_pipeline
         
-        # Handle different JSON structures
-        if isinstance(data, list):
-            # List of records
-            df = pd.DataFrame(data)
-        elif isinstance(data, dict):
-            # Could be a single record or nested structure
-            if all(isinstance(v, (list, dict)) for v in data.values()):
-                # Nested - try to flatten or use first level
-                if all(isinstance(v, list) for v in data.values()):
-                    df = pd.DataFrame(data)
-                else:
-                    # Multiple tables in JSON
-                    count = 0
-                    for key, value in data.items():
-                        if isinstance(value, list):
-                            sub_df = pd.DataFrame(value)
-                            df_id = f"{source_name}:{key.lower().replace(' ', '_')}"
-                            data_analyst.register_dataframe(df_id, sub_df)
-                            loaded_files[df_id] = {'rows': len(sub_df), 'cols': len(sub_df.columns)}
-                            print(f"  ✅ Loaded JSON table '{key}' as '{df_id}' ({len(sub_df)} rows)")
-                            count += 1
-                    if count > 0:
-                        if router:
-                            router.set_data_context(True)
-                        return True
-                    df = pd.DataFrame([data])
-            else:
-                # Single record
-                df = pd.DataFrame([data])
-        else:
-            print(f"❌ Unsupported JSON structure")
+        # Initialize JSON ingestor
+        json_ingestor = JSONIngestor()
+        
+        # Parse JSON first
+        data, error = json_ingestor.parse_json_text(json_text)
+        if error:
+            print(f"❌ Error parsing JSON: {error}")
             return False
         
-        df_id = source_name.lower().replace(' ', '_')
-        data_analyst.register_dataframe(df_id, df)
-        loaded_files[df_id] = {'rows': len(df), 'cols': len(df.columns)}
-        print(f"  ✅ Loaded JSON as '{df_id}' ({len(df)} rows, {len(df.columns)} columns)")
+        # Get RAG pipeline (may be None if unavailable)
+        rag_pipeline = None
+        try:
+            rag_pipeline = get_rag_pipeline()
+        except:
+            pass
         
-        if router:
-            router.set_data_context(True)
-        return True
+        # Define callback to register DataFrames with data analyst
+        def register_df(dataset_id, df, metadata):
+            data_analyst.register_dataframe(dataset_id, df)
+            loaded_files[dataset_id] = {
+                'rows': len(df),
+                'cols': len(df.columns),
+                'source': 'json'
+            }
+            print(f"  ✅ Loaded JSON table '{metadata.get('table', dataset_id.split(':')[-1])}' as '{dataset_id}' ({len(df)} rows)")
+        
+        # Use ingest_to_rag if RAG available, otherwise regular ingest
+        if rag_pipeline and rag_pipeline.is_available:
+            result = json_ingestor.ingest_to_rag(
+                data=data,
+                source_name=source_name,
+                client_id="json_data",
+                rag_pipeline=rag_pipeline
+            )
+            
+            # Also register DataFrames for SQL queries
+            regular_result = json_ingestor.ingest_json(
+                data=data,
+                source_name=source_name,
+                client_id="json_data",
+                register_callback=register_df
+            )
+            
+            if result.get("rag_chunks", 0) > 0:
+                print(f"  🔍 Indexed {result['rag_chunks']} chunks in vector storage")
+        else:
+            # Regular ingestion without RAG
+            result = json_ingestor.ingest_json(
+                data=data,
+                source_name=source_name,
+                client_id="json_data",
+                register_callback=register_df
+            )
+        
+        if result.get("success") and result.get("datasets"):
+            if router:
+                router.set_data_context(True)
+            return True
+        else:
+            print(f"❌ JSON ingestion failed: {result.get('error', 'Unknown error')}")
+            return False
         
     except Exception as e:
-        print(f"❌ Error parsing JSON: {e}")
+        print(f"❌ Error loading JSON: {e}")
         return False
 
 
@@ -605,9 +628,42 @@ def ask_question(query: str, force_track: str = None) -> str:
             if not loaded_files:
                 return "⚠️ No data files loaded. Use 'load <filepath>' to load data first."
             
-            # Use smart dataset matching
+            # KEYWORD-BASED DATASET MATCHING (Priority)
+            # Check if query explicitly mentions a dataset name
+            query_lower = query.lower()
+            keyword_match = None
+            
+            keyword_map = {
+                'balance sheet': 'balance_sheet',
+                'balance': 'balance_sheet',
+                'assets': 'balance_sheet',
+                'liabilities': 'balance_sheet',
+                'equity': 'balance_sheet',
+                'income statement': 'income_statement',
+                'income': 'income_statement',
+                'revenue': 'income_statement',
+                'profit': 'income_statement',
+                'net income': 'income_statement',
+                'cogs': 'income_statement',
+                'company': 'company_meta',
+                'company name': 'company_meta',
+                'ticker': 'company_meta',
+                'employees': 'company_meta',
+            }
+            
+            for keyword, table_suffix in keyword_map.items():
+                if keyword in query_lower:
+                    # Find a loaded dataset that ends with this suffix
+                    for df_id in loaded_files.keys():
+                        if df_id.endswith(table_suffix):
+                            keyword_match = df_id
+                            break
+                    if keyword_match:
+                        break
+            
+            # Use keyword match if found, otherwise use smart dataset matching
             datasets = [{"dataset_id": df_id, **info} for df_id, info in loaded_files.items()]
-            matched_df_id = data_analyst.match_dataset_by_query(query, datasets)
+            matched_df_id = keyword_match or data_analyst.match_dataset_by_query(query, datasets)
             
             # If no smart match, try all datasets to find best result
             best_result = None
@@ -622,7 +678,7 @@ def ask_question(query: str, force_track: str = None) -> str:
             
             # If matched dataset failed or no match, try all datasets
             if not best_result or not best_result.success:
-                print(f"  � Trying all {len(loaded_files)} datasets...")
+                print(f"  🔄 Trying all {len(loaded_files)} datasets...")
                 for df_id in loaded_files.keys():
                     if df_id == matched_df_id:
                         continue  # Already tried
@@ -657,29 +713,95 @@ def ask_question(query: str, force_track: str = None) -> str:
                 )
                 return response
             else:
-                # Try LLM direct answer as final fallback
+                # ================================================================
+                # MULTI-STRATEGY FALLBACK: Try different approaches
+                # ================================================================
+                
+                # STRATEGY 1: RAG Semantic Search (for conceptual/descriptive queries)
+                try:
+                    from app.rag.ingest import get_rag_pipeline
+                    rag = get_rag_pipeline()
+                    if rag and rag.is_available:
+                        print("  🔍 Trying RAG semantic search...")
+                        rag_results = rag._ingestor.search(
+                            query=query,
+                            client_id="json_data",
+                            top_k=3,
+                            score_threshold=0.3
+                        )
+                        if rag_results and len(rag_results) > 0:
+                            # Use LLM to synthesize answer from RAG results
+                            from app.core.llm_wrapper import get_llm_wrapper
+                            llm = get_llm_wrapper()
+                            
+                            context = "\n\n".join([
+                                f"Source: {r.get('metadata', {}).get('table_name', 'data')}\n{r.get('content', '')[:800]}"
+                                for r in rag_results[:3]
+                            ])
+                            
+                            prompt = f"""Based on this data context, answer the user's question.
+
+DATA CONTEXT:
+{context}
+
+QUESTION: {query}
+
+Provide a clear, accurate answer. If the data contains numbers, include them. 
+If asked for totals/sums, calculate them from the provided data."""
+                            
+                            answer = llm.invoke(prompt)
+                            elapsed = time.time() - start_time
+                            return f"📊 {answer}\n\n  📁 Source: RAG semantic search\n  🔧 Method: rag_llm\n  ⏱️ Time: {elapsed:.2f}s"
+                except Exception as rag_error:
+                    logger.debug(f"RAG fallback failed: {rag_error}")
+                
+                # STRATEGY 2: Direct DataFrame Analysis with LLM
                 try:
                     from app.core.llm_wrapper import get_llm_wrapper
                     llm = get_llm_wrapper()
                     
-                    # Get data sample from first dataset
-                    first_df_id = list(loaded_files.keys())[0]
-                    df = data_analyst._get_dataframe(first_df_id)
-                    if df is not None:
-                        data_sample = df.head(20).to_string()
-                        prompt = f"""Analyze this data and answer the question.
+                    # Collect data from ALL relevant datasets
+                    all_data_context = []
+                    for df_id in list(loaded_files.keys())[:5]:  # Limit to 5
+                        df = data_analyst._get_dataframe(df_id)
+                        if df is not None:
+                            # Create rich context with stats
+                            table_name = df_id.split(':')[-1]
+                            context_parts = [f"\n--- TABLE: {table_name} ---"]
+                            context_parts.append(f"Columns: {list(df.columns)}")
+                            context_parts.append(f"Data:\n{df.to_string()}")
+                            
+                            # Add numeric summaries
+                            numeric_cols = df.select_dtypes(include=['number']).columns
+                            if len(numeric_cols) > 0:
+                                context_parts.append("\nNumeric Summaries:")
+                                for col in numeric_cols:
+                                    total = df[col].sum()
+                                    avg = df[col].mean()
+                                    context_parts.append(f"  {col}: Total={total:,.2f}, Avg={avg:,.2f}")
+                            
+                            all_data_context.append("\n".join(context_parts))
+                    
+                    if all_data_context:
+                        full_context = "\n".join(all_data_context)[:6000]
+                        prompt = f"""You are a data analyst. Analyze ALL the data below and answer the question accurately.
 
-DATA SAMPLE:
-{data_sample[:3000]}
+{full_context}
 
 QUESTION: {query}
 
-Provide a direct, helpful answer based on the data."""
+Instructions:
+- If asking for totals/sums, calculate from the data
+- If asking about specific metrics, find and report the exact values
+- If asking for a summary, describe key insights from the data
+- Be specific and include numbers where relevant
+- If the question asks about a specific table (balance sheet, income statement, etc.), focus on that data"""
                         
                         answer = llm.invoke(prompt)
-                        return f"📊 {answer}\n\n  📁 Source: {first_df_id}\n  🔧 Method: llm_direct\n  ⏱️ Time: {elapsed:.2f}s"
+                        elapsed = time.time() - start_time
+                        return f"📊 {answer}\n\n  📁 Source: Multi-table analysis\n  🔧 Method: llm_comprehensive\n  ⏱️ Time: {elapsed:.2f}s"
                 except Exception as llm_error:
-                    pass
+                    logger.debug(f"LLM fallback failed: {llm_error}")
                 
                 error_msg = best_result.error if best_result else "No results from any dataset"
                 return f"⚠️ Query failed: {error_msg}\n  📂 Tried {len(loaded_files)} datasets\n  ⏱️ Time: {elapsed:.2f}s"
@@ -882,6 +1004,29 @@ def chat():
             elif cmd_lower.startswith('load '):
                 file_path = user_input[5:].strip().strip('"').strip("'")
                 load_file(file_path)
+                continue
+
+            elif user_input.startswith(('{', '[')):
+                # Auto-detect pasted JSON data - handle multi-line input
+                print("  📋 Detected JSON data, collecting...")
+                json_buffer = user_input
+                
+                # Count braces to detect complete JSON
+                def is_json_complete(s):
+                    opens = s.count('{') + s.count('[')
+                    closes = s.count('}') + s.count(']')
+                    return opens > 0 and opens == closes
+                
+                # Keep reading until JSON is complete
+                while not is_json_complete(json_buffer):
+                    try:
+                        more = input("  ... ")
+                        json_buffer += more
+                    except EOFError:
+                        break
+                
+                print(f"  📋 Collected {len(json_buffer)} characters of JSON")
+                load_file(json_buffer)
                 continue
             
             elif cmd_lower.startswith('ingest '):

@@ -357,9 +357,26 @@ class DocumentIngestor:
                 "error": "No chunks generated"
             }
 
-        # Prepare metadata
-        base_metadata = metadata or {}
-        base_metadata["client_id"] = client_id
+        # PRODUCTION FIX: Normalize client_id for VectorDB compatibility
+        try:
+            from app.core.id_generator import normalize_client_id, sanitize_metadata_value
+            safe_client_id = normalize_client_id(client_id)
+        except ImportError:
+            # Fallback normalization
+            safe_client_id = client_id.lower().replace(' ', '_').replace(':', '_') if client_id else "default"
+
+        # Prepare metadata with sanitized values
+        base_metadata = {}
+        for k, v in (metadata or {}).items():
+            # Skip list/dict values - convert to strings for VectorDB
+            if isinstance(v, (list, tuple)):
+                base_metadata[k] = ", ".join(str(x) for x in v)
+            elif isinstance(v, dict):
+                base_metadata[k] = str(v)
+            else:
+                base_metadata[k] = v
+        
+        base_metadata["client_id"] = safe_client_id  # Use normalized ID
         base_metadata["dataset_id"] = dataset_id
 
         # Ingest chunks
@@ -422,7 +439,7 @@ class DocumentIngestor:
         
         Args:
             query: Search query
-            client_id: Filter by client ID
+            client_id: Filter by client ID (will be normalized)
             top_k: Number of results
             score_threshold: Minimum similarity score
             
@@ -431,6 +448,13 @@ class DocumentIngestor:
         """
         if self._active_store is None:
             return []
+
+        # PRODUCTION FIX: Normalize client_id to match ingestion normalization
+        try:
+            from app.core.id_generator import normalize_client_id
+            safe_client_id = normalize_client_id(client_id)
+        except ImportError:
+            safe_client_id = client_id.lower().replace(' ', '_').replace(':', '_') if client_id else "default"
 
         query_embedding = self._generate_embedding(query)
         
@@ -442,7 +466,7 @@ class DocumentIngestor:
                     limit=top_k,
                     query_filter={
                         "must": [
-                            {"key": "client_id", "match": {"value": client_id}}
+                            {"key": "client_id", "match": {"value": safe_client_id}}
                         ]
                     }
                 )
@@ -461,7 +485,7 @@ class DocumentIngestor:
                 results = self._chroma_collection.query(
                     query_embeddings=[query_embedding],
                     n_results=top_k,
-                    where={"client_id": client_id}
+                    where={"client_id": safe_client_id}  # Use normalized ID
                 )
                 
                 docs = results.get("documents", [[]])[0]
