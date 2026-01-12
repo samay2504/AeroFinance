@@ -141,8 +141,9 @@ class ZMQBridge:
 
 # Default handlers
 def _query_handler(payload: Dict) -> Dict:
-    """Handle query requests."""
+    """Handle query requests with unique ID tracking."""
     from app.agents.data_analyst import get_data_analyst_agent
+    from app.core.id_generator import normalize_client_id, generate_query_id
     
     agent = get_data_analyst_agent()
     query = payload.get("query", "")
@@ -152,13 +153,19 @@ def _query_handler(payload: Dict) -> Dict:
     if not query or not df_id:
         return {"error": "Missing query or dataset_id"}
     
-    result = agent.execute_sql_query(query, df_id, client_id=client_id)
+    # Normalize client_id and generate query_id
+    safe_client_id = normalize_client_id(client_id)
+    query_id = generate_query_id()
+    
+    result = agent.execute_sql_query(query, df_id, client_id=safe_client_id)
     
     return {
         "success": result.success,
         "result": result.result,
         "method": result.method,
-        "explanation": result.explanation
+        "explanation": result.explanation,
+        "query_id": query_id,
+        "client_id": safe_client_id
     }
 
 
