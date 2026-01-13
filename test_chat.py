@@ -34,7 +34,11 @@ sys.path.insert(0, str(PROJECT_ROOT))
 try:
     from app.agents.data_analyst import DataAnalystAgent
     from app.core.llm_wrapper import LLMWrapper, get_llm_wrapper
-    from app.agents.router import RouterAgent, get_router_agent, TRACK_DATA, TRACK_DOC, TRACK_WEB
+    from app.agents.router import (
+        RouterAgent, get_router_agent, 
+        TRACK_DATA, TRACK_DOC, TRACK_WEB,
+        TRACK_DOC_SUMMARY, TRACK_OUT_OF_DOMAIN
+    )
     from app.rag.ingest import DocumentIngestor, get_document_ingestor
     from app.core.id_generator import normalize_client_id, generate_session_id
 except ImportError as e:
@@ -617,7 +621,9 @@ def ask_question(query: str, force_track: str = None) -> str:
         track_display = {
             TRACK_DATA: "📊 Data Analysis",
             TRACK_DOC: "📄 Document Search",
-            TRACK_WEB: "🌐 Web Search"
+            TRACK_WEB: "🌐 Web Search",
+            TRACK_DOC_SUMMARY: "📋 Dataset Summary",
+            TRACK_OUT_OF_DOMAIN: "🚫 Out of Domain"
         }.get(track, track)
         
         if not force_track:
@@ -627,6 +633,52 @@ def ask_question(query: str, force_track: str = None) -> str:
         context_str = ""
         if conversation_memory:
             context_str = conversation_memory.get_context_string(current_session_id, last_n=3)
+        
+        # ==================================================================
+        # HANDLE OUT-OF-DOMAIN QUERIES
+        # ==================================================================
+        if track == TRACK_OUT_OF_DOMAIN:
+            elapsed = time.time() - start_time
+            response = "🤔 I'm an AI Chartered Accountant assistant. I can help you with:\n"
+            response += "  • Analyzing financial data (load your Excel/CSV files)\n"
+            response += "  • Answering questions about revenue, expenses, profits, growth\n"
+            response += "  • Summarizing financial documents\n"
+            response += "  • Web searches for financial/regulatory information\n\n"
+            response += "Please ask me something related to your financial data or documents!"
+            response += f"\n\n  ⏱️ Time: {elapsed:.2f}s"
+            if conversation_memory:
+                conversation_memory.add_message(current_session_id, "assistant", response)
+            return response
+        
+        # ==================================================================
+        # HANDLE DATASET SUMMARY QUERIES
+        # ==================================================================
+        if track == TRACK_DOC_SUMMARY:
+            if not loaded_files:
+                return "⚠️ No data files loaded. Use 'load <filepath>' to load data first."
+            
+            elapsed_start = time.time()
+            
+            # Use the new summarize_dataset method for each loaded dataset
+            summaries = []
+            for df_id in list(loaded_files.keys())[:5]:  # Limit to 5 datasets
+                result = data_analyst.summarize_dataset(df_id, client_id=current_client_id)
+                if result.get("value"):
+                    summaries.append(f"**{df_id}:**\n{result['value']}")
+            
+            elapsed = time.time() - elapsed_start
+            
+            if summaries:
+                response = "📋 **Dataset Summary:**\n\n" + "\n\n---\n\n".join(summaries)
+                response += f"\n\n  📁 Datasets: {len(loaded_files)}"
+                response += f"\n  🔧 Method: summarize_dataset"
+                response += f"\n  ⏱️ Time: {elapsed:.2f}s"
+            else:
+                response = "📋 Could not generate summary. The datasets may be empty or malformed."
+            
+            if conversation_memory:
+                conversation_memory.add_message(current_session_id, "assistant", response)
+            return response
         
         if track == TRACK_DATA:
             # Data analysis track
