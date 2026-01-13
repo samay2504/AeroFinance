@@ -938,6 +938,172 @@ def get_output_schema(schema_name: str) -> Dict[str, Any]:
     return OUTPUT_SCHEMAS.get(schema_name, {})
 
 
+def get_dataset_summary_prompt(
+    file_name: str,
+    dataset_id: str,
+    sheet_names: List[str],
+    total_rows: int,
+    total_cols: int,
+    top_columns: List[str],
+    sample_rows: str,
+    detected_periods: str = "Not detected",
+    detected_currency: str = "Not detected",
+    detected_fact_types: str = "Not detected"
+) -> str:
+    """
+    Generate prompt for dataset summary queries.
+    
+    Args:
+        file_name: Original filename
+        dataset_id: Dataset identifier
+        sheet_names: List of sheet names
+        total_rows: Number of rows
+        total_cols: Number of columns
+        top_columns: First N column names
+        sample_rows: Sample data (3 rows max)
+        detected_periods: Detected time periods
+        detected_currency: Detected currency
+        detected_fact_types: Detected data types
+        
+    Returns:
+        Formatted prompt for dataset summary
+    """
+    template_str = _PROMPT_TEMPLATES.get("dataset_summary", """
+{guardrails}
+
+You are analyzing an uploaded data file for a client. Generate a professional summary.
+
+FILE INFORMATION:
+- File Name: {file_name}
+- Dataset ID: {dataset_id}
+- Sheet Names: {sheet_names}
+- Total Rows: {total_rows}
+- Total Columns: {total_cols}
+- Top Columns: {top_columns}
+
+SAMPLE DATA (first 3 rows):
+{sample_rows}
+
+INSTRUCTIONS:
+1. Write a 4-6 sentence overview describing what this dataset contains
+2. Identify the apparent purpose (MIS report, financial statement, ledger, etc.)
+3. List key columns/metrics with their apparent meaning
+4. Note any time periods or currencies detected
+5. Be factual - only describe what you observe in the data
+
+OUTPUT FORMAT:
+**Dataset Overview:**
+[4-6 sentences describing the data]
+
+**Key Fields Identified:**
+- [column_name]: [apparent meaning/mapping]
+
+I only use information from the uploaded data - I do not make assumptions about data that is not present.
+""")
+    
+    template = PromptTemplate(
+        input_variables=[
+            "guardrails", "file_name", "dataset_id", "sheet_names", 
+            "total_rows", "total_cols", "top_columns", "sample_rows",
+            "detected_periods", "detected_currency", "detected_fact_types"
+        ],
+        template=template_str
+    )
+    return template.format(
+        guardrails=CA_SYSTEM_GUARDRAILS,
+        file_name=file_name,
+        dataset_id=dataset_id,
+        sheet_names=", ".join(sheet_names) if isinstance(sheet_names, list) else str(sheet_names),
+        total_rows=total_rows,
+        total_cols=total_cols,
+        top_columns=", ".join(top_columns[:8]) if isinstance(top_columns, list) else str(top_columns),
+        sample_rows=sample_rows,
+        detected_periods=detected_periods,
+        detected_currency=detected_currency,
+        detected_fact_types=detected_fact_types
+    )
+
+
+def get_finalizer_prompt(
+    results: str,
+    query: str,
+    method: str = "unknown",
+    provenance: str = ""
+) -> str:
+    """
+    Generate prompt for finalizing results into professional response.
+    
+    Args:
+        results: Raw computation results (JSON or text)
+        query: Original user query
+        method: Computation method used (sql_duckdb, pandas, llm_direct, summary)
+        provenance: Source/provenance information (dataset_id, sheet, row/col)
+        
+    Returns:
+        Formatted prompt for finalizer
+    """
+    template_str = _PROMPT_TEMPLATES.get("finalizer", """
+{guardrails}
+
+You are a Senior Chartered Accountant presenting analysis results to management.
+
+RAW COMPUTATION RESULTS:
+{results}
+
+ORIGINAL QUERY: {query}
+
+COMPUTATION METHOD: {method}
+PROVENANCE: {provenance}
+
+INSTRUCTIONS:
+1. Present the answer in complete sentences with professional CA tone
+2. Include the numeric result with appropriate precision (2 decimal places)
+3. Express amounts in INR with appropriate scale (Lakhs/Crores/Millions)
+4. Reference the data source (dataset/sheet/row-column where applicable)
+5. If computing growth/variance, show both values and the calculation
+6. Add a brief methodology note
+7. Include a CA disclaimer if the data is from uploaded documents
+
+OUTPUT FORMAT:
+[Main finding in 1-2 complete sentences with the numeric result]
+
+Methodology: [Brief description of how this was computed]
+
+Sources:
+- [Dataset ID] | [Sheet/Table] | [Row/Column reference if applicable]
+
+---
+*CA Disclaimer: This calculation uses data from uploaded documents only. Verify with source documents before use as audit evidence.*
+""")
+    
+    template = PromptTemplate(
+        input_variables=["guardrails", "results", "query", "method", "provenance"],
+        template=template_str
+    )
+    return template.format(
+        guardrails=CA_SYSTEM_GUARDRAILS,
+        results=results,
+        query=query,
+        method=method.upper(),
+        provenance=provenance or "Direct computation from uploaded data"
+    )
+
+
+def get_out_of_domain_response() -> str:
+    """Get the out-of-domain response template."""
+    return _PROMPT_TEMPLATES.get("out_of_domain", """
+I am an AI Chartered Accountant assistant focused on document-based accounting and finance queries.
+
+I can help you with:
+- Analyzing uploaded financial data (Excel, CSV files)
+- Financial calculations (variances, growth rates, aggregations)
+- Looking up information in uploaded documents
+- Tax rate and compliance queries
+
+For general conversation or non-finance topics, please use a general-purpose assistant.
+""")
+
+
 # ============================================================================
 # CONVENIENCE FUNCTIONS FOR TOOL INTEGRATION
 # ============================================================================
@@ -993,7 +1159,13 @@ __all__ = [
     "get_fraud_analysis_prompt",
     "get_reconciliation_prompt",
     "get_output_schema",
+    "get_dataset_summary_prompt",
+    "get_finalizer_prompt",
+    "get_out_of_domain_response",
     "format_tool_response_prompt",
     "TOOL_DESCRIPTIONS",
     "OUTPUT_SCHEMAS",
+    "TokenManager",
+    "get_token_manager",
 ]
+

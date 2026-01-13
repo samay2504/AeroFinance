@@ -124,15 +124,27 @@ class SandboxExecutor:
         self.validator = CodeValidator()
 
     def _clean_code(self, code: str) -> str:
-        """Clean code of markdown artifacts and formatting issues."""
+        """
+        Clean code of markdown artifacts and formatting issues.
+        
+        Enhancements:
+        - Strip mixed tabs/spaces before executing
+        - Detect indentation errors early
+        - Fix common LLM code formatting issues
+        """
         # Remove markdown code blocks
         if "```python" in code:
             code = code.split("```python", 1)[-1]
+        elif "```Python" in code:
+            code = code.split("```Python", 1)[-1]
         if "```" in code:
             code = code.split("```")[0]
 
         # Remove leading/trailing whitespace
         code = code.strip()
+        
+        # Fix mixed tabs/spaces - convert all tabs to 4 spaces
+        code = code.replace("\t", "    ")
 
         # Fix common indentation issues
         lines = code.split("\n")
@@ -147,8 +159,67 @@ class SandboxExecutor:
             if min_indent > 0 and min_indent != float("inf"):
                 lines = [line[min_indent:] if len(line) > min_indent else line for line in lines]
                 code = "\n".join(lines)
+        
+        # Early indentation error detection - try to parse AST
+        try:
+            import ast
+            ast.parse(code)
+        except IndentationError as e:
+            # Try to auto-fix common indentation issues
+            logger.warning(f"Indentation error detected: {e}. Attempting auto-fix...")
+            lines = code.split("\n")
+            fixed_lines = []
+            current_indent = 0
+            
+            for line in lines:
+                stripped = line.strip()
+                if not stripped:
+                    fixed_lines.append("")
+                    continue
+                
+                # Dedent for closing structures
+                if stripped.startswith(("return", "break", "continue", "pass", "raise")):
+                    fixed_lines.append("    " * current_indent + stripped)
+                elif stripped.startswith(("except", "elif", "else", "finally")):
+                    if current_indent > 0:
+                        current_indent -= 1
+                    fixed_lines.append("    " * current_indent + stripped)
+                    current_indent += 1
+                else:
+                    fixed_lines.append("    " * current_indent + stripped)
+                
+                # Increase indent for blocks
+                if stripped.endswith(":"):
+                    current_indent += 1
+            
+            code = "\n".join(fixed_lines)
+            logger.debug("Auto-fix applied to indentation")
+        except SyntaxError:
+            # Let the validator handle syntax errors
+            pass
+        
+        # Remove any trailing empty lines but keep one newline at end
+        code = code.rstrip() + "\n" if code.strip() else code
 
         return code
+    
+    def _validate_returns_dict(self, code: str) -> bool:
+        """
+        Check if code appears to return a dictionary (or dict-like result).
+        Used to detect when LLM returns prose instead of proper code.
+        """
+        import ast
+        try:
+            tree = ast.parse(code)
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Return):
+                    # Check if return value is a dict, call, or name
+                    if node.value and isinstance(node.value, (ast.Dict, ast.Call, ast.Name)):
+                        return True
+            return False
+        except Exception:
+            return False
+
 
     def _create_sandbox_globals(self, df: pd.DataFrame) -> Dict[str, Any]:
         """Create restricted globals for sandbox execution."""

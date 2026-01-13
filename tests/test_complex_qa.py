@@ -25,6 +25,11 @@ if sys.platform == 'win32':
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+# Apply DLL fix for Windows (must be before torch/spacy imports)
+from app.core.dll_fix import apply_dll_fix
+apply_dll_fix()
+
+
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("TEST_COMPLEX_QA")
@@ -237,6 +242,171 @@ def test_router_classification():
         assert result["track"] == TRACK_DOC, f"'{query}' should route to TRACK_DOC"
     
     logger.info("✅ Router: Document queries correctly classified")
+
+
+def test_router_summary_detection():
+    """Test router detects summary/overview intent and routes to TRACK_DOC_SUMMARY."""
+    from app.agents.router import RouterAgent, TRACK_DOC_SUMMARY
+    
+    router = RouterAgent()
+    router.set_data_context(has_data=True, datasets_info="MIS report loaded")
+    
+    summary_queries = [
+        "What is this data about?",
+        "Give me an overview of the file",
+        "Summarize this spreadsheet",
+        "What information is in this file?",
+        "Tell me about this dataset",
+    ]
+    
+    for query in summary_queries:
+        result = router.route(query, has_loaded_data=True)
+        assert result["track"] == TRACK_DOC_SUMMARY, f"'{query}' should route to TRACK_DOC_SUMMARY, got {result['track']}"
+        assert result["is_summary"] == True, f"'{query}' should be marked as summary query"
+    
+    logger.info("✅ Router: Summary queries correctly detected")
+
+
+def test_router_analytical_detection():
+    """Test router marks analytical queries with is_analytical flag."""
+    from app.agents.router import RouterAgent, TRACK_DATA
+    
+    router = RouterAgent()
+    
+    analytical_queries = [
+        "Calculate the total revenue",
+        "What is the growth rate?",
+        "Show the profit margin",
+        "Sum of all expenses",
+        "Average cost per unit",
+    ]
+    
+    for query in analytical_queries:
+        result = router.route(query, has_loaded_data=True)
+        assert result["is_analytical"] == True, f"'{query}' should be marked as analytical"
+    
+    logger.info("✅ Router: Analytical queries correctly detected")
+
+
+def test_router_out_of_domain():
+    """Test router identifies out-of-domain queries."""
+    from app.agents.router import RouterAgent, TRACK_OUT_OF_DOMAIN
+    
+    router = RouterAgent()
+    
+    ood_queries = [
+        "Tell me a joke",
+        "Write a poem about rain",
+        "What is the weather today?",
+        "Hello, how are you?",
+    ]
+    
+    for query in ood_queries:
+        result = router.route(query)
+        assert result["track"] == TRACK_OUT_OF_DOMAIN, f"'{query}' should route to TRACK_OUT_OF_DOMAIN, got {result['track']}"
+        assert result.get("status") == "failed", f"Out-of-domain should have status='failed'"
+    
+    logger.info("✅ Router: Out-of-domain queries correctly handled")
+
+
+def test_summarize_dataset(agent):
+    """Test the summarize_dataset method returns proper format."""
+    datasets = agent.list_datasets_for_client(CLIENT_ID)
+    
+    if not datasets:
+        pytest.skip("No datasets available for summarization test")
+        return
+    
+    dataset_id = datasets[0].get("dataset_id")
+    result = agent.summarize_dataset(dataset_id, client_id=CLIENT_ID)
+    
+    # Verify response structure
+    assert "value" in result, "Summary result must have 'value' key"
+    assert "method" in result, "Summary result must have 'method' key"
+    assert "provenance" in result, "Summary result must have 'provenance' key"
+    
+    # Verify value is non-empty
+    assert result["value"] is not None, "Summary value should not be None"
+    assert len(str(result["value"])) > 50, "Summary should be at least 50 characters"
+    
+    # Verify provenance tracks dataset
+    assert len(result["provenance"]) > 0, "Provenance should have at least one entry"
+    assert result["provenance"][0].get("dataset_id") == dataset_id, "Provenance should include dataset_id"
+    
+    logger.info(f"✅ Summarize dataset: Method={result['method']}, Length={len(str(result['value']))}")
+
+
+def test_structured_logging():
+    """Test that interaction logging produces valid JSONL."""
+    import json
+    from pathlib import Path
+    from app.core.llm_wrapper import log_interaction
+    
+    @log_interaction
+    def dummy_query(query: str, context: dict) -> dict:
+        return {
+            "result": 42.5,
+            "method": "test_method",
+            "provenance": [{"dataset_id": "test_ds"}]
+        }
+    
+    # Execute function
+    result = dummy_query("test query", {
+        "client_id": "test_client",
+        "user_id": "test_user",
+        "dataset_id": "test_ds"
+    })
+    
+    assert result["result"] == 42.5, "Function should return expected result"
+    
+    # Check log file exists and has valid JSONL
+    log_path = Path("data/logs/interaction_logs.jsonl")
+    if log_path.exists():
+        with open(log_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+        
+        if lines:
+            last_line = lines[-1].strip()
+            try:
+                log_entry = json.loads(last_line)
+                assert "log_id" in log_entry, "Log entry must have log_id"
+                assert "timestamp_utc" in log_entry, "Log entry must have timestamp"
+                assert "result_type" in log_entry, "Log entry must have result_type"
+                logger.info(f"✅ Structured logging: Log entry has {len(log_entry)} fields")
+            except json.JSONDecodeError:
+                pytest.fail(f"Log entry is not valid JSON: {last_line[:100]}")
+    else:
+        logger.warning("⚠️ Structured logging: Log file not created (may be first run)")
+
+
+def test_pii_masking():
+    """Test that PII is properly masked in logs."""
+    from app.core.llm_wrapper import _mask_pii
+    
+    test_data = {
+        "name": "John Doe",
+        "email": "john@example.com",
+        "revenue": 1000000,
+        "phone": "+1234567890",
+        "metrics": {
+            "profit": 50000,
+            "address": "123 Main St"
+        }
+    }
+    
+    masked = _mask_pii(test_data)
+    
+    assert masked["name"] == "<MASKED>", "Name should be masked"
+    assert masked["email"] == "<MASKED>", "Email should be masked"
+    assert masked["revenue"] == 1000000, "Revenue should NOT be masked"
+    assert masked["phone"] == "<MASKED>", "Phone should be masked"
+    assert masked["metrics"]["profit"] == 50000, "Nested profit should NOT be masked"
+    assert masked["metrics"]["address"] == "<MASKED>", "Nested address should be masked"
+    
+    logger.info("✅ PII masking: Sensitive fields correctly masked")
+
+
+
 
 
 def test_sql_engine_basic():

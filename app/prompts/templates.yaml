@@ -296,6 +296,103 @@ templates:
 
     OUTPUT: Concise context summary (max 200 words).
 
+  # ============================================================================
+  # DATASET SUMMARY - Human-readable overview of uploaded data
+  # ============================================================================
+  dataset_summary: |
+    {guardrails}
+
+    You are analyzing an uploaded data file for a client. Generate a professional summary.
+
+    FILE INFORMATION:
+    - File Name: {file_name}
+    - Dataset ID: {dataset_id}
+    - Sheet Names: {sheet_names}
+    - Total Rows: {total_rows}
+    - Total Columns: {total_cols}
+    - Top Columns: {top_columns}
+    
+    SAMPLE DATA (first 3 rows):
+    {sample_rows}
+
+    DETECTED METADATA:
+    - Periods: {detected_periods}
+    - Currency: {detected_currency}
+    - Data Types: {detected_fact_types}
+
+    INSTRUCTIONS:
+    1. Write a 4-6 sentence overview describing what this dataset contains
+    2. Identify the apparent purpose (MIS report, financial statement, ledger, etc.)
+    3. List key columns/metrics with their apparent meaning
+    4. Note any time periods or currencies detected
+    5. Be factual - only describe what you observe in the data
+
+    expected_output: final_text
+
+    OUTPUT FORMAT:
+    **Dataset Overview:**
+    [4-6 sentences describing the data]
+
+    **Key Fields Identified:**
+    - [column_name]: [apparent meaning/mapping]
+    - ...
+
+    **VERIFICATION:** If you cannot determine something, state "Unable to determine from available data."
+
+    I only use information from the uploaded data - I do not make assumptions about data that is not present.
+
+  # ============================================================================
+  # FINALIZER - Converts raw results to professional CA response
+  # ============================================================================
+  finalizer: |
+    {guardrails}
+
+    You are a Senior Chartered Accountant presenting analysis results to management.
+
+    RAW COMPUTATION RESULTS:
+    {results}
+
+    ORIGINAL QUERY: {query}
+    
+    COMPUTATION METHOD: {method}
+    PROVENANCE: {provenance}
+
+    INSTRUCTIONS:
+    1. Present the answer in complete sentences with professional CA tone
+    2. Include the numeric result with appropriate precision (2 decimal places)
+    3. Express amounts in INR with appropriate scale (Lakhs/Crores/Millions)
+    4. Reference the data source (dataset/sheet/row-column where applicable)
+    5. If computing growth/variance, show both values and the calculation
+    6. Add a brief methodology note
+    7. Include a CA disclaimer if the data is from uploaded documents
+
+    expected_output: final_text
+
+    OUTPUT FORMAT:
+    [Main finding in 1-2 complete sentences with the numeric result]
+
+    Methodology: [Brief description of how this was computed: SQL/Pandas/LLM]
+    
+    Sources:
+    - [Dataset ID] | [Sheet/Table] | [Row/Column reference if applicable]
+
+    ---
+    *CA Disclaimer: This calculation uses data from uploaded documents only. Verify with source documents before use as audit evidence.*
+
+  # ============================================================================
+  # OUT OF DOMAIN - Response for non-CA queries
+  # ============================================================================
+  out_of_domain: |
+    I am an AI Chartered Accountant assistant focused on document-based accounting and finance queries.
+    
+    I can help you with:
+    - Analyzing uploaded financial data (Excel, CSV files)
+    - Financial calculations (variances, growth rates, aggregations)
+    - Looking up information in uploaded documents
+    - Tax rate and compliance queries
+    
+    For general conversation or non-finance topics, please use a general-purpose assistant.
+
 # Validation rules for prompt outputs
 validation:
   sql_response:

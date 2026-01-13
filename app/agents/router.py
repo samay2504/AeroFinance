@@ -20,6 +20,16 @@ logger = logging.getLogger(__name__)
 TRACK_DATA = "TRACK_DATA"
 TRACK_DOC = "TRACK_DOC"
 TRACK_WEB = "TRACK_WEB"
+TRACK_DOC_SUMMARY = "TRACK_DOC_SUMMARY"  # Dataset summary/overview queries
+TRACK_OUT_OF_DOMAIN = "TRACK_OUT_OF_DOMAIN"  # Non-CA queries
+
+# Keywords indicating numeric/analytical intent - must route to deterministic computation
+ANALYTICAL_KEYWORDS = {
+    "total", "growth", "sum", "variance", "calculate", "gmv", "revenue", 
+    "fcf", "dcf", "wacc", "cagr", "margin", "profit", "loss", "expense",
+    "cost", "average", "mean", "count", "percentage", "%", "rate", "ratio",
+    "increase", "decrease", "compare", "difference", "aggregate"
+}
 
 # Try to load spaCy for semantic similarity
 _nlp = None
@@ -101,6 +111,36 @@ WEB_INTENT_EXEMPLARS = [
     "SEBI regulation update",
 ]
 
+# Summary/overview intent exemplars - triggers summarize_dataset flow
+SUMMARY_INTENT_EXEMPLARS = [
+    "what is this data about",
+    "what is this file about",
+    "give me an overview",
+    "explain this document",
+    "summarize this file",
+    "what does this data contain",
+    "describe this spreadsheet",
+    "what information is in this file",
+    "overview of the data",
+    "what am i looking at",
+    "tell me about this dataset",
+    "summary of the file",
+]
+
+# Out-of-domain patterns for non-CA queries
+OUT_OF_DOMAIN_PATTERNS = [
+    "tell me a joke",
+    "how are you",
+    "what is the weather",
+    "write a poem",
+    "hello",
+    "hi there",
+    "who are you",
+    "what can you do",
+    "recipe for",
+    "play a game",
+]
+
 
 class RouterAgent:
     """
@@ -170,9 +210,12 @@ class RouterAgent:
         Route query to appropriate track using semantic understanding.
         
         Pipeline:
-        1. Cache lookup (instant)
-        2. spaCy semantic similarity (fast, vectorized)
-        3. LLM fallback (for ambiguous cases)
+        1. Check for out-of-domain queries
+        2. Check for summary/overview intent
+        3. Check for analytical/numeric intent
+        4. Cache lookup (instant)
+        5. spaCy semantic similarity (fast, vectorized)
+        6. LLM fallback (for ambiguous cases)
         
         Args:
             query: User's question
@@ -180,16 +223,48 @@ class RouterAgent:
             has_loaded_data: Override for whether data is loaded
             
         Returns:
-            Dict with track, confidence, method, similarities
+            Dict with track, confidence, method, similarities, is_analytical, is_summary
         """
         # Use provided flag or instance flag
         data_loaded = has_loaded_data if has_loaded_data is not None else self._has_loaded_data
+        query_lower = query.lower().strip()
+        
+        # TIER 0a: Check for OUT-OF-DOMAIN queries
+        if self._is_out_of_domain(query_lower):
+            result = {
+                "track": TRACK_OUT_OF_DOMAIN,
+                "confidence": 0.9,
+                "method": "pattern_match",
+                "is_analytical": False,
+                "is_summary": False,
+                "status": "failed"
+            }
+            logger.info(f"Out-of-domain query detected: {query[:50]}...")
+            return result
+        
+        # TIER 0b: Check for SUMMARY/OVERVIEW intent
+        is_summary = self._is_summary_query(query_lower)
+        if is_summary and data_loaded:
+            result = {
+                "track": TRACK_DOC_SUMMARY,
+                "confidence": 0.85,
+                "method": "summary_pattern",
+                "is_analytical": False,
+                "is_summary": True
+            }
+            logger.debug(f"Summary query detected, routing to TRACK_DOC_SUMMARY")
+            return result
+        
+        # TIER 0c: Check for ANALYTICAL/NUMERIC intent - mark for deterministic execution
+        is_analytical = self._is_analytical_query(query_lower)
         
         # TIER 1: Cache lookup (O(1))
         cache_key = self._get_cache_key(query, data_loaded)
         if cache_key in self._route_cache:
             cached = self._route_cache[cache_key].copy()
             cached["method"] = "cache"
+            cached["is_analytical"] = is_analytical
+            cached["is_summary"] = is_summary
             return cached
 
         # TIER 2: spaCy semantic similarity
@@ -228,6 +303,8 @@ class RouterAgent:
                     context = "User has data loaded and ready for analysis."
                 llm_result = self._route_with_llm(query, context)
                 if llm_result.get("confidence", 0) > confidence:
+                    llm_result["is_analytical"] = is_analytical
+                    llm_result["is_summary"] = is_summary
                     return llm_result
             
             # Final default based on data availability
@@ -239,7 +316,9 @@ class RouterAgent:
             "track": track,
             "confidence": round(confidence, 2),
             "method": method,
-            "similarities": {k: round(v, 3) for k, v in similarities.items()}
+            "similarities": {k: round(v, 3) for k, v in similarities.items()},
+            "is_analytical": is_analytical,
+            "is_summary": is_summary
         }
         
         # Cache result (with LRU eviction)
@@ -251,6 +330,36 @@ class RouterAgent:
         
         self._route_cache[cache_key] = result
         return result
+    
+    def _is_out_of_domain(self, query_lower: str) -> bool:
+        """Check if query is out of domain (non-CA/non-finance)."""
+        for pattern in OUT_OF_DOMAIN_PATTERNS:
+            if pattern in query_lower:
+                return True
+        return False
+    
+    def _is_summary_query(self, query_lower: str) -> bool:
+        """Check if query is asking for dataset overview/summary."""
+        summary_patterns = [
+            "what is this data", "what is this file", "overview", 
+            "summarize", "describe this", "what does this contain",
+            "what information", "tell me about this", "what am i looking at"
+        ]
+        for pattern in summary_patterns:
+            if pattern in query_lower:
+                return True
+        # Also check semantic similarity to summary exemplars if spaCy available
+        return False
+    
+    def _is_analytical_query(self, query_lower: str) -> bool:
+        """
+        Check if query contains numeric/analytical intent keywords.
+        These queries must use deterministic computation (SQL/Pandas).
+        """
+        for keyword in ANALYTICAL_KEYWORDS:
+            if keyword in query_lower:
+                return True
+        return False
 
     def _route_with_llm(self, query: str, client_context: Optional[str] = None) -> Dict[str, Any]:
         """Use LLM for routing when semantic similarity is low or ambiguous."""
@@ -321,4 +430,14 @@ def get_router_agent(llm_wrapper=None) -> RouterAgent:
     return _router
 
 
-__all__ = ["RouterAgent", "get_router_agent", "TRACK_DATA", "TRACK_DOC", "TRACK_WEB"]
+__all__ = [
+    "RouterAgent", 
+    "get_router_agent", 
+    "TRACK_DATA", 
+    "TRACK_DOC", 
+    "TRACK_WEB",
+    "TRACK_DOC_SUMMARY",
+    "TRACK_OUT_OF_DOMAIN",
+    "ANALYTICAL_KEYWORDS",
+]
+

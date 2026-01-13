@@ -502,6 +502,130 @@ class DataAnalystAgent:
             "dtypes": {str(k): str(v) for k, v in df.dtypes.items()},
             "sample": df.head(3).to_dict() if len(df) > 0 else {}
         }
+    
+    def summarize_dataset(
+        self, 
+        dataset_id: str, 
+        client_id: Optional[str] = None,
+        sample_n: int = 3
+    ) -> Dict[str, Any]:
+        """
+        Generate a human-readable summary of a dataset.
+        
+        This is the primary method for "what is this data about?" queries.
+        Routes to TRACK_DOC_SUMMARY in the router.
+        
+        Args:
+            dataset_id: The dataset identifier
+            client_id: Optional client ID for multi-tenant filtering
+            sample_n: Number of sample rows to include (default: 3)
+            
+        Returns:
+            Dict with keys:
+            - value: The summary text (full sentences)
+            - method: "llm_summary" | "cache" | "heuristic_summary"
+            - provenance: List of provenance dicts
+            - error: Error string if failed
+        """
+        # Get dataframe
+        df = self._get_dataframe(dataset_id, client_id)
+        if df is None:
+            return {
+                "value": None, 
+                "method": "error", 
+                "error": f"Dataset not found: {dataset_id}",
+                "provenance": []
+            }
+        
+        # Check cache first (use Redis if available, else in-memory)
+        cache_key = f"summary:{dataset_id}"
+        if hasattr(self, '_summary_cache'):
+            cached = self._summary_cache.get(cache_key)
+            if cached:
+                return {
+                    "value": cached,
+                    "method": "cache",
+                    "provenance": [{"dataset_id": dataset_id}]
+                }
+        else:
+            self._summary_cache = {}
+        
+        # Build metadata for prompt
+        meta = {
+            "dataset_id": dataset_id,
+            "file_name": self._get_original_filename(dataset_id),
+            "sheet_names": self._get_related_sheets(dataset_id, client_id),
+            "total_rows": len(df),
+            "total_cols": len(df.columns),
+            "top_columns": [str(c) for c in df.columns[:8].tolist()],
+            "sample_rows": df.head(sample_n).to_dict(orient="records")
+        }
+        
+        # Try LLM summary first
+        result = self._try_llm_summary(
+            query="Provide an overview of this dataset",
+            df=df,
+            df_id=dataset_id,
+            client_id=client_id
+        )
+        
+        if result and result.success:
+            # Cache the result (TTL 24h = 86400 seconds)
+            self._summary_cache[cache_key] = result.result
+            
+            return {
+                "value": result.result,
+                "method": "llm_summary",
+                "provenance": [{"dataset_id": dataset_id, **meta}]
+            }
+        
+        # Fallback to heuristic summary
+        heuristic_result = self._generate_heuristic_summary(df, dataset_id)
+        if heuristic_result and heuristic_result.success:
+            self._summary_cache[cache_key] = heuristic_result.result
+            return {
+                "value": heuristic_result.result,
+                "method": "heuristic_summary",
+                "provenance": [{"dataset_id": dataset_id}]
+            }
+        
+        # Final fallback: basic description
+        basic_summary = f"Dataset '{dataset_id}' contains {len(df)} rows and {len(df.columns)} columns. "
+        basic_summary += f"Columns: {', '.join(str(c) for c in df.columns[:10])}"
+        if len(df.columns) > 10:
+            basic_summary += f" ... and {len(df.columns) - 10} more."
+        
+        return {
+            "value": basic_summary,
+            "method": "fallback",
+            "provenance": [{"dataset_id": dataset_id}]
+        }
+    
+    def _get_original_filename(self, dataset_id: str) -> str:
+        """Extract original filename from dataset_id."""
+        # dataset_id format: client_id:doc_id:sheet_name
+        parts = dataset_id.split(":")
+        if len(parts) >= 2:
+            return parts[1]  # doc_id often contains filename info
+        return dataset_id
+    
+    def _get_related_sheets(self, dataset_id: str, client_id: Optional[str]) -> List[str]:
+        """Get related sheet names from the same file."""
+        # Parse dataset_id to get doc_id
+        parts = dataset_id.split(":")
+        if len(parts) < 2:
+            return [dataset_id]
+        
+        doc_prefix = ":".join(parts[:2])  # client_id:doc_id
+        
+        # Find all sheets with same prefix
+        sheets = []
+        for ds_id in self.dataframes.keys():
+            if ds_id.startswith(doc_prefix):
+                sheet_name = ds_id.split(":")[-1] if ":" in ds_id else ds_id
+                sheets.append(sheet_name)
+        
+        return sheets if sheets else [parts[-1]]
 
     def execute_sql_query(
         self,
