@@ -48,7 +48,7 @@ except ImportError as e:
 
 
 # ==============================================================================
-# HUMAN-LIKE RESPONSE FORMATTER - GitHub Flavored Markdown
+# HUMAN-LIKE RESPONSE FORMATTER - LLM-Powered Natural Language
 # ==============================================================================
 def format_human_response(
     query: str,
@@ -60,98 +60,108 @@ def format_human_response(
     elapsed: float = 0.0
 ) -> str:
     """
-    Generate human-like, conversational responses in GitHub Flavored Markdown.
+    Generate human-like, conversational responses using LLM.
     
-    Transforms raw values into natural language sentences with proper formatting.
+    Transforms raw values into natural language sentences.
     """
-    import re
+    from app.core.llm_wrapper import get_llm_wrapper
     
+    result_str = str(result) if result is not None else ""
+    
+    # Build context for LLM
+    data_context = f"""
+Query: {query}
+Raw Result: {result_str}
+Numeric Value: {value if value is not None else 'N/A'}
+Source Dataset: {source}
+Explanation: {explanation}
+"""
+    
+    # Use LLM to generate natural response
+    try:
+        llm = get_llm_wrapper()
+        
+        prompt = f"""You are a professional AI Chartered Accountant. Convert this data analysis result into a natural, human-like response.
+
+{data_context}
+
+RULES:
+1. Answer in 1-3 conversational sentences
+2. If the result is 0 or empty, say "I couldn't find any..." or "There's no..."
+3. Use proper number formatting (lakhs, crores for Indian context if amounts are large)
+4. Don't mention technical details like "col_0" or dataset IDs
+5. Be helpful and professional
+6. If there's an explanation, incorporate its meaning naturally
+
+Examples:
+- Query: "What is total revenue?" Result: "15234567" → "The total revenue is ₹1.52 crores."
+- Query: "Is there any mention of company?" Result: "0" → "No, I couldn't find any mention of a company in this data."
+- Query: "Show profit margin" Result: "23.5" → "The profit margin is 23.5%."
+
+Now generate a natural response:"""
+
+        natural_response = llm.invoke(prompt)
+        
+        # Clean up response
+        if natural_response:
+            natural_response = natural_response.strip()
+            # Remove any leading "Response:" or similar
+            for prefix in ["Response:", "Answer:", "Result:", "Natural response:"]:
+                if natural_response.lower().startswith(prefix.lower()):
+                    natural_response = natural_response[len(prefix):].strip()
+            
+            response = f"📊 {natural_response}"
+        else:
+            # Fallback to simple formatting
+            response = _format_simple_response(query, result, value)
+            
+    except Exception as e:
+        # Fallback to simple formatting
+        response = _format_simple_response(query, result, value)
+    
+    # Add collapsible source details
+    response += "\n\n---"
+    response += f"\n<details><summary>📁 Source Details</summary>\n"
+    response += f"\n- **Dataset:** `{source}`"
+    response += f"\n- **Method:** `{method}`"
+    response += f"\n- **Response time:** {elapsed:.2f}s"
+    response += f"\n</details>"
+    
+    return response
+
+
+def _format_simple_response(query: str, result: Any, value: Optional[float]) -> str:
+    """Simple fallback formatting without LLM."""
     query_lower = query.lower()
     result_str = str(result)
     
-    # Detect query intent for response styling
-    is_count_query = any(kw in query_lower for kw in ['how many', 'count', 'number of'])
-    is_value_query = any(kw in query_lower for kw in ['what is', 'what are', 'what was', 'show', 'find', 'get'])
-    is_total_query = any(kw in query_lower for kw in ['total', 'sum', 'aggregate'])
-    is_growth_query = any(kw in query_lower for kw in ['growth', 'change', 'increase', 'decrease', '%'])
-    is_list_query = any(kw in query_lower for kw in ['list', 'all', 'names', 'sheets'])
-    is_comparison_query = any(kw in query_lower for kw in ['compare', 'vs', 'versus', 'difference'])
+    # Handle zero/empty results
+    if value == 0 or result_str in ["0", "0.0", "0.00", ""]:
+        if "company" in query_lower or "mention" in query_lower:
+            return "📊 No, I couldn't find any mentions in this data."
+        elif "count" in query_lower or "how many" in query_lower:
+            return "📊 I found 0 items matching your query."
+        else:
+            return "📊 The result is 0. No matching data was found."
     
-    # Format numeric values nicely
-    def format_number(val):
-        if val is None:
-            return None
-        try:
-            f = float(val)
-            if abs(f) >= 1e9:
-                return f"{f/1e9:,.2f} Billion"
-            elif abs(f) >= 1e6:
-                return f"{f/1e6:,.2f} Million"
-            elif abs(f) >= 1e3:
-                return f"{f:,.2f}"
-            elif abs(f) < 0.01 and f != 0:
-                return f"{f:.4f}"
-            else:
-                return f"{f:,.2f}"
-        except (ValueError, TypeError):
-            return str(val)
-    
-    # Build the response
-    response_parts = []
-    
-    # Main answer with context
+    # Format numbers nicely
     if value is not None:
-        formatted_value = format_number(value)
-        
-        if is_growth_query:
-            if '%' not in formatted_value:
-                response_parts.append(f"📊 **The growth rate is {formatted_value}%**")
+        try:
+            f = float(value)
+            if abs(f) >= 1e7:  # 1 crore+
+                formatted = f"₹{f/1e7:.2f} crores"
+            elif abs(f) >= 1e5:  # 1 lakh+
+                formatted = f"₹{f/1e5:.2f} lakhs"
+            elif abs(f) >= 1e3:
+                formatted = f"{f:,.2f}"
             else:
-                response_parts.append(f"📊 **The growth rate is {formatted_value}**")
-        elif is_total_query:
-            response_parts.append(f"📊 **The total is {formatted_value}**")
-        elif is_count_query:
-            response_parts.append(f"📊 **There are {formatted_value} items**")
-        else:
-            response_parts.append(f"📊 **The value is {formatted_value}**")
-    elif is_list_query and isinstance(result, (list, str)):
-        if isinstance(result, list):
-            items = result[:20]  # Limit to 20 items
-            if len(items) > 5:
-                response_parts.append(f"📋 **Found {len(result)} items:**\n")
-                response_parts.append("| # | Item |")
-                response_parts.append("|---|------|")
-                for i, item in enumerate(items, 1):
-                    response_parts.append(f"| {i} | {item} |")
-                if len(result) > 20:
-                    response_parts.append(f"\n*...and {len(result) - 20} more*")
-            else:
-                response_parts.append(f"📋 **Found {len(result)} items:** {', '.join(str(x) for x in items)}")
-        else:
-            response_parts.append(f"📋 {result_str}")
-    else:
-        # Generic result formatting
-        if len(result_str) > 500:
-            # Long result - format as code block
-            response_parts.append(f"📊 **Analysis Result:**\n\n```\n{result_str[:1500]}\n```")
-            if len(result_str) > 1500:
-                response_parts.append("\n*...output truncated*")
-        else:
-            response_parts.append(f"📊 {result_str}")
+                formatted = f"{f:.2f}"
+            return f"📊 The value is {formatted}."
+        except:
+            pass
     
-    # Add contextual explanation
-    if explanation and explanation not in result_str:
-        response_parts.append(f"\n\n💡 *{explanation}*")
-    
-    # Add metadata in collapsed details (GFM compatible)
-    response_parts.append("\n\n---")
-    response_parts.append(f"\n<details><summary>📁 Source Details</summary>\n")
-    response_parts.append(f"\n- **Dataset:** `{source}`")
-    response_parts.append(f"\n- **Method:** `{method}`")
-    response_parts.append(f"\n- **Response time:** {elapsed:.2f}s")
-    response_parts.append(f"\n</details>")
-    
-    return "\n".join(response_parts)
+    return f"📊 {result_str}"
+
 
 
 # ==============================================================================
@@ -370,7 +380,9 @@ def load_file(file_path: str) -> bool:
         return True
         
     except Exception as e:
+        import traceback
         print(f"❌ Error loading file: {e}")
+        traceback.print_exc()
         return False
 
 
@@ -458,14 +470,23 @@ def _detect_and_apply_header(df: pd.DataFrame) -> pd.DataFrame:
     for row_idx in range(min(5, len(df))):
         row = df.iloc[row_idx]
         # Count non-null string values
-        str_count = sum(1 for v in row if isinstance(v, str) and len(str(v).strip()) > 1)
-        # Count 'Unnamed' or empty
-        unnamed_count = sum(1 for v in row if pd.isna(v) or 'unnamed' in str(v).lower())
+        str_count = 0
+        unnamed_count = 0
+        
+        for v in row:
+            if pd.isna(v) or v is None:
+                unnamed_count += 1
+            elif isinstance(v, str):
+                if len(v.strip()) > 1:
+                    str_count += 1
+                if 'unnamed' in v.lower():
+                    unnamed_count += 1
+            # Non-string, non-null values (numbers, etc.) - not counted as header
         
         if str_count > len(row) * 0.5 and unnamed_count < len(row) * 0.3:
             # This looks like a header row
             new_df = df.iloc[row_idx + 1:].copy()
-            new_df.columns = [str(v) if pd.notna(v) else f"Col_{i}" for i, v in enumerate(row)]
+            new_df.columns = [str(v) if pd.notna(v) and v is not None else f"Col_{i}" for i, v in enumerate(row)]
             new_df.reset_index(drop=True, inplace=True)
             return new_df
     
@@ -597,12 +618,13 @@ def ask_question(query: str, force_track: str = None) -> str:
             
             has_data_keyword = any(kw in query_lower for kw in data_keywords)
             
-            route_result = router.route(query)
+            route_result = router.route(query, has_loaded_data=bool(loaded_files))
             track = route_result.get('track', TRACK_DATA)
             confidence = route_result.get('confidence', 0.5)
             
             # Override to DATA if data is loaded and query seems data-related
-            if loaded_files and has_data_keyword and track != TRACK_DATA:
+            # BUT don't override TRACK_DOC_SUMMARY or TRACK_OUT_OF_DOMAIN (router knows best for these)
+            if loaded_files and has_data_keyword and track not in (TRACK_DATA, TRACK_DOC_SUMMARY, TRACK_OUT_OF_DOMAIN):
                 track = TRACK_DATA
                 confidence = 0.85
                 print(f"  📝 Redirected to data analysis (data keywords detected)")

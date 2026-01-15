@@ -243,15 +243,26 @@ class DataAnalystAgent:
         - Excel date serial numbers (35531.25) → readable date
         - Empty column names → Col_N naming
         - Duplicate column names → unique numbering
+        - None values → Col_N naming
         """
         new_columns = []
         seen = set()
         
         for i, col in enumerate(df.columns):
-            # Convert to string
-            if isinstance(col, (int, float)):
+            # Handle None first
+            if col is None:
+                col_str = f"col_{i}"
+            # Convert numeric types to string
+            elif isinstance(col, (int, float)):
                 # Check if it looks like an Excel date serial (30000-50000 range)
-                if 30000 < col < 60000:
+                if isinstance(col, float) and 30000 < col < 60000:
+                    try:
+                        from datetime import datetime, timedelta
+                        date_val = datetime(1899, 12, 30) + timedelta(days=col)
+                        col_str = date_val.strftime("%Y-%m-%d")
+                    except:
+                        col_str = f"col_{i}"
+                elif isinstance(col, int) and 30000 < col < 60000:
                     try:
                         from datetime import datetime, timedelta
                         date_val = datetime(1899, 12, 30) + timedelta(days=col)
@@ -260,13 +271,16 @@ class DataAnalystAgent:
                         col_str = f"col_{i}"
                 else:
                     col_str = f"col_{i}" # Always use Col_i for pure numbers to match SQL Engine
-            elif pd.isna(col) or str(col).strip() == '' or str(col).startswith('Unnamed'):
+            elif pd.isna(col):
                 col_str = f"col_{i}"
             else:
+                # Convert to string safely
                 col_str = str(col)
+                if col_str.strip() == '' or col_str.startswith('Unnamed'):
+                    col_str = f"col_{i}"
                 # Ensure it doesn't start with a number for SQL compatibility
-                if col_str and col_str[0].isdigit():
-                     col_str = f"col_{col_str}"
+                elif col_str[0].isdigit():
+                    col_str = f"col_{col_str}"
             
             # Handle duplicates
             base_name = col_str

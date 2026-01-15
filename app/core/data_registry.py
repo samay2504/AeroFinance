@@ -80,12 +80,21 @@ class DataRegistry:
             del self._dataframes[oldest_key]
             logger.debug(f"Evicted LRU DataFrame: {oldest_key}")
 
-    def _parquet_path(self, dataset_id: str) -> Path:
+    def _parquet_path(self, dataset_id: str, client_id: Optional[str] = None) -> Path:
         """
         Get parquet file path for dataset for tiered storage.
         
         Structure: cache_dir / client_id / doc_id / sheet_name.parquet
         This mimics S3 object key structure for easy migration.
+        
+        Handles various dataset_id formats:
+        - 3-part: "client:doc:sheet" → client/doc/sheet.parquet
+        - 2-part: "doc:sheet" → client_id/doc/sheet.parquet (uses provided client_id)
+        - 1-part: "sheet" → client_id/misc/sheet.parquet
+        
+        Args:
+            dataset_id: The dataset identifier
+            client_id: Optional client ID (used for 2-part legacy IDs)
         """
         import re
         from app.core.id_generator import parse_dataset_id
@@ -93,19 +102,43 @@ class DataRegistry:
         # Parse components
         try:
             parts = parse_dataset_id(dataset_id)
-            client_id = parts.get("client_id", "unknown_client")
-            doc_id = parts.get("doc_id", "unknown_doc")
-            sheet_name = parts.get("sheet_name", dataset_id)
+            parsed_client = parts.get("client_id")
+            parsed_doc = parts.get("doc_id")
+            parsed_sheet = parts.get("sheet_name")
         except Exception:
-            # Fallback for legacy IDs
-            client_id = "misc"
-            doc_id = "misc"
-            sheet_name = dataset_id
+            parsed_client = None
+            parsed_doc = None
+            parsed_sheet = dataset_id
+        
+        # Determine actual values with proper fallbacks
+        # For 2-part IDs like "filename:sheetname", use filename as doc_id
+        if parsed_doc is None and parsed_client is not None:
+            # 2-part ID: client_id is actually the filename, use it as doc_id
+            final_client = client_id or "default_client"
+            final_doc = parsed_client  # filename becomes doc_id
+            final_sheet = parsed_sheet or "data"
+        elif parsed_client is None and parsed_doc is None:
+            # 1-part ID: just sheet name
+            final_client = client_id or "default_client"
+            final_doc = "misc"
+            final_sheet = parsed_sheet or dataset_id or "data"
+        else:
+            # 3-part ID: full hierarchical structure
+            final_client = parsed_client or client_id or "default_client"
+            final_doc = parsed_doc or "misc"
+            final_sheet = parsed_sheet or "data"
+
+        # Normalize client_id for VectorDB compatibility
+        try:
+            from app.core.id_generator import normalize_client_id
+            final_client = normalize_client_id(final_client)
+        except ImportError:
+            pass
 
         # Sanitize components for filesystem/S3 safety
-        safe_client = re.sub(r'[\\/:*?"<>|]', '_', client_id)
-        safe_doc = re.sub(r'[\\/:*?"<>|]', '_', doc_id)
-        safe_sheet = re.sub(r'[\\/:*?"<>|]', '_', sheet_name)
+        safe_client = re.sub(r'[\\/:*?"<>|]', '_', str(final_client))
+        safe_doc = re.sub(r'[\\/:*?"<>|]', '_', str(final_doc))
+        safe_sheet = re.sub(r'[\\/:*?"<>|]', '_', str(final_sheet))
         
         # Create hierarchical directory structure
         target_dir = self.cache_dir / safe_client / safe_doc
@@ -170,7 +203,7 @@ class DataRegistry:
         self._metadata[dataset_id] = meta
 
         # Try to persist to Parquet (non-blocking - log errors but don't fail)
-        parquet_path = self._parquet_path(dataset_id)
+        parquet_path = self._parquet_path(dataset_id, safe_client_id)
         try:
             # Convert object columns to string to avoid Parquet type issues
             df_clean = df.copy()
@@ -223,7 +256,8 @@ class DataRegistry:
             return self._dataframes[dataset_id]
 
         # Load from disk
-        parquet_path = self._parquet_path(dataset_id)
+        safe_client_id = self._normalize_client_id(client_id) if client_id else None
+        parquet_path = self._parquet_path(dataset_id, safe_client_id)
         if parquet_path.exists():
             try:
                 df = pd.read_parquet(parquet_path)
@@ -282,7 +316,8 @@ class DataRegistry:
             self._save_disk_metadata()
 
         # Remove parquet file
-        parquet_path = self._parquet_path(dataset_id)
+        safe_client_id = self._normalize_client_id(client_id) if client_id else None
+        parquet_path = self._parquet_path(dataset_id, safe_client_id)
         if parquet_path.exists():
             parquet_path.unlink()
 

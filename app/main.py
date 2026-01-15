@@ -128,6 +128,10 @@ app.add_middleware(
 )
 
 
+# Import centralized natural response formatter from prompts
+from app.core.prompts import format_natural_response as _format_natural_response
+
+
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
     """Health check endpoint."""
@@ -328,7 +332,10 @@ async def ingest_json_text(request: JSONIngestRequest):
 async def query(request: QueryRequest):
     """Execute analytical query with unique query ID for audit trail."""
     try:
-        from app.agents.router import get_router_agent, TRACK_DATA, TRACK_DOC, TRACK_WEB
+        from app.agents.router import (
+            get_router_agent, TRACK_DATA, TRACK_DOC, TRACK_WEB,
+            TRACK_DOC_SUMMARY, TRACK_OUT_OF_DOMAIN
+        )
         from app.agents.data_analyst import get_data_analyst_agent
         from app.core.llm_wrapper import get_llm_wrapper
         from app.core.data_registry import get_data_registry
@@ -344,15 +351,70 @@ async def query(request: QueryRequest):
         agent = get_data_analyst_agent(llm)
         registry = get_data_registry()
         
-        # Route query
-        route_result = router.route(request.query, f"Client: {request.client}")
+        # Check if client has data loaded
+        datasets = agent.list_datasets_for_client(request.client)
+        has_loaded_data = len(datasets) > 0
+        
+        # Route query with data context
+        route_result = router.route(request.query, f"Client: {request.client}", has_loaded_data=has_loaded_data)
         track = route_result.get("track", TRACK_DATA)
         
         logger.info(f"Query {query_id}: Routed to {track} (confidence: {route_result.get('confidence', 0):.2f})")
         
+        # ==================================================================
+        # HANDLE OUT-OF-DOMAIN QUERIES
+        # ==================================================================
+        if track == TRACK_OUT_OF_DOMAIN:
+            return QueryResponse(
+                success=True,
+                result="I'm an AI Chartered Accountant assistant. I can help you with financial data analysis, revenue/expense calculations, and document search. Please ask me something related to your financial data!",
+                method="out_of_domain",
+                explanation="Query was not related to CA/financial domain",
+                query_id=query_id,
+                metadata={"route": track}
+            )
+        
+        # ==================================================================
+        # HANDLE DATASET SUMMARY QUERIES
+        # ==================================================================
+        if track == TRACK_DOC_SUMMARY:
+            if not datasets:
+                return QueryResponse(
+                    success=False,
+                    error="No datasets found. Please upload data first.",
+                    method="summary",
+                    query_id=query_id
+                )
+            
+            # Use summarize_dataset for each dataset
+            summaries = []
+            for ds in datasets[:5]:  # Limit to 5
+                ds_id = ds.get("dataset_id", "")
+                result = agent.summarize_dataset(ds_id, client_id=request.client)
+                if result.get("value"):
+                    sheet_name = ds_id.split(":")[-1]
+                    summaries.append(f"**{sheet_name}:** {result['value']}")
+            
+            if summaries:
+                combined = "\n\n".join(summaries)
+                return QueryResponse(
+                    success=True,
+                    result=combined,
+                    method="summarize_dataset",
+                    explanation=f"Summary of {len(summaries)} dataset(s)",
+                    query_id=query_id,
+                    metadata={"route": track, "datasets": len(summaries)}
+                )
+            else:
+                return QueryResponse(
+                    success=False,
+                    error="Could not generate dataset summaries",
+                    method="summary",
+                    query_id=query_id
+                )
+        
         if track == TRACK_DATA:
-            # Determine dataset(s) to search
-            datasets = agent.list_datasets_for_client(request.client)
+            # datasets already fetched earlier (for has_loaded_data check)
             
             if not datasets:
                 return QueryResponse(
@@ -430,14 +492,22 @@ async def query(request: QueryRequest):
                                     break  # Found a good result
             
             if best_result and best_result.success:
+                # Format as human-like response
+                natural_result = _format_natural_response(
+                    query=request.query,
+                    raw_result=best_result.result,
+                    explanation=best_result.explanation,
+                    llm=llm
+                )
+                
                 return QueryResponse(
                     success=True,
-                    result=best_result.result,
+                    result=natural_result,
                     method=best_result.method,
                     explanation=best_result.explanation,
                     error=None,
                     query_id=query_id,
-                    metadata={"dataset_id": best_dataset_id, "route": track}
+                    metadata={"dataset_id": best_dataset_id, "route": track, "raw_value": best_result.value}
                 )
             
             # FALLBACK: RAG Semantic Search

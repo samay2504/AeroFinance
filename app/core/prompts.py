@@ -1141,6 +1141,361 @@ def format_tool_response_prompt(
         return get_ca_synthesis_prompt(results_str, original_query, tool_name)
 
 
+# ============================================================================
+# RESPONSE FINALIZER - Human-Like Natural Language Formatting
+# Production-grade with comprehensive edge case handling
+# ============================================================================
+
+# Keywords for heuristic zero-result handling (avoid LLM calls)
+_ZERO_RESULT_PATTERNS = {
+    "existence": ["is there", "any mention", "any reference", "utterance", "does it have"],
+    "count": ["how many", "count of", "number of", "total count", "count"],
+    "search": ["find", "search", "look for", "looking for", "where is"],
+    "comparison": ["compare", "difference", "vs", "versus"],
+}
+
+# Technical terms to sanitize from raw results
+_TECHNICAL_TERMS = [
+    "col_", "column_", "nan", "NaN", "null", "None", "undefined",
+    "dataset_id", "df_", "row_", "index_", "<NA>", "NaT"
+]
+
+# LLM response cleanup patterns
+_LLM_CLEANUP_PREFIXES = [
+    "Response:", "Answer:", "Result:", "Here's", "Based on", 
+    "Natural response:", "Output:", "The response is:", "Here is",
+    "According to the data,", "Based on the analysis,", "The data shows that"
+]
+
+
+def _sanitize_result_for_display(raw_result: Any) -> str:
+    """
+    Sanitize raw result for human-readable display.
+    
+    Handles:
+    - None/NaN/null values
+    - Technical column names
+    - DataFrame/Series string representations
+    - Overly long results
+    """
+    if raw_result is None:
+        return ""
+    
+    result_str = str(raw_result)
+    
+    # Handle pandas-style null representations
+    null_patterns = ["nan", "NaN", "None", "null", "<NA>", "NaT", "undefined"]
+    if result_str.strip().lower() in [p.lower() for p in null_patterns]:
+        return ""
+    
+    # Truncate extremely long results (DataFrame string repr)
+    if len(result_str) > 2000:
+        result_str = result_str[:2000] + "... [truncated]"
+    
+    # Clean up technical terms for cleaner LLM input
+    for term in _TECHNICAL_TERMS:
+        if term in result_str and not result_str.replace(term, "").strip():
+            return ""  # Result is just a technical term
+    
+    return result_str
+
+
+def _detect_query_type(query: str) -> str:
+    """
+    Detect query type for optimized heuristic handling.
+    
+    Returns: 'existence', 'count', 'search', 'comparison', 'value', or 'general'
+    """
+    query_lower = query.lower()
+    
+    for query_type, patterns in _ZERO_RESULT_PATTERNS.items():
+        if any(p in query_lower for p in patterns):
+            return query_type
+    
+    # Detect value queries
+    if any(kw in query_lower for kw in ["what is", "what's", "show me", "give me", "total", "sum", "average"]):
+        return "value"
+    
+    # Detect percentage/growth queries
+    if any(kw in query_lower for kw in ["growth", "increase", "decrease", "%", "percent", "margin", "ratio"]):
+        return "percentage"
+    
+    # Detect list queries
+    if any(kw in query_lower for kw in ["list", "top", "bottom", "all", "names", "items"]):
+        return "list"
+    
+    return "general"
+
+
+def _is_empty_result(result_str: str, raw_result: Any) -> bool:
+    """
+    Determine if a result should be treated as empty/zero.
+    
+    Handles various representations of empty/null/zero values.
+    """
+    if not result_str:
+        return True
+    
+    # Common empty representations
+    empty_patterns = [
+        "0", "0.0", "0.00", "-0", "-0.0",
+        "", "[]", "{}", "()", 
+        "None", "null", "nan", "NaN", "NaT", "<NA>",
+        "undefined", "N/A", "n/a", "-"
+    ]
+    
+    if result_str.strip().lower() in [p.lower() for p in empty_patterns]:
+        return True
+    
+    # Check if it's a list/dict that's empty
+    if isinstance(raw_result, (list, tuple)) and len(raw_result) == 0:
+        return True
+    if isinstance(raw_result, dict) and len(raw_result) == 0:
+        return True
+    
+    # Check numeric zero
+    try:
+        if float(result_str.replace(",", "").replace("₹", "")) == 0:
+            return True
+    except (ValueError, TypeError):
+        pass
+    
+    return False
+
+
+def _generate_heuristic_response(query: str, query_type: str, is_negative: bool = False) -> str:
+    """
+    Generate heuristic response for empty/zero results without LLM call.
+    
+    Production-grade: Handles multiple query types with appropriate responses.
+    """
+    query_lower = query.lower()
+    
+    if query_type == "existence":
+        # Extract what they're looking for
+        for pattern in ["mention of", "reference to", "any", "utterance of"]:
+            if pattern in query_lower:
+                idx = query_lower.find(pattern) + len(pattern)
+                subject = query_lower[idx:].strip().rstrip("?").strip()
+                if subject:
+                    return f"No, there are no mentions of {subject} in this data."
+        return "No, the requested information was not found in this data."
+    
+    elif query_type == "count":
+        return "There are no matching items. The count is zero."
+    
+    elif query_type == "search":
+        return "No matching records were found for your search criteria."
+    
+    elif query_type == "comparison":
+        return "Unable to perform comparison - no matching data found."
+    
+    elif query_type == "value":
+        return "The requested value is not available in the current dataset."
+    
+    elif query_type == "percentage":
+        if is_negative:
+            return "The value shows zero change or no applicable data was found."
+        return "No percentage data was found matching your query."
+    
+    elif query_type == "list":
+        return "No items found matching your criteria."
+    
+    else:
+        return "No matching data was found for your query."
+
+
+def _format_number_indian(value: float, is_percentage: bool = False) -> str:
+    """
+    Format number in Indian notation (lakhs/crores) with proper handling.
+    """
+    if is_percentage:
+        if value >= 0:
+            return f"{value:.2f}%"
+        else:
+            return f"negative {abs(value):.2f}%"
+    
+    abs_val = abs(value)
+    sign = "" if value >= 0 else "negative "
+    
+    if abs_val >= 1e9:  # 100 crores+
+        return f"{sign}₹{abs_val/1e7:.2f} crores"
+    elif abs_val >= 1e7:  # 1 crore+
+        return f"{sign}₹{abs_val/1e7:.2f} crores"
+    elif abs_val >= 1e5:  # 1 lakh+
+        return f"{sign}₹{abs_val/1e5:.2f} lakhs"
+    elif abs_val >= 1000:
+        return f"{sign}₹{abs_val:,.2f}"
+    elif abs_val > 0:
+        return f"{sign}₹{abs_val:.2f}"
+    else:
+        return "₹0"
+
+
+def _clean_llm_response(response: str) -> str:
+    """
+    Clean up common LLM response artifacts and prefixes.
+    """
+    if not response:
+        return ""
+    
+    cleaned = response.strip()
+    
+    # Remove common prefixes
+    for prefix in _LLM_CLEANUP_PREFIXES:
+        if cleaned.lower().startswith(prefix.lower()):
+            cleaned = cleaned[len(prefix):].strip()
+            if cleaned.startswith(":"):
+                cleaned = cleaned[1:].strip()
+    
+    # Remove markdown formatting if present
+    if cleaned.startswith("**") and cleaned.endswith("**"):
+        cleaned = cleaned[2:-2]
+    
+    # Remove quotes if entire response is quoted
+    if (cleaned.startswith('"') and cleaned.endswith('"')) or \
+       (cleaned.startswith("'") and cleaned.endswith("'")):
+        cleaned = cleaned[1:-1]
+    
+    # Ensure proper sentence ending
+    if cleaned and not cleaned.endswith(('.', '!', '?')):
+        cleaned += "."
+    
+    return cleaned
+
+
+def get_response_finalizer_prompt(
+    query: str,
+    raw_result: Any,
+    explanation: str = ""
+) -> str:
+    """
+    Get the prompt for formatting a raw result into human-like natural language.
+    
+    Uses the 'response_finalizer' template from templates.yaml with fallback.
+    
+    Args:
+        query: User's original question
+        raw_result: Raw data/value from analysis
+        explanation: Optional explanation of the result
+        
+    Returns:
+        Formatted prompt for LLM to generate natural response
+    """
+    result_str = _sanitize_result_for_display(raw_result)
+    
+    if "response_finalizer" in _PROMPT_TEMPLATES:
+        template = _PROMPT_TEMPLATES["response_finalizer"]
+        return template.format(
+            query=query,
+            raw_result=result_str or "No data",
+            explanation=explanation or "No additional context"
+        )
+    
+    # Fallback if template not loaded
+    return f"""ROLE: Senior Chartered Accountant's AI assistant.
+
+INPUT:
+- Query: {query}
+- Raw Result: {result_str or "No data"}  
+- Context: {explanation or "None"}
+
+RULES:
+1. Lead with direct answer (1-2 sentences max)
+2. No preambles or meta-commentary
+3. Indian number format: crores/lakhs for large amounts
+4. Never mention technical terms (col_0, SQL, pandas)
+5. For zero/empty: explain meaning, don't just say "0"
+
+OUTPUT: Generate ONLY the natural response."""
+
+
+def format_natural_response(
+    query: str,
+    raw_result: Any,
+    explanation: str,
+    llm_wrapper
+) -> str:
+    """
+    Format a raw analysis result into human-like natural language.
+    
+    Production-grade function with multi-tier fallback:
+    1. Heuristic handling for common patterns (fast, no LLM)
+    2. LLM-based formatting using template
+    3. Numeric formatting fallback
+    4. Raw result as last resort
+    
+    Args:
+        query: User's original question
+        raw_result: Raw data/value from analysis
+        explanation: Explanation from the analysis method
+        llm_wrapper: LLM wrapper instance for generating response
+        
+    Returns:
+        Human-like natural language response string
+    """
+    # Sanitize and analyze input
+    result_str = _sanitize_result_for_display(raw_result)
+    query_type = _detect_query_type(query)
+    is_empty = _is_empty_result(result_str, raw_result)
+    
+    # TIER 1: Heuristic handling for empty/zero results
+    if is_empty:
+        return _generate_heuristic_response(query, query_type)
+    
+    # TIER 2: Try LLM-based natural formatting
+    try:
+        prompt = get_response_finalizer_prompt(query, raw_result, explanation)
+        natural_response = llm_wrapper.invoke(prompt)
+        
+        if natural_response:
+            cleaned = _clean_llm_response(natural_response)
+            if cleaned and len(cleaned) > 5:  # Sanity check
+                return cleaned
+                
+    except Exception as e:
+        logger.debug(f"LLM natural response formatting failed: {e}")
+    
+    # TIER 3: Numeric formatting fallback
+    try:
+        # Clean the result for numeric parsing
+        clean_num = str(raw_result).replace(",", "").replace("₹", "").replace("%", "").strip()
+        value = float(clean_num)
+        
+        is_percentage = query_type == "percentage" or "%" in str(raw_result)
+        is_negative = value < 0
+        
+        formatted = _format_number_indian(value, is_percentage)
+        
+        # Build contextual response based on query type
+        if query_type == "percentage":
+            if is_negative:
+                return f"There was a decline of {abs(value):.2f}%."
+            return f"The rate is {formatted}"
+        elif is_negative:
+            return f"The value shows a loss of {formatted.replace('negative ', '')}."
+        else:
+            return f"The value is {formatted}."
+            
+    except (ValueError, TypeError):
+        pass
+    
+    # TIER 4: Last resort - return cleaned result
+    if result_str:
+        # Try to make it somewhat readable
+        if len(result_str) > 200:
+            return f"The analysis returned: {result_str[:200]}..."
+        return f"The result is: {result_str}"
+    
+    return "Unable to determine a result from the available data."
+
+
+# Alias for backward compatibility
+get_finalizer_prompt = get_response_finalizer_prompt
+
+
+
+
 __all__ = [
     "CA_SYSTEM_GUARDRAILS",
     "TRACK_DATA",
@@ -1161,6 +1516,8 @@ __all__ = [
     "get_output_schema",
     "get_dataset_summary_prompt",
     "get_finalizer_prompt",
+    "get_response_finalizer_prompt",
+    "format_natural_response",
     "get_out_of_domain_response",
     "format_tool_response_prompt",
     "TOOL_DESCRIPTIONS",

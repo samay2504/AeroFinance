@@ -141,32 +141,98 @@ class ZMQBridge:
 
 # Default handlers
 def _query_handler(payload: Dict) -> Dict:
-    """Handle query requests with unique ID tracking."""
+    """Handle query requests with unique ID tracking and human-like responses."""
     from app.agents.data_analyst import get_data_analyst_agent
+    from app.agents.router import get_router_agent, TRACK_DATA, TRACK_DOC_SUMMARY, TRACK_OUT_OF_DOMAIN
+    from app.core.llm_wrapper import get_llm_wrapper
     from app.core.id_generator import normalize_client_id, generate_query_id
     
     agent = get_data_analyst_agent()
+    llm = get_llm_wrapper()
+    router = get_router_agent(llm)
+    
     query = payload.get("query", "")
     df_id = payload.get("dataset_id", "")
     client_id = payload.get("client_id", "")
     
-    if not query or not df_id:
-        return {"error": "Missing query or dataset_id"}
+    if not query:
+        return {"error": "Missing query"}
     
     # Normalize client_id and generate query_id
     safe_client_id = normalize_client_id(client_id)
     query_id = generate_query_id()
     
+    # Check if data is loaded
+    datasets = agent.list_datasets_for_client(safe_client_id)
+    has_loaded_data = len(datasets) > 0
+    
+    # Route query
+    route_result = router.route(query, f"Client: {client_id}", has_loaded_data=has_loaded_data)
+    track = route_result.get("track", TRACK_DATA)
+    
+    # Handle out-of-domain
+    if track == TRACK_OUT_OF_DOMAIN:
+        return {
+            "success": True,
+            "result": "I'm an AI Chartered Accountant assistant. I can help you with financial data analysis. Please ask me something related to your financial data!",
+            "method": "out_of_domain",
+            "natural_response": True,
+            "query_id": query_id,
+            "client_id": safe_client_id
+        }
+    
+    # Handle summary
+    if track == TRACK_DOC_SUMMARY:
+        summaries = []
+        for ds in datasets[:5]:
+            ds_id = ds.get("dataset_id", "")
+            result = agent.summarize_dataset(ds_id, client_id=safe_client_id)
+            if result.get("value"):
+                sheet_name = ds_id.split(":")[-1]
+                summaries.append(f"{sheet_name}: {result['value']}")
+        
+        if summaries:
+            return {
+                "success": True,
+                "result": "\n\n".join(summaries),
+                "method": "summarize_dataset",
+                "natural_response": True,
+                "query_id": query_id,
+                "client_id": safe_client_id
+            }
+    
+    # Regular data query
+    if not df_id and datasets:
+        # Auto-match dataset
+        df_id = agent.match_dataset_by_query(query, datasets)
+    
+    if not df_id:
+        return {"error": "No dataset found for query"}
+    
     result = agent.execute_sql_query(query, df_id, client_id=safe_client_id)
+    
+    # Format as human-like response
+    natural_response = _format_natural_response(
+        query=query,
+        raw_result=result.result,
+        explanation=result.explanation,
+        llm=llm
+    )
     
     return {
         "success": result.success,
-        "result": result.result,
+        "result": natural_response if result.success else result.result,
+        "raw_value": result.value,
         "method": result.method,
         "explanation": result.explanation,
         "query_id": query_id,
-        "client_id": safe_client_id
+        "client_id": safe_client_id,
+        "natural_response": True
     }
+
+
+# Import centralized response formatter from prompts
+from app.core.prompts import format_natural_response as _format_natural_response
 
 
 def _list_datasets_handler(payload: Dict) -> Dict:
