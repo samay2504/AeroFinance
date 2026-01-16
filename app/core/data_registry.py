@@ -30,6 +30,7 @@ class DataRegistry:
         redis_url: Optional[str] = None
     ):
         from app.config import CACHE_DIR, settings
+        import os
         
         self.cache_dir = cache_dir or CACHE_DIR
         self.cache_dir.mkdir(parents=True, exist_ok=True)
@@ -40,18 +41,104 @@ class DataRegistry:
         self._metadata: Dict[str, Dict[str, Any]] = {}
         
         # Redis client (optional)
-        self._redis = None
-        if redis_url:
-            try:
-                import redis
-                self._redis = redis.from_url(redis_url)
-                self._redis.ping()
-                logger.info("Data registry connected to Redis")
-            except Exception as e:
-                logger.warning(f"Redis unavailable: {e}")
+        self._redis = self._initialize_redis(redis_url)
         
         # Load existing metadata from disk
         self._load_disk_metadata()
+
+    def _initialize_redis(self, redis_url: Optional[str]):
+        """Initialize Redis with Upstash support and Docker fallback."""
+        import os
+        
+        # 1. Resolve URL (Argument -> Env -> Setting)
+        url = redis_url or os.getenv("REDIS_URL")
+        token = os.getenv("REDIS_TOKEN")
+        
+        client = None
+        
+        # 2. Try Upstash (HTTP)
+        if url and (url.startswith("http://") or url.startswith("https://")):
+            try:
+                from upstash_redis import Redis as UpstashRedis
+                logger.info(f"Connecting to Upstash Redis: {url}")
+                # Upstash client needs url and token
+                auth_token = token or os.getenv("UPSTASH_REDIS_REST_TOKEN")
+                client = UpstashRedis(url=url, token=auth_token)
+                # Verify
+                client.get("test_connection")
+                logger.info("✅ Connected to Upstash Redis")
+                return client
+            except Exception as e:
+                logger.warning(f"Upstash connection failed: {e}")
+                client = None
+
+        # 3. Try Standard Redis (TCP)
+        if url and not client:
+            try:
+                import redis
+                logger.info(f"Connecting to standard Redis: {url}")
+                client = redis.from_url(url, decode_responses=True)
+                client.ping()
+                logger.info("✅ Connected to standard Redis")
+                return client
+            except Exception as e:
+                logger.warning(f"Standard Redis failed: {e}")
+                client = None
+
+        # 4. Fallback: Local Docker Redis
+        if not client:
+            return self._start_local_docker_redis()
+            
+        return client
+
+    def _start_local_docker_redis(self):
+        """Start local Redis container if needed."""
+        import subprocess
+        import redis
+        import time
+        
+        logger.warning("Attempting to start local Redis (Docker fallback)...")
+        
+        container_name = "ai-ca-redis"
+        port = 6379
+        
+        try:
+            # Check if running
+            check = subprocess.run(
+                ["docker", "ps", "-q", "-f", f"name={container_name}"],
+                capture_output=True, text=True
+            )
+            
+            if not check.stdout.strip():
+                # Check if exists but stopped
+                exists = subprocess.run(
+                    ["docker", "ps", "-aq", "-f", f"name={container_name}"],
+                    capture_output=True, text=True
+                )
+                if exists.stdout.strip():
+                    logger.info("Starting existing Redis container...")
+                    subprocess.run(["docker", "start", container_name], check=True)
+                else:
+                    logger.info("Pulling and running Redis container...")
+                    subprocess.run(["docker", "pull", "redis:alpine"], check=False) # Pull
+                    subprocess.run(
+                        ["docker", "run", "-d", "--name", container_name, "-p", f"{port}:6379", "redis:alpine"],
+                        check=True
+                    )
+                
+                # Wait for startup
+                time.sleep(2)
+            
+            # Connect
+            local_url = f"redis://localhost:{port}/0"
+            client = redis.from_url(local_url, decode_responses=True)
+            client.ping()
+            logger.info("✅ Connected to Local Docker Redis")
+            return client
+            
+        except Exception as e:
+            logger.error(f"Failed to start/connect to local Redis: {e}")
+            return None
 
     def _load_disk_metadata(self):
         """Load metadata from disk cache."""

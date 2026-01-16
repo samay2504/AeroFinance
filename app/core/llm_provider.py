@@ -359,8 +359,8 @@ class LLMProvider:
         if not enabled:
             raise ImportError("OpenRouter not enabled and no API key found")
 
-        # Use free models: mistralai/devstral-2512:free or google/gemini-2.0-flash-exp:free
-        model = os.getenv("OPENROUTER_MODEL") or self.config.get("openrouter_model", "mistralai/devstral-2512:free")
+        # Use reliable free model: openai/gpt-5.2-codex
+        model = os.getenv("OPENROUTER_MODEL") or self.config.get("openrouter_model", "openai/gpt-5.2-codex")
 
         if not api_key:
             raise ValueError("OPENROUTER_API_KEY not set")
@@ -378,7 +378,9 @@ class LLMProvider:
             def invoke(self, prompt, **kwargs):
                 headers = {
                     "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json"
+                    "Content-Type": "application/json",
+                    "HTTP-Referer": "https://github.com/valuenaire/AI-ML-Pipeline", # Required by OpenRouter for free tier
+                    "X-Title": "AI CA Agent"
                 }
                 payload = {
                     "model": self.model,
@@ -394,18 +396,37 @@ class LLMProvider:
                         return msg.get("content", json.dumps(data))
                     return json.dumps(data)
                 except Exception as e:
+                    if 'r' in locals() and hasattr(r, 'text'):
+                        logger.error(f"OpenRouter Error ({self.model}): {r.text}")
                     raise RuntimeError(f"OpenRouter request failed: {e}")
 
-        try:
-            wrapper = OpenRouterHTTPWrapper(api_key, model)
-            test = wrapper.invoke("Test")
-            if test:
-                logger.info(f"✅ OpenRouter initialized with {model}")
-                return wrapper
-        except Exception as e:
-            logger.warning(f"OpenRouter failed: {e}")
+        # Try models in sequence
+        models_to_try = [model]
+        # Add fallbacks for robustness if using free tier
+        if "free" in model or "exp" in model or "codex" in model:
+            models_to_try.extend([
+                "openai/gpt-5.2-codex",
+                "meta-llama/llama-3.2-11b-vision-instruct:free",
+                "mistralai/mistral-7b-instruct:free",
+                "microsoft/phi-3-mini-128k-instruct:free"
+            ])
+        
+        # Deduplicate preserving order
+        models_to_try = list(dict.fromkeys(models_to_try))
 
-        raise ValueError("OpenRouter initialization failed")
+        for m in models_to_try:
+            try:
+                # logger.info(f"Trying OpenRouter model: {m}")
+                wrapper = OpenRouterHTTPWrapper(api_key, m)
+                test = wrapper.invoke("Test")
+                if test:
+                    logger.info(f"✅ OpenRouter initialized with {m}")
+                    return wrapper
+            except Exception as e:
+                logger.warning(f"OpenRouter model {m} failed: {str(e)[:100]}")
+                continue
+
+        raise ValueError("OpenRouter initialization failed (all models)")
 
     def _create_fallback_llm(self):
         """Create fallback LLM when all providers fail."""

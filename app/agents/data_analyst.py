@@ -1890,13 +1890,17 @@ Keep the summary concise but informative (3-5 paragraphs)."""
                 semantic_info = "\n".join(semantic_parts)
             
             # Build schema string with sanitized table name
-            schema_str = f"Table: {safe_table_name}\nShape: {df.shape[0]} rows x {df.shape[1]} columns\nColumns:\n"
+            # Research: Summarization improves LLM performance on large schemas.
+            # We strictly enforce column names to prevent hallucination (common in financial JSON).
+            schema_str = f"Table: {safe_table_name}\nShape: {df.shape[0]} rows x {df.shape[1]} columns\n"
+            schema_str += "CRITICAL: You must use the EXACT column names listed below. Do not invent columns.\nColumns:\n"
+            
             for col in schema["columns"]:
                 dtype = schema["dtypes"].get(col, "unknown")
                 # Include sample values for each column
                 sample_vals = df[col].dropna().head(3).tolist()
                 sample_str = str(sample_vals)[:50] if sample_vals else "empty"
-                schema_str += f"  - {col}: {dtype} (e.g. {sample_str})\n"
+                schema_str += f"  - \"{col}\": {dtype} (e.g. {sample_str})\n"
 
             # Build data sample - ENHANCED: targeted context when strategy needs row+column search
             data_sample = ""
@@ -1941,7 +1945,7 @@ Keep the summary concise but informative (3-5 paragraphs)."""
                 data_sample = df.head(sample_rows).to_string(max_colwidth=30)
 
             # Build columns list
-            available_columns = ", ".join(schema["columns"])
+            available_columns = ", ".join([f'"{c}"' for c in schema["columns"]])
 
             prompt = get_data_analyst_sql_prompt(
                 schema_info=schema_str,
@@ -1951,8 +1955,8 @@ Keep the summary concise but informative (3-5 paragraphs)."""
                 semantic_info=semantic_info
             )
             
-            # Try SQL generation with up to 2 refinement attempts
-            max_attempts = 2
+            # Try SQL generation with up to 3 refinement attempts (Self-Correction Pattern)
+            max_attempts = 3
             last_error = None
             
             for attempt in range(max_attempts):
@@ -2118,7 +2122,11 @@ Keep the summary concise but informative (3-5 paragraphs)."""
         try:
             from app.core.prompts import get_data_analyst_python_prompt
 
-            schema_str = f"DataFrame: {df_id}\nShape: {df.shape}\nColumns: {list(df.columns)}"
+            # Improved schema context with strict column names
+            schema_str = f"DataFrame: {df_id}\nShape: {df.shape}\n"
+            schema_str += "CRITICAL: Use EXACT column names as keys. e.g. df['Column_Name']. Do not assume simple names.\nColumns:\n"
+            for col in df.columns:
+                schema_str += f"- \"{col}\" ({df[col].dtype})\n"
             
             # Enhanced: Targeted sample data
             sample = ""
@@ -2156,36 +2164,58 @@ Keep the summary concise but informative (3-5 paragraphs)."""
             
             prompt = get_data_analyst_python_prompt(schema_str, query, sample)
             
-            response = self._llm.invoke_with_structured_output(
-                prompt,
-                output_schema={"code": str, "explanation": str}
-            )
-
-            if "error" in response or "code" not in response:
-                return None
-
-            code = response["code"]
+            # Retry loop with self-correction
+            max_attempts = 3
+            last_error = None
             
-            # Execute in sandbox
-            result = self._sandbox.execute(code, df)
-            
-            if result.get("success"):
-                value = result.get("result")
-                if isinstance(value, (int, float)):
-                    return AnalysisResult(
-                        success=True,
-                        result=value,
-                        value=float(value),
-                        method="pandas:llm_sandbox",
-                        explanation=response.get("explanation", "Python code executed")
-                    )
+            for attempt in range(max_attempts):
+                response = self._llm.invoke_with_structured_output(
+                    prompt,
+                    output_schema={"code": str, "explanation": str}
+                )
+
+                if "error" in response or "code" not in response:
+                    last_error = response.get("error", "No code in response")
+                    continue
+
+                code = response["code"]
+                
+                # Execute in sandbox
+                result = self._sandbox.execute(code, df)
+                
+                if result.get("success"):
+                    value = result.get("result")
+                    
+                    # If empty or None, treat as soft failure and retry prompt
+                    if value is None and attempt < max_attempts - 1:
+                        logger.warning("LLM Python returned None/Empty")
+                        prompt += f"\n\nERROR: The code returned None. Please ensure 'run(df)' returns the answer."
+                        continue
+
+                    if isinstance(value, (int, float)):
+                        return AnalysisResult(
+                            success=True,
+                            result=value,
+                            value=float(value),
+                            method="pandas:llm_sandbox",
+                            explanation=response.get("explanation", "Python code executed")
+                        )
+                    else:
+                        return AnalysisResult(
+                            success=True,
+                            result=value,
+                            method="pandas:llm_sandbox",
+                            explanation=response.get("explanation", "Python code executed")
+                        )
                 else:
-                    return AnalysisResult(
-                        success=True,
-                        result=value,
-                        method="pandas:llm_sandbox",
-                        explanation=response.get("explanation", "Python code executed")
-                    )
+                    # Execution failed - feed error back to LLM
+                    error_msg = result.get("error", "Unknown error")
+                    logger.warning(f"LLM Python attempt {attempt+1} failed: {error_msg}")
+                    prompt += f"\n\nPREVIOUS CODE FAILED: {error_msg}\nCheck column names and logic. Fix the code."
+                    last_error = error_msg
+            
+            if last_error:
+                logger.warning(f"LLM Python failed after {max_attempts} attempts: {last_error}")
 
         except Exception as e:
             logger.warning(f"LLM Python failed: {e}")
@@ -2265,8 +2295,11 @@ Keep the summary concise but informative (3-5 paragraphs)."""
             
             # Create PandasAI DataFrame with custom LLM
             result = None
+            PANDASAI_TIMEOUT_SECONDS = 15  # Fast timeout - move to next method quickly
+            
             try:
                 from pandasai import DataFrame as PAIDataFrame
+                from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
                 
                 smart_df = PAIDataFrame(df.copy(), config={
                     "llm": llm,
@@ -2276,7 +2309,17 @@ Keep the summary concise but informative (3-5 paragraphs)."""
                     "enable_cache": False  # Disable internal cache to avoid stale results
                 })
                 
-                result = smart_df.chat(query)
+                # Execute with timeout protection
+                def _run_chat():
+                    return smart_df.chat(query)
+                
+                with ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(_run_chat)
+                    try:
+                        result = future.result(timeout=PANDASAI_TIMEOUT_SECONDS)
+                    except FuturesTimeoutError:
+                        logger.warning(f"PandasAI timed out after {PANDASAI_TIMEOUT_SECONDS}s - falling through to next method")
+                        return None  # Critical: return None to proceed to next method
                 
             except (ImportError, AttributeError, TypeError, ValueError) as e1:
                 # ValueError includes "PandasAI API key does not include LLM credits"
@@ -2290,12 +2333,25 @@ Keep the summary concise but informative (3-5 paragraphs)."""
                 
                 try:
                     from pandasai import SmartDataframe
+                    from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+                    
                     smart_df = SmartDataframe(df.copy(), config={
                         "llm": llm,
                         "verbose": False,
                         "save_charts": False,
                     })
-                    result = smart_df.chat(query)
+                    
+                    # Execute with timeout protection
+                    def _run_chat_smart():
+                        return smart_df.chat(query)
+                    
+                    with ThreadPoolExecutor(max_workers=1) as executor:
+                        future = executor.submit(_run_chat_smart)
+                        try:
+                            result = future.result(timeout=PANDASAI_TIMEOUT_SECONDS)
+                        except FuturesTimeoutError:
+                            logger.warning(f"PandasAI SmartDataframe timed out after {PANDASAI_TIMEOUT_SECONDS}s - falling through")
+                            return None
                     
                 except Exception as e2:
                     logger.debug(f"SmartDataframe failed: {e2}")

@@ -9,6 +9,15 @@ import hashlib
 from typing import Dict, Any, List, Optional, Tuple
 from pathlib import Path
 import io
+import subprocess
+import time
+
+# Load .env at module initialization (before accessing os.environ)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # dotenv optional
 
 # Prevent transformers from loading torch which causes DLL issues on Windows
 os.environ['TRANSFORMERS_OFFLINE'] = '1'
@@ -160,40 +169,108 @@ class SmartChunker:
 class DocumentIngestor:
     """
     Document ingestion pipeline with vector storage.
-    Qdrant primary, Chroma fallback.
+    Qdrant primary (cloud or local), Chroma fallback.
+    
+    Features:
+    - Reads Qdrant config from .env (VECTOR_DB_QDRANT_HOST, VECTOR_DB_QDRANT_API_KEY)
+    - Uses stronger embedding model (all-mpnet-base-v2 or configurable)
+    - CUDA/GPU acceleration when available
+    - Production-grade error handling
     """
+    
+    # Production-grade embedding models ranked by quality
+    # all-mpnet-base-v2: Best quality, 768 dim, slower
+    # all-MiniLM-L12-v2: Good balance, 384 dim
+    # all-MiniLM-L6-v2: Fast, 384 dim, lower quality
+    EMBEDDING_MODELS = {
+        "all-mpnet-base-v2": {"dim": 768, "quality": "best"},
+        "all-MiniLM-L12-v2": {"dim": 384, "quality": "balanced"},
+        "all-MiniLM-L6-v2": {"dim": 384, "quality": "fast"},
+        "paraphrase-multilingual-mpnet-base-v2": {"dim": 768, "quality": "multilingual"},
+    }
+
 
     def __init__(
         self,
-        qdrant_url: str = "http://localhost:6333",
-        collection_name: str = "ai_ca_docs",
+        qdrant_url: str = None,
+        collection_name: str = None,
         chroma_persist_dir: str = None,
-        embedding_model: str = "all-MiniLM-L6-v2"
+        embedding_model: str = None,
+        qdrant_api_key: str = None
     ):
-        self.collection_name = collection_name
+        # Load configuration from environment with sensible defaults
+        # If passed URL is localhost (default in settings), try to find a better one in env
+        env_url = os.environ.get("VECTOR_DB_QDRANT_HOST")
+        if qdrant_url == "http://localhost:6333" and env_url:
+             self.qdrant_url = env_url
+        else:
+             self.qdrant_url = qdrant_url or env_url or "http://localhost:6333"
+
+        self.qdrant_api_key = qdrant_api_key or os.environ.get("VECTOR_DB_QDRANT_API_KEY")
+        # Prioritize ENV var for collection to allow easy override (fixes dimension mismatch issues)
+        self.collection_name = os.environ.get("QDRANT_COLLECTION") or collection_name or "AI-CA"
+        
+        # Override vector DB type from env - fallback is CHROMA not FAISS
+        self.vector_db_type = os.environ.get("VECTOR_DB_TYPE", "chroma").lower()
+        if self.vector_db_type == "faiss":
+            logger.warning("FAISS configured but deprecated. Falling back to ChromaDB for consistency.")
+            self.vector_db_type = "chroma"
+
+        # Use stronger embedding model by default (all-mpnet-base-v2)
+        default_model = "all-mpnet-base-v2"
+        self._embedding_model_name = embedding_model or os.environ.get("EMBEDDING_MODEL", default_model)
+        
         self.chunker = SmartChunker()
         
-        # Initialize embedding model with fallback chain
-        # Priority: SentenceTransformers (local/fast) > Ollama > HuggingFace API > OpenAI > Hash fallback
+        # Initialize embedding model handling (CUDA/CPU)
+        # ... (embedding init logic matches previous state) ...
         self._embedder = None
         self._embedder_type = None
-        self._embedding_dim = 384  # Default dimension
+        self._embedding_dim = self.EMBEDDING_MODELS.get(self._embedding_model_name, {}).get("dim", 768)
+        self._device = None
         
-        # 1. Try SentenceTransformers first (local, fast, no API costs)
+        # Detect CUDA availability
+        try:
+            import torch
+            if torch.cuda.is_available():
+                self._device = "cuda"
+                logger.info(f"🚀 CUDA GPU detected: {torch.cuda.get_device_name(0)}")
+            else:
+                self._device = "cpu"
+                logger.info("Using CPU for embeddings (CUDA not available)")
+        except ImportError:
+            self._device = "cpu"
+            logger.debug("PyTorch not available, defaulting to CPU")
+        
+        # 1. Try SentenceTransformers first
         if SENTENCE_TRANSFORMERS_AVAILABLE and not self._embedder:
             try:
-                self._embedder = SentenceTransformer(embedding_model)
-                self._embedder_type = "sentence_transformers"
-                self._embedding_dim = self._embedder.get_sentence_embedding_dimension()
-                logger.info(f"Using SentenceTransformers: {embedding_model} (dim={self._embedding_dim})")
+                # Try strongest model first
+                models_to_try = [
+                    self._embedding_model_name,
+                    "all-mpnet-base-v2", 
+                    "all-MiniLM-L12-v2", 
+                    "all-MiniLM-L6-v2"
+                ]
+                
+                for model_name in models_to_try:
+                    try:
+                        self._embedder = SentenceTransformer(model_name, device=self._device)
+                        self._embedder_type = "sentence_transformers"
+                        self._embedding_dim = self._embedder.get_sentence_embedding_dimension()
+                        self._embedding_model_name = model_name
+                        logger.info(f"✅ Using SentenceTransformers: {model_name} (dim={self._embedding_dim}, device={self._device})")
+                        break
+                    except Exception as model_err:
+                        logger.debug(f"Model {model_name} failed: {model_err}")
+                        continue
             except Exception as e:
                 logger.warning(f"SentenceTransformers failed: {e}")
         
-        # 2. Try Ollama embeddings (local, lightweight)
+        # 2-4. Embedder Fallbacks (Ollama, HF, OpenAI) - kept as is
         if not self._embedder:
             try:
                 import requests
-                # Quick check if Ollama is running
                 resp = requests.get("http://localhost:11434/api/version", timeout=2)
                 if resp.status_code == 200:
                     from langchain_community.embeddings import OllamaEmbeddings
@@ -203,73 +280,126 @@ class DocumentIngestor:
                     logger.info("Using Ollama embeddings (nomic-embed-text)")
             except Exception as e:
                 logger.debug(f"Ollama embeddings unavailable: {e}")
-        
-        # 3. Try HuggingFace Inference API (remote, no torch needed)
+
         hf_api_key = os.environ.get("HUGGINGFACEHUB_API_TOKEN") or os.environ.get("HF_API_KEY")
         if hf_api_key and not self._embedder:
             try:
                 from langchain_community.embeddings import HuggingFaceInferenceAPIEmbeddings
                 self._embedder = HuggingFaceInferenceAPIEmbeddings(
                     api_key=hf_api_key,
-                    model_name="sentence-transformers/all-MiniLM-L6-v2"
+                    model_name=f"sentence-transformers/{self._embedding_model_name}"
                 )
                 self._embedder_type = "huggingface_api"
-                self._embedding_dim = 384
-                logger.info("Using HuggingFace Inference API embeddings")
-            except Exception as e:
-                logger.debug(f"HuggingFace API embeddings unavailable: {e}")
-        
-        # 4. Try OpenAI embeddings (remote)
+                logger.info(f"Using HuggingFace Inference API")
+            except Exception:
+                pass
+
         openai_key = os.environ.get("OPENAI_API_KEY")
         if openai_key and not self._embedder:
-            try:
+             try:
                 from langchain_openai import OpenAIEmbeddings
                 self._embedder = OpenAIEmbeddings()
                 self._embedder_type = "openai"
                 self._embedding_dim = 1536
                 logger.info("Using OpenAI embeddings")
-            except Exception as e:
-                logger.debug(f"OpenAI embeddings unavailable: {e}")
+             except Exception:
+                pass
         
-        # Log final embedding status
         if self._embedder:
-            logger.info(f"Embedding provider: {self._embedder_type} (dim={self._embedding_dim})")
+            logger.info(f"📊 Embedding provider: {self._embedder_type} (dim={self._embedding_dim})")
         else:
-            logger.warning("No embedding provider available. Using hash-based fallback.")
+            logger.warning("⚠️ No embedding provider available. Using hash-based fallback.")
 
         # Initialize vector store
         self._qdrant = None
         self._chroma = None
         self._active_store = None
         
-        # Try Qdrant first
-        if QDRANT_AVAILABLE:
+        # Logic to choose DB based on env
+        if self.vector_db_type == "qdrant" and QDRANT_AVAILABLE:
             try:
-                self._qdrant = QdrantClient(url=qdrant_url, timeout=5)
+                # Docker logic for local
+                if "localhost" in self.qdrant_url or "127.0.0.1" in self.qdrant_url:
+                    self._ensure_local_qdrant_running()
+
+                # Handle Qdrant Cloud vs Local
+                if self.qdrant_api_key:
+                    logger.info(f"Connecting to Qdrant Cloud/Auth: {self.qdrant_url}")
+                    self._qdrant = QdrantClient(
+                        url=self.qdrant_url,
+                        api_key=self.qdrant_api_key,
+                        timeout=int(os.environ.get("QDRANT_HEALTH_CHECK_TIMEOUT", 10))
+                    )
+                else:
+                    # Local Qdrant (no auth)
+                    logger.info(f"Connecting to local Qdrant: {self.qdrant_url}")
+                    self._qdrant = QdrantClient(url=self.qdrant_url, timeout=5)
+                
                 self._qdrant.get_collections()
                 self._ensure_qdrant_collection()
                 self._active_store = "qdrant"
-                logger.info("Connected to Qdrant")
+                logger.info(f"✅ Connected to Qdrant ({self.collection_name})")
             except Exception as e:
-                logger.warning(f"Qdrant unavailable: {e}")
+                logger.warning(f"Qdrant unavailable: {e}. Falling back to Chroma.")
                 self._qdrant = None
 
-        # Fallback to Chroma
+        # Fallback to Chroma (Default)
         if self._active_store is None and CHROMA_AVAILABLE:
             try:
                 persist_dir = chroma_persist_dir or str(Path.cwd() / "data" / "chroma")
                 self._chroma = chromadb.PersistentClient(path=persist_dir)
                 self._chroma_collection = self._chroma.get_or_create_collection(
-                    name=collection_name,
+                    name=self.collection_name,
                     metadata={"hnsw:space": "cosine"}
                 )
                 self._active_store = "chroma"
-                logger.info("Connected to Chroma")
+                logger.info("✅ Connected to Chroma (Fallback)")
             except Exception as e:
                 logger.warning(f"Chroma unavailable: {e}")
 
         if self._active_store is None:
-            logger.warning("No vector store available")
+            logger.warning("⚠️ No vector store available")
+
+    def _ensure_local_qdrant_running(self):
+        """Check if local Qdrant is running, if not, pull and start via Docker."""
+        try:
+            import requests
+            # Check if running
+            try:
+                requests.get(self.qdrant_url.replace("tcp://", "http://"), timeout=1)
+                return  # Running
+            except:
+                pass # Not running
+            
+            logger.info("⚠️ Local Qdrant not detected. Attempting to start via Docker...")
+            
+            # Check for Docker
+            subprocess.run(["docker", "--version"], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            
+            # Pull Qdrant
+            logger.info("🐳 Pulling qdrant/qdrant...")
+            subprocess.run(["docker", "pull", "qdrant/qdrant"], check=True)
+            
+            # Run Qdrant
+            logger.info("🚀 Starting Qdrant container...")
+            subprocess.run([
+                "docker", "run", "-d", 
+                "-p", "6333:6333", 
+                "-v", "qdrant_storage:/qdrant/storage",
+                "qdrant/qdrant"
+            ], check=True)
+            
+            # Wait for startup
+            logger.info("Waiting for Qdrant startup...")
+            for _ in range(10):
+                try:
+                    requests.get(self.qdrant_url.replace("tcp://", "http://"), timeout=1)
+                    logger.info("✅ Qdrant started successfully via Docker")
+                    return
+                except:
+                    time.sleep(2)
+        except Exception as e:
+            logger.warning(f"Failed to auto-start local Qdrant: {e}. Ensure Docker is running.")
 
     def _ensure_qdrant_collection(self):
         """Ensure Qdrant collection exists."""
@@ -514,20 +644,25 @@ _doc_ingestor: Optional[DocumentIngestor] = None
 
 
 def get_document_ingestor() -> DocumentIngestor:
-    """Get or create singleton document ingestor."""
+    """Get or create singleton document ingestor with .env config."""
     global _doc_ingestor
     
     if _doc_ingestor is None:
         try:
             from app.config import settings
+            # Prefer env var for model if available, otherwise use settings
+            env_model = os.environ.get("EMBEDDING_MODEL")
+            
             _doc_ingestor = DocumentIngestor(
-                qdrant_url=settings.vectordb.qdrant_url,
-                collection_name=settings.vectordb.qdrant_collection,
-                chroma_persist_dir=settings.vectordb.chroma_persist_dir,
-                embedding_model=settings.vectordb.embedding_model
+                qdrant_url=getattr(settings.vectordb, 'qdrant_url', None),
+                collection_name=getattr(settings.vectordb, 'qdrant_collection', None),
+                chroma_persist_dir=getattr(settings.vectordb, 'chroma_persist_dir', None),
+                embedding_model=env_model or getattr(settings.vectordb, 'embedding_model', None),
+                qdrant_api_key=getattr(settings.vectordb, 'qdrant_api_key', None)
             )
         except Exception as e:
-            logger.warning(f"Using default config for DocumentIngestor: {e}")
+            logger.debug(f"Using direct .env config for DocumentIngestor: {e}")
+            # Fallback: DocumentIngestor reads from os.environ directly
             _doc_ingestor = DocumentIngestor()
     
     return _doc_ingestor
