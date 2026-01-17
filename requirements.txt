@@ -50,6 +50,16 @@ python-json-logger>=2.0.0
 pytest>=7.4.0
 pytest-asyncio>=0.21.0
 
+# PyTorch with CUDA 13.0 Support
+# Install with: pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cu130
+# Note: For CPU-only, use: pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+torch>=2.0.0
+torchvision>=0.15.0
+
+# E2B Remote Sandbox (for secure remote code execution)
+# Falls back to local sandbox if E2B unavailable
+# Enable by setting ENABLE_E2B=true and E2B_API_KEY in environment
+e2b-code-interpreter>=0.0.10
+
 # Optional: Ollama/Local LLM (install separately)
 # ollama (system binary)
-

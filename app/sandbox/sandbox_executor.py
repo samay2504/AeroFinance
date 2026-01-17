@@ -639,23 +639,26 @@ def execute_with_e2b_fallback(
     timeout_sec: int = 10
 ) -> Dict[str, Any]:
     """
-    Execute code with E2B fallback for heavy operations.
+    Execute code with E2B as primary (when enabled), falling back to local sandbox.
     
     Strategy:
-    - Prefer local execution for speed
-    - Use E2B for heavy operations if enabled
+    - If E2B is enabled, try E2B first (better isolation)
+    - If E2B fails or is unavailable, fall back to local sandbox
+    - If prefer_local=True, always try local first for speed
     
     Args:
         code: Python code to execute
         df: DataFrame to pass
-        prefer_local: Try local first (default True)
+        prefer_local: Try local first (default True). Set to False to prefer E2B.
         timeout_sec: Execution timeout
         
     Returns:
         {"success": bool, "result": Any, "logs": str, "error": str, "executor": str}
     """
+    e2b = get_e2b_executor()
+    
     if prefer_local:
-        # Try local first
+        # Try local first for speed
         sandbox = SandboxExecutor(timeout_seconds=timeout_sec)
         result = sandbox.run_user_code(code, {"df": df}, timeout_sec)
         
@@ -663,29 +666,74 @@ def execute_with_e2b_fallback(
             result["executor"] = "local"
             return result
         
-        # If local failed and E2B is available, try E2B
-        e2b = get_e2b_executor()
+        # If local failed and E2B is available, try E2B as fallback
         if e2b.enabled:
-            logger.info("Local execution failed, trying E2B")
-            result = e2b.execute(code, timeout_sec)
-            result["executor"] = "e2b"
-            return result
+            logger.info("Local execution failed, trying E2B as fallback")
+            try:
+                e2b_result = e2b.execute(code, timeout_sec)
+                e2b_result["executor"] = "e2b"
+                if e2b_result["success"]:
+                    return e2b_result
+                # E2B also failed, return local error (more informative)
+                logger.warning(f"E2B fallback also failed: {e2b_result.get('error')}")
+            except Exception as e:
+                logger.warning(f"E2B fallback exception: {e}")
         
         result["executor"] = "local"
         return result
     else:
-        # Use E2B if available
-        e2b = get_e2b_executor()
+        # E2B preferred path (when prefer_local=False)
         if e2b.enabled:
-            result = e2b.execute(code, timeout_sec)
-            result["executor"] = "e2b"
-            return result
+            try:
+                result = e2b.execute(code, timeout_sec)
+                result["executor"] = "e2b"
+                if result["success"]:
+                    return result
+                # E2B failed, fall back to local
+                logger.info(f"E2B failed ({result.get('error')}), falling back to local sandbox")
+            except Exception as e:
+                logger.warning(f"E2B exception: {e}, falling back to local sandbox")
         
-        # Fall back to local
+        # Fall back to local sandbox
         sandbox = SandboxExecutor(timeout_seconds=timeout_sec)
         result = sandbox.run_user_code(code, {"df": df}, timeout_sec)
         result["executor"] = "local"
         return result
+
+
+def execute_code_safe(
+    code: str,
+    df: pd.DataFrame,
+    timeout_sec: int = 10,
+    use_e2b: bool = None
+) -> Dict[str, Any]:
+    """
+    Safe code execution with automatic E2B/local selection.
+    
+    This is the recommended entry point for code execution.
+    Automatically chooses E2B or local based on configuration.
+    
+    Args:
+        code: Python code to execute
+        df: DataFrame to pass
+        timeout_sec: Execution timeout
+        use_e2b: Force E2B (True), force local (False), or auto (None)
+        
+    Returns:
+        {"success": bool, "result": Any, "logs": str, "error": str, "executor": str}
+    """
+    if use_e2b is True:
+        return execute_with_e2b_fallback(code, df, prefer_local=False, timeout_sec=timeout_sec)
+    elif use_e2b is False:
+        sandbox = SandboxExecutor(timeout_seconds=timeout_sec)
+        result = sandbox.run_user_code(code, {"df": df}, timeout_sec)
+        result["executor"] = "local"
+        return result
+    else:
+        # Auto: use E2B if enabled, otherwise local
+        e2b = get_e2b_executor()
+        prefer_local = not e2b.enabled
+        return execute_with_e2b_fallback(code, df, prefer_local=prefer_local, timeout_sec=timeout_sec)
 
 
 __all__ = [
@@ -694,4 +742,5 @@ __all__ = [
     "E2BExecutor",
     "get_e2b_executor",
     "execute_with_e2b_fallback",
+    "execute_code_safe",
 ]
