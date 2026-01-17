@@ -521,7 +521,8 @@ class E2BExecutor:
         
         try:
             from e2b_code_interpreter import Sandbox
-            self._sandbox = Sandbox()
+            # Use Sandbox.create() for SDK v2.x (deprecated: Sandbox())
+            self._sandbox = Sandbox.create(api_key=api_key)
             logger.info("E2B sandbox initialized successfully")
             return True
         except ImportError:
@@ -555,21 +556,32 @@ class E2BExecutor:
             }
         
         try:
-            execution = self._sandbox.run_code(code, timeout=timeout_sec)
+            execution = self._sandbox.run_code(code)
             
-            # Extract results
+            # Extract logs from SDK v2.x format
+            # execution.logs is a Logs object with stdout and stderr lists
             logs = ""
             if execution.logs:
-                logs = "\n".join([
-                    log.line if hasattr(log, 'line') else str(log) 
-                    for log in execution.logs
-                ])
+                stdout_lines = getattr(execution.logs, 'stdout', []) or []
+                stderr_lines = getattr(execution.logs, 'stderr', []) or []
+                logs = "".join(stdout_lines) + "".join(stderr_lines)
             
+            # Extract result
             result = None
             if execution.results:
-                result = execution.results[-1] if execution.results else None
-                if hasattr(result, 'text'):
-                    result = result.text
+                last_result = execution.results[-1] if execution.results else None
+                if last_result:
+                    # SDK v2.x may have different result formats
+                    if hasattr(last_result, 'text'):
+                        result = last_result.text
+                    elif hasattr(last_result, 'value'):
+                        result = last_result.value
+                    else:
+                        result = str(last_result)
+            
+            # If no results but we have logs, extract from stdout
+            if result is None and logs:
+                result = logs.strip()
             
             error = None
             if execution.error:
@@ -615,7 +627,7 @@ class E2BExecutor:
         """Close E2B sandbox."""
         if self._sandbox:
             try:
-                self._sandbox.close()
+                self._sandbox.kill()  # SDK v2.x uses kill() instead of close()
             except Exception:
                 pass
             self._sandbox = None
