@@ -2,6 +2,9 @@
 __pycache__/
 *.py[cod]
 *$py.class
+**/__pycache__/
+**/*.pyc
+**/*.pyo
 
 # C extensions
 *.so
@@ -61,11 +64,14 @@ venv.bak/
 *.swp
 *.swo
 
-# Data files
-data/dataframe_cache/*.parquet
-data/dataframe_cache/_metadata.json
+# Data files - exclude entire data directory
+data/
+data/**
+data/dataframe_cache/
+data/dataframe_cache/**
 data/chroma/
 data/uploads/
+data/logs/
 
 # Logs
 *.log
