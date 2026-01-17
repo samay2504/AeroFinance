@@ -77,6 +77,101 @@ except Exception:
 
 logger = logging.getLogger(__name__)
 
+# =============================================================================
+# STREAMING INFRASTRUCTURE
+# =============================================================================
+
+from dataclasses import dataclass, field
+from typing import Callable, List
+from collections import deque
+import threading
+
+
+@dataclass
+class StreamMetadata:
+    """Metadata for streaming responses."""
+    request_id: str = ""
+    chat_id: str = ""
+    client_id: str = ""
+    dataset_id: str = ""
+    provider: str = ""
+    model: str = ""
+    stream_channel: str = ""
+    total_tokens: int = 0
+    first_token_latency_ms: float = 0.0
+
+
+@dataclass
+class StreamCallbacks:
+    """
+    Callback interface for streaming LLM responses.
+    
+    Usage:
+        callbacks = StreamCallbacks(
+            on_token=lambda t, seq: print(t, end=""),
+            on_start=lambda meta: print(f"Starting stream for {meta.chat_id}"),
+            on_end=lambda meta: print(f"Done: {meta.total_tokens} tokens"),
+            on_error=lambda err: print(f"Error: {err}")
+        )
+    """
+    on_token: Callable[[str, int], None] = None  # (token, sequence_number) -> None
+    on_start: Callable[[StreamMetadata], None] = None  # (metadata) -> None
+    on_end: Callable[[StreamMetadata], None] = None  # (final_metadata) -> None
+    on_error: Callable[[Exception], None] = None  # (error) -> None
+
+
+class StreamBuffer:
+    """
+    Ring buffer for backpressure handling in streaming.
+    
+    Implements configurable buffer with overflow detection.
+    When buffer is full, oldest tokens are dropped and overflow flag is set.
+    """
+    
+    def __init__(self, max_size: int = 1024):
+        self.max_size = max_size
+        self._buffer: deque = deque(maxlen=max_size)
+        self._overflow_count = 0
+        self._lock = threading.Lock()
+        self._total_tokens = 0
+    
+    def push(self, token: str) -> bool:
+        """Push token to buffer. Returns False if overflow occurred."""
+        with self._lock:
+            if len(self._buffer) >= self.max_size:
+                self._overflow_count += 1
+                # Oldest is automatically dropped by deque
+            self._buffer.append(token)
+            self._total_tokens += 1
+            return self._overflow_count == 0
+    
+    def pop(self) -> Optional[str]:
+        """Pop oldest token from buffer."""
+        with self._lock:
+            return self._buffer.popleft() if self._buffer else None
+    
+    def get_all(self) -> List[str]:
+        """Get all buffered tokens and clear buffer."""
+        with self._lock:
+            tokens = list(self._buffer)
+            self._buffer.clear()
+            return tokens
+    
+    @property
+    def overflow_count(self) -> int:
+        return self._overflow_count
+    
+    @property
+    def total_tokens(self) -> int:
+        return self._total_tokens
+    
+    def reset(self):
+        """Reset buffer state."""
+        with self._lock:
+            self._buffer.clear()
+            self._overflow_count = 0
+            self._total_tokens = 0
+
 
 class LLMProvider:
     """
@@ -521,7 +616,153 @@ class LLMProvider:
         self._cooldowns[provider_name] = time.time() + cooldown_seconds
         logger.warning(f"Provider {provider_name} cooldown: {cooldown_seconds}s ({error_type})")
 
+    def stream_invoke(
+        self, 
+        prompt: str, 
+        callbacks: StreamCallbacks,
+        metadata: Optional[StreamMetadata] = None,
+        **kwargs
+    ) -> str:
+        """
+        Stream LLM response with callback interface.
+        
+        Supports native streaming for providers with .stream() method,
+        falls back to chunked output for non-streaming providers.
+        
+        Args:
+            prompt: The prompt to send to the LLM
+            callbacks: StreamCallbacks with on_token, on_start, on_end, on_error
+            metadata: Optional metadata to pass to callbacks
+            **kwargs: Additional arguments for the LLM
+            
+        Returns:
+            Complete response string
+        """
+        if metadata is None:
+            metadata = StreamMetadata()
+        
+        metadata.provider = self.current_provider or "unknown"
+        metadata.model = getattr(self.llm, "model_name", getattr(self.llm, "model", "unknown"))
+        
+        # Call on_start
+        if callbacks.on_start:
+            try:
+                callbacks.on_start(metadata)
+            except Exception as e:
+                logger.warning(f"on_start callback error: {e}")
+        
+        start_time = time.time()
+        first_token_time = None
+        full_response = []
+        token_seq = 0
+        
+        try:
+            # Try native streaming if supported
+            if hasattr(self.llm, 'stream'):
+                try:
+                    for chunk in self.llm.stream(prompt, **kwargs):
+                        # Track first token latency
+                        if first_token_time is None:
+                            first_token_time = time.time()
+                            metadata.first_token_latency_ms = (first_token_time - start_time) * 1000
+                        
+                        # Extract token from chunk
+                        if hasattr(chunk, 'content'):
+                            token = chunk.content
+                        elif isinstance(chunk, str):
+                            token = chunk
+                        elif isinstance(chunk, dict):
+                            token = chunk.get('content', '') or chunk.get('text', '')
+                        else:
+                            token = str(chunk)
+                        
+                        if token:
+                            full_response.append(token)
+                            token_seq += 1
+                            
+                            if callbacks.on_token:
+                                try:
+                                    callbacks.on_token(token, token_seq)
+                                except Exception as e:
+                                    logger.debug(f"on_token callback error: {e}")
+                    
+                    metadata.total_tokens = token_seq
+                    
+                except Exception as e:
+                    logger.warning(f"Native streaming failed, falling back: {e}")
+                    # Fall through to chunked fallback
+                    if not full_response:
+                        raise
+            
+            # Chunked fallback for non-streaming providers
+            if not full_response:
+                response = self.invoke(prompt, **kwargs)
+                if response:
+                    # Simulate streaming by chunking response
+                    chunk_size = 4  # Characters per chunk for simulation
+                    for i in range(0, len(response), chunk_size):
+                        if first_token_time is None:
+                            first_token_time = time.time()
+                            metadata.first_token_latency_ms = (first_token_time - start_time) * 1000
+                        
+                        chunk = response[i:i + chunk_size]
+                        full_response.append(chunk)
+                        token_seq += 1
+                        
+                        if callbacks.on_token:
+                            try:
+                                callbacks.on_token(chunk, token_seq)
+                            except Exception:
+                                pass
+                    
+                    metadata.total_tokens = len(response)
+            
+            result = ''.join(full_response)
+            
+            # Call on_end
+            if callbacks.on_end:
+                try:
+                    callbacks.on_end(metadata)
+                except Exception as e:
+                    logger.warning(f"on_end callback error: {e}")
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Stream invoke failed: {e}")
+            
+            if callbacks.on_error:
+                try:
+                    callbacks.on_error(e)
+                except Exception:
+                    pass
+            
+            # Attempt graceful fallback to non-streaming
+            try:
+                fallback_response = self.invoke(prompt, **kwargs)
+                if fallback_response:
+                    logger.info("Graceful fallback to non-streaming succeeded")
+                    metadata.total_tokens = len(fallback_response)
+                    if callbacks.on_end:
+                        callbacks.on_end(metadata)
+                    return fallback_response
+            except Exception:
+                pass
+            
+            return ""
+
+
 
 def create_llm_provider(config: Dict[str, Any]) -> LLMProvider:
     """Factory function to create LLM provider."""
     return LLMProvider(config)
+
+
+__all__ = [
+    "LLMProvider",
+    "create_llm_provider",
+    # Streaming infrastructure
+    "StreamMetadata",
+    "StreamCallbacks", 
+    "StreamBuffer",
+]

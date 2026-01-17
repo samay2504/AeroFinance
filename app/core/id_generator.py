@@ -244,6 +244,22 @@ def generate_query_id() -> str:
     return generate_short_id("qry")
 
 
+def generate_request_id() -> str:
+    """Generate unique request ID for request tracing."""
+    return generate_short_id("req")
+
+
+def generate_trace_id() -> str:
+    """Generate unique trace ID for distributed tracing."""
+    return generate_short_id("trace")
+
+
+def generate_chat_id() -> str:
+    """Generate unique chat/conversation ID."""
+    return generate_short_id("chat")
+
+
+
 # =============================================================================
 # ID PARSING AND VALIDATION
 # =============================================================================
@@ -388,6 +404,9 @@ __all__ = [
     "generate_dataset_id",
     "generate_chunk_id",
     "generate_query_id",
+    "generate_request_id",
+    "generate_trace_id",
+    "generate_chat_id",
     # Parsing and validation
     "parse_dataset_id",
     "validate_user_id",

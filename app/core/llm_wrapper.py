@@ -194,15 +194,19 @@ def log_interaction(func: Callable = None, *, include_result: bool = True):
             if not ctx and len(args) > 1 and isinstance(args[1], dict):
                 ctx = args[1]
             
-            # Build base log document
+            # Build base log document with versioned schema
             log_doc = {
+                "log_schema_version": "1.0",  # Immutable schema version for parsing
                 "log_id": generate_short_id("log"),
                 "timestamp_utc": get_iso_timestamp(),
+                "request_id": ctx.get("request_id") or generate_short_id("req"),
+                "trace_id": ctx.get("trace_id"),
                 "env": os.getenv("ENV", "dev"),
                 "user_id": ctx.get("user_id"),
                 "client_id": ctx.get("client_id"),
                 "chat_id": ctx.get("chat_id"),
                 "session_id": ctx.get("session_id"),
+                "doc_id": ctx.get("doc_id"),
                 "query_text": ctx.get("query") or ctx.get("query_text") or (args[0] if args else None),
                 "routed_agent": ctx.get("agent") or ctx.get("routed_agent"),
                 "dataset_ids": ctx.get("dataset_ids", []),
@@ -218,6 +222,9 @@ def log_interaction(func: Callable = None, *, include_result: bool = True):
                 "llm_model": ctx.get("llm_model"),
                 "tokens_used": ctx.get("tokens_used"),
                 "latency_ms": None,
+                "first_token_latency_ms": ctx.get("first_token_latency_ms"),
+                "streaming_enabled": ctx.get("streaming_enabled", False),
+                "stream_channel": ctx.get("stream_channel"),
                 "cache_hit": ctx.get("cache_hit", False),
                 "error": None,
                 "status": "success"
@@ -762,6 +769,7 @@ def run_log_maintenance(
     return results
 
 
+
 # DataAnalystResult schema for structured output
 DataAnalystResult = {
     "value": (int, float, str, type(None)),
@@ -773,6 +781,339 @@ DataAnalystResult = {
 }
 
 
+# =============================================================================
+# BATCH SCHEDULER & KV CACHE
+# =============================================================================
+
+import threading
+import queue
+from collections import OrderedDict
+from dataclasses import dataclass, field as dataclass_field
+from typing import Tuple
+import heapq
+
+
+@dataclass
+class ScheduledRequest:
+    """Request wrapper for batch scheduling."""
+    request_id: str
+    prompt: str
+    priority: int = 1  # 0=high (interactive), 1=normal, 2=low (bulk)
+    token_estimate: int = 0
+    timestamp: float = dataclass_field(default_factory=time.time)
+    callback: Optional[Callable[[str], None]] = None
+    metadata: Dict[str, Any] = dataclass_field(default_factory=dict)
+    
+    def __lt__(self, other):
+        # Higher priority (lower number) comes first
+        if self.priority != other.priority:
+            return self.priority < other.priority
+        return self.timestamp < other.timestamp
+
+
+class KVCache:
+    """
+    LRU cache for KV states to reduce recomputation.
+    
+    Keys are (model, session_id, context_hash) tuples.
+    Values are opaque KV state blobs from the provider.
+    
+    Thread-safe with configurable max memory.
+    """
+    
+    def __init__(self, max_memory_mb: int = 2048):
+        self.max_memory_bytes = max_memory_mb * 1024 * 1024
+        self._cache: OrderedDict = OrderedDict()
+        self._sizes: Dict[str, int] = {}
+        self._total_size = 0
+        self._lock = threading.RLock()
+        self._hits = 0
+        self._misses = 0
+    
+    def _make_key(self, model: str, session_id: str, context_hash: str) -> str:
+        return f"{model}:{session_id}:{context_hash}"
+    
+    def get(self, model: str, session_id: str, context_hash: str) -> Optional[Any]:
+        """Get KV state from cache. Returns None if not found."""
+        key = self._make_key(model, session_id, context_hash)
+        with self._lock:
+            if key in self._cache:
+                # Move to end (most recently used)
+                self._cache.move_to_end(key)
+                self._hits += 1
+                return self._cache[key]
+            self._misses += 1
+            return None
+    
+    def put(self, model: str, session_id: str, context_hash: str, kv_state: Any, size_bytes: int = 0):
+        """Store KV state in cache. Evicts LRU if needed."""
+        key = self._make_key(model, session_id, context_hash)
+        estimated_size = size_bytes or len(str(kv_state))
+        
+        with self._lock:
+            # Evict LRU entries if needed
+            while self._total_size + estimated_size > self.max_memory_bytes and self._cache:
+                oldest_key, _ = self._cache.popitem(last=False)
+                evicted_size = self._sizes.pop(oldest_key, 0)
+                self._total_size -= evicted_size
+                logger.debug(f"KVCache evicted: {oldest_key[:50]}...")
+            
+            # Store new entry
+            self._cache[key] = kv_state
+            self._sizes[key] = estimated_size
+            self._total_size += estimated_size
+            self._cache.move_to_end(key)
+    
+    def invalidate(self, model: str = None, session_id: str = None):
+        """Invalidate entries matching criteria."""
+        with self._lock:
+            keys_to_remove = []
+            for key in self._cache:
+                parts = key.split(":", 2)
+                if len(parts) >= 2:
+                    if model and parts[0] != model:
+                        continue
+                    if session_id and parts[1] != session_id:
+                        continue
+                    keys_to_remove.append(key)
+            
+            for key in keys_to_remove:
+                del self._cache[key]
+                size = self._sizes.pop(key, 0)
+                self._total_size -= size
+    
+    def get_metrics(self) -> Dict[str, Any]:
+        """Get cache metrics."""
+        with self._lock:
+            total_requests = self._hits + self._misses
+            hit_rate = self._hits / max(1, total_requests)
+            return {
+                "entries": len(self._cache),
+                "total_size_mb": round(self._total_size / (1024 * 1024), 2),
+                "max_size_mb": self.max_memory_bytes // (1024 * 1024),
+                "hits": self._hits,
+                "misses": self._misses,
+                "hit_rate": round(hit_rate, 3),
+            }
+
+
+class TokenBucket:
+    """Token bucket rate limiter for per-client fairness."""
+    
+    def __init__(self, rate: float = 100.0, capacity: int = 1000):
+        """
+        Args:
+            rate: Tokens per second refill rate
+            capacity: Maximum bucket capacity
+        """
+        self.rate = rate
+        self.capacity = capacity
+        self._tokens = capacity
+        self._last_update = time.time()
+        self._lock = threading.Lock()
+    
+    def consume(self, tokens: int = 1) -> bool:
+        """Try to consume tokens. Returns True if allowed."""
+        with self._lock:
+            now = time.time()
+            elapsed = now - self._last_update
+            self._tokens = min(self.capacity, self._tokens + elapsed * self.rate)
+            self._last_update = now
+            
+            if self._tokens >= tokens:
+                self._tokens -= tokens
+                return True
+            return False
+    
+    def wait_time(self, tokens: int = 1) -> float:
+        """Get wait time in seconds to acquire tokens."""
+        with self._lock:
+            if self._tokens >= tokens:
+                return 0.0
+            needed = tokens - self._tokens
+            return needed / self.rate
+
+
+class BatchScheduler:
+    """
+    Adaptive batch scheduler for LLM requests.
+    
+    Features:
+    - Groups requests by token-length buckets for ragged batching
+    - Priority-based scheduling (interactive vs bulk)
+    - Rate limiting via token bucket
+    - Configurable batch window for latency control
+    
+    Usage:
+        scheduler = BatchScheduler(batch_window_ms=20)
+        scheduler.submit(request)
+        batch = scheduler.get_batch()  # Returns list of ScheduledRequest
+    """
+    
+    def __init__(
+        self,
+        batch_window_ms: int = 20,
+        max_batch_size: int = 8,
+        token_buckets_per_client: bool = True,
+        tokens_per_second: float = 100.0
+    ):
+        self.batch_window_ms = batch_window_ms
+        self.max_batch_size = max_batch_size
+        self.tokens_per_second = tokens_per_second
+        
+        # Priority queue for requests
+        self._queue: List[ScheduledRequest] = []
+        self._queue_lock = threading.Lock()
+        
+        # Per-client rate limiters
+        self._client_buckets: Dict[str, TokenBucket] = {}
+        self._buckets_enabled = token_buckets_per_client
+        
+        # Metrics
+        self._total_batched = 0
+        self._total_requests = 0
+        self._total_padding_saved = 0
+        self._batch_sizes: List[int] = []
+    
+    def _estimate_tokens(self, prompt: str) -> int:
+        """Estimate token count from prompt length."""
+        # Rough estimate: ~4 chars per token
+        return len(prompt) // 4 + 1
+    
+    def _get_bucket(self, client_id: str) -> TokenBucket:
+        """Get or create rate limiter for client."""
+        if client_id not in self._client_buckets:
+            self._client_buckets[client_id] = TokenBucket(
+                rate=self.tokens_per_second,
+                capacity=int(self.tokens_per_second * 10)
+            )
+        return self._client_buckets[client_id]
+    
+    def submit(
+        self,
+        request_id: str,
+        prompt: str,
+        priority: int = 1,
+        callback: Optional[Callable[[str], None]] = None,
+        client_id: str = "default",
+        metadata: Optional[Dict[str, Any]] = None
+    ) -> bool:
+        """
+        Submit request for scheduling.
+        
+        Returns False if rate limited.
+        """
+        self._total_requests += 1
+        
+        # Check rate limit
+        if self._buckets_enabled:
+            bucket = self._get_bucket(client_id)
+            tokens_needed = self._estimate_tokens(prompt) // 10 + 1  # Coarse-grained
+            if not bucket.consume(tokens_needed):
+                logger.warning(f"Rate limited: client={client_id}")
+                return False
+        
+        request = ScheduledRequest(
+            request_id=request_id,
+            prompt=prompt,
+            priority=priority,
+            token_estimate=self._estimate_tokens(prompt),
+            callback=callback,
+            metadata=metadata or {}
+        )
+        
+        with self._queue_lock:
+            heapq.heappush(self._queue, request)
+        
+        return True
+    
+    def get_batch(self, wait_ms: Optional[int] = None) -> List[ScheduledRequest]:
+        """
+        Get a batch of requests, grouping by similar token length.
+        
+        Args:
+            wait_ms: Override batch window (default: self.batch_window_ms)
+            
+        Returns:
+            List of ScheduledRequest to process together
+        """
+        wait = (wait_ms or self.batch_window_ms) / 1000.0
+        time.sleep(wait)  # Wait for batch window
+        
+        with self._queue_lock:
+            if not self._queue:
+                return []
+            
+            # Pop up to max_batch_size, preferring similar token lengths
+            batch = []
+            remaining = []
+            
+            # Sort by priority first, then group by token buckets
+            all_requests = []
+            while self._queue:
+                all_requests.append(heapq.heappop(self._queue))
+            
+            # Group into token-length buckets (small: <100, medium: 100-500, large: >500)
+            buckets = {"small": [], "medium": [], "large": []}
+            for req in all_requests:
+                if req.token_estimate < 100:
+                    buckets["small"].append(req)
+                elif req.token_estimate < 500:
+                    buckets["medium"].append(req)
+                else:
+                    buckets["large"].append(req)
+            
+            # Take from buckets in priority order
+            for bucket_name in ["small", "medium", "large"]:
+                bucket = buckets[bucket_name]
+                bucket.sort()  # Sort by priority/timestamp
+                
+                while bucket and len(batch) < self.max_batch_size:
+                    batch.append(bucket.pop(0))
+                
+                remaining.extend(bucket)
+            
+            # Put remaining back
+            for req in remaining:
+                heapq.heappush(self._queue, req)
+            
+            # Track metrics
+            if batch:
+                self._batch_sizes.append(len(batch))
+                self._total_batched += len(batch)
+                
+                # Calculate padding saved (vs worst-case padding to max length)
+                if len(batch) > 1:
+                    token_lengths = [r.token_estimate for r in batch]
+                    max_len = max(token_lengths)
+                    total_padding = sum(max_len - l for l in token_lengths)
+                    self._total_padding_saved += total_padding
+            
+            return batch
+    
+    def get_metrics(self) -> Dict[str, Any]:
+        """Get scheduling metrics."""
+        avg_batch = sum(self._batch_sizes) / max(1, len(self._batch_sizes))
+        return {
+            "total_requests": self._total_requests,
+            "total_batched": self._total_batched,
+            "average_batch_size": round(avg_batch, 2),
+            "padding_tokens_saved": self._total_padding_saved,
+            "queue_depth": len(self._queue),
+            "batching_efficiency": round(self._total_batched / max(1, self._total_requests), 3),
+        }
+
+
+# Global KV cache instance (lazy init)
+_kv_cache: Optional[KVCache] = None
+
+def get_kv_cache() -> KVCache:
+    """Get or create global KV cache."""
+    global _kv_cache
+    if _kv_cache is None:
+        max_mb = int(os.getenv("KV_CACHE_MAX_MB", "2048"))
+        _kv_cache = KVCache(max_memory_mb=max_mb)
+    return _kv_cache
 
 
 class LLMWrapper:
@@ -1086,6 +1427,101 @@ class LLMWrapper:
         self._total_latency_ms = 0
         self._cache_hits = 0
 
+    def stream_chat(
+        self,
+        prompt: Union[str, PromptTemplate],
+        on_token: Optional[Callable[[str, int], None]] = None,
+        on_start: Optional[Callable[["StreamMetadata"], None]] = None,
+        on_end: Optional[Callable[["StreamMetadata"], None]] = None,
+        on_error: Optional[Callable[[Exception], None]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        **kwargs
+    ) -> str:
+        """
+        Stream chat response with callback interface.
+        
+        This is the high-level streaming API for LLMWrapper. Supports:
+        - Real-time token delivery via on_token callback
+        - Metadata tracking (first-token latency, total tokens)
+        - Graceful fallback to non-streaming if provider doesn't support it
+        
+        Args:
+            prompt: The prompt to send (string or PromptTemplate)
+            on_token: Callback for each token: (token: str, seq: int) -> None
+            on_start: Callback when streaming starts: (metadata: StreamMetadata) -> None
+            on_end: Callback when streaming ends: (metadata: StreamMetadata) -> None
+            on_error: Callback on error: (error: Exception) -> None
+            metadata: Optional dict of metadata to include (chat_id, client_id, etc.)
+            **kwargs: Additional arguments for the LLM
+            
+        Returns:
+            Complete response string
+            
+        Example:
+            tokens = []
+            response = wrapper.stream_chat(
+                "Explain compound interest",
+                on_token=lambda t, seq: tokens.append(t),
+                on_end=lambda m: print(f"Done: {m.first_token_latency_ms}ms to first token")
+            )
+        """
+        from .llm_provider import StreamCallbacks, StreamMetadata
+        
+        if not self._llm_provider:
+            if on_error:
+                on_error(ValueError("LLM provider unavailable"))
+            return "Error: LLM provider unavailable"
+        
+        # Format prompt
+        formatted_prompt = self._format_prompt(prompt, **kwargs)
+        
+        # Build metadata
+        stream_meta = StreamMetadata()
+        if metadata:
+            stream_meta.request_id = metadata.get("request_id", "")
+            stream_meta.chat_id = metadata.get("chat_id", "")
+            stream_meta.client_id = metadata.get("client_id", "")
+            stream_meta.dataset_id = metadata.get("dataset_id", "")
+            stream_meta.stream_channel = metadata.get("stream_channel", f"chat:{stream_meta.chat_id}")
+        
+        # Build callbacks
+        callbacks = StreamCallbacks(
+            on_token=on_token,
+            on_start=on_start,
+            on_end=on_end,
+            on_error=on_error
+        )
+        
+        # Track metrics
+        start_time = time.time()
+        
+        try:
+            result = self._llm_provider.stream_invoke(
+                formatted_prompt,
+                callbacks=callbacks,
+                metadata=stream_meta,
+                **kwargs
+            )
+            
+            elapsed_ms = (time.time() - start_time) * 1000
+            self._call_count += 1
+            self._total_latency_ms += elapsed_ms
+            
+            logger.debug(f"Stream chat complete: {elapsed_ms:.0f}ms, {stream_meta.total_tokens} tokens")
+            return result
+            
+        except Exception as e:
+            logger.error(f"Stream chat failed: {e}")
+            if on_error:
+                on_error(e)
+            
+            # Try fallback to non-streaming
+            if self._attempt_provider_fallback():
+                return self.invoke(prompt, **kwargs)
+            
+            return f"Error: {str(e)}"
+
+
 
 # Try to import PandasAI's base LLM class for proper inheritance
 _PandasAI_LLM_Base = None
@@ -1294,7 +1730,14 @@ __all__ = [
     "archive_high_value_logs_to_s3",
     "setup_s3_lifecycle_rules",
     "run_log_maintenance",
+    # Batch scheduling & KV cache
+    "ScheduledRequest",
+    "KVCache",
+    "get_kv_cache",
+    "TokenBucket",
+    "BatchScheduler",
 ]
+
 
 
 

@@ -250,6 +250,92 @@ def _list_datasets_handler(payload: Dict) -> Dict:
     return {"datasets": datasets}
 
 
+def _stream_query_handler(payload: Dict) -> Dict:
+    """Handle streaming query requests with token-by-token delivery."""
+    from app.agents.data_analyst import get_data_analyst_agent
+    from app.core.llm_wrapper import get_llm_wrapper
+    from app.core.id_generator import normalize_client_id, generate_query_id, generate_short_id
+    import time
+    
+    agent = get_data_analyst_agent()
+    llm = get_llm_wrapper()
+    
+    query = payload.get("query", "")
+    client_id = payload.get("client_id", "")
+    chat_id = payload.get("chat_id") or generate_short_id("chat")
+    
+    if not query:
+        return {"error": "Missing query"}
+    
+    # Normalize IDs
+    safe_client_id = normalize_client_id(client_id)
+    query_id = generate_query_id()
+    stream_channel = f"chat:{chat_id}"
+    
+    # Collect streaming tokens
+    tokens = []
+    first_token_time = None
+    start_time = time.time()
+    
+    def on_token(token: str, seq: int):
+        nonlocal first_token_time
+        if first_token_time is None:
+            first_token_time = time.time()
+        tokens.append({"seq": seq, "token": token})
+    
+    def on_start(meta):
+        logger.info(f"Streaming started: chat_id={chat_id}, channel={stream_channel}")
+    
+    def on_end(meta):
+        logger.info(f"Streaming ended: {meta.total_tokens} tokens, first_token={meta.first_token_latency_ms:.0f}ms")
+    
+    def on_error(err):
+        logger.error(f"Streaming error: {err}")
+    
+    try:
+        # Use streaming API
+        response = llm.stream_chat(
+            prompt=query,
+            on_token=on_token,
+            on_start=on_start,
+            on_end=on_end,
+            on_error=on_error,
+            metadata={
+                "chat_id": chat_id,
+                "client_id": safe_client_id,
+                "request_id": query_id,
+                "stream_channel": stream_channel
+            }
+        )
+        
+        elapsed_ms = int((time.time() - start_time) * 1000)
+        first_token_latency = 0
+        if first_token_time:
+            first_token_latency = int((first_token_time - start_time) * 1000)
+        
+        return {
+            "success": True,
+            "result": response,
+            "streaming": True,
+            "tokens_count": len(tokens),
+            "first_token_latency_ms": first_token_latency,
+            "total_latency_ms": elapsed_ms,
+            "query_id": query_id,
+            "chat_id": chat_id,
+            "stream_channel": stream_channel,
+            "client_id": safe_client_id
+        }
+        
+    except Exception as e:
+        logger.error(f"Stream query error: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "query_id": query_id,
+            "chat_id": chat_id
+        }
+
+
 # Singleton instance
 _bridge: Optional[ZMQBridge] = None
 
@@ -267,9 +353,11 @@ def get_zmq_bridge() -> ZMQBridge:
         
         # Register default handlers
         _bridge.register_handler("query", _query_handler)
+        _bridge.register_handler("stream_query", _stream_query_handler)
         _bridge.register_handler("list_datasets", _list_datasets_handler)
     
     return _bridge
 
 
 __all__ = ["ZMQBridge", "get_zmq_bridge"]
+
