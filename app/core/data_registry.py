@@ -383,14 +383,15 @@ class S3StorageBackend(StorageBackend):
         self,
         bucket: str,
         prefix: str = "dataframes/",
-        region: str = "ap-south-1",
+        region: Optional[str] = None,
         enable_local_cache: bool = True,
         max_cache_size: int = 5,
         compression: str = "snappy"
     ):
         self.bucket = bucket
         self.prefix = prefix.rstrip('/') + '/'
-        self.region = region
+        # Read region from env if not specified
+        self.region = region or os.getenv("AWS_DEFAULT_REGION", "ap-south-1")
         self.compression = compression
         
         # Request-scope cache (ephemeral)
@@ -773,8 +774,9 @@ class DataRegistry:
         
         logger.warning("Attempting to start local Redis (Docker fallback)...")
         
-        container_name = "ai-ca-redis"
-        port = 6379
+        # Container name from env or default
+        container_name = os.getenv("REDIS_DOCKER_CONTAINER", "ai-ca-redis")
+        port = int(os.getenv("REDIS_PORT", "6379"))
         
         try:
             # Check if running

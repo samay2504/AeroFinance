@@ -1151,7 +1151,8 @@ class LLMWrapper:
         try:
             if config.get("redis_enabled"):
                 import redis
-                redis_url = config.get("redis_url", "redis://localhost:6379/0")
+                # Read from config, then env, then fallback
+                redis_url = config.get("redis_url") or os.getenv("REDIS_URL", "redis://localhost:6379/0")
                 self._redis_client = redis.from_url(redis_url)
                 self._redis_client.ping()
                 logger.info("Redis cache connected")
