@@ -3,6 +3,18 @@ LLM Wrapper - Orchestrates LLM calls with caching, retry logic, structured outpu
 Integrates with llm_provider for multi-provider orchestration.
 Includes structured interaction logging for observability.
 """
+# CRITICAL: Apply DLL fix FIRST before any imports that might trigger torch/transformers loading
+import sys
+import os
+
+# Must be done before any other imports on Windows
+if sys.platform == 'win32':
+    try:
+        from app.core.dll_fix import apply_dll_fix
+        apply_dll_fix()
+    except ImportError:
+        pass
+
 import logging
 import logging.handlers
 import time
@@ -10,16 +22,9 @@ from typing import Any, Dict, List, Optional, Union, Callable
 import json
 import re
 import hashlib
-import os
-import sys
 from datetime import datetime, timedelta
 from functools import wraps
 from pathlib import Path
-
-# Prevent transformers from loading torch which causes DLL issues on Windows
-# We don't use HuggingFace models, so this is safe
-os.environ['TRANSFORMERS_OFFLINE'] = '1'
-os.environ['HF_HUB_DISABLE_TELEMETRY'] = '1'
 
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from langchain_core.prompts import PromptTemplate
@@ -1364,7 +1369,15 @@ class LLMWrapper:
             if not content:
                 return {"error": "Empty response from LLM", "fallback": True}
 
-            # Parse JSON
+            # Use RobustJSONParser for production-grade JSON parsing
+            try:
+                from app.core.llm_utils import RobustJSONParser
+                return RobustJSONParser.parse(content)
+            except ImportError:
+                # Fallback to basic parsing if utilities not available
+                pass
+
+            # Basic JSON parsing fallback
             try:
                 return json.loads(content)
             except json.JSONDecodeError:

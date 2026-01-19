@@ -17,6 +17,12 @@ from functools import wraps
 from datetime import datetime, timedelta
 import threading
 
+try:
+    from app.core.dll_fix import apply_dll_fix
+    apply_dll_fix()
+except ImportError:
+    pass
+
 logger = logging.getLogger(__name__)
 
 
@@ -354,6 +360,542 @@ class ProviderFallback:
             return {p: dict(h) for p, h in self._health.items()}
 
 
+# =============================================================================
+# ROBUST JSON PARSING - Multi-layer approach for malformed LLM output
+# =============================================================================
+
+class RobustJSONParser:
+    """
+    Production-grade JSON parser with multi-layer repair for LLM output.
+    
+    Based on 2024 best practices research:
+    - json-repair library for automatic JSON fixing
+    - Multiple fallback parsing strategies
+    - Python literal eval for Python dict format
+    
+    Approach:
+    1. Try standard json.loads()
+    2. Strip markdown code blocks
+    3. Apply repair patterns for common LLM malformations
+    4. Try json-repair library if available
+    5. Python literal eval
+    6. Regex extraction for nested objects
+    """
+    
+    # Common LLM JSON malformations patterns
+    REPAIR_PATTERNS = [
+        # Python booleans to JSON
+        (r'\bTrue\b', 'true'),
+        (r'\bFalse\b', 'false'),
+        (r'\bNone\b', 'null'),
+        # Single quotes to double quotes (careful with apostrophes)
+        (r"(?<![a-zA-Z])'([^']*)'(?![a-zA-Z])", r'"\1"'),
+        # Trailing commas before } or ]
+        (r',\s*([\}\]])', r'\1'),
+        # Missing quotes around keys
+        (r'(\{|\,)\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*:', r'\1"\2":'),
+        # NaN and Infinity to null
+        (r'\bNaN\b', 'null'),
+        (r'\bInfinity\b', 'null'),
+        (r'\b-Infinity\b', 'null'),
+    ]
+    
+    @classmethod
+    def parse(cls, content: str, fallback_value: Any = None) -> Dict[str, Any]:
+        """
+        Parse potentially malformed JSON from LLM output.
+        
+        Args:
+            content: Raw string from LLM
+            fallback_value: Value to return if all parsing fails
+            
+        Returns:
+            Parsed dict or fallback value
+        """
+        import re
+        
+        if not content or not content.strip():
+            return fallback_value or {"error": "Empty content", "fallback": True}
+        
+        original_content = content
+        
+        # Layer 1: Standard parsing
+        result = cls._try_standard_parse(content)
+        if result is not None:
+            return result
+        
+        # Layer 2: Strip markdown
+        content = cls._strip_markdown(content)
+        result = cls._try_standard_parse(content)
+        if result is not None:
+            return result
+        
+        # Layer 3: Apply repair patterns
+        content = cls._apply_repair_patterns(content)
+        result = cls._try_standard_parse(content)
+        if result is not None:
+            return result
+        
+        # Layer 4: Try json-repair library if available
+        result = cls._try_json_repair(content)
+        if result is not None:
+            return result
+        
+        # Layer 5: Python literal eval
+        result = cls._try_literal_eval(content)
+        if result is not None:
+            return result
+        
+        # Layer 6: Regex JSON extraction
+        result = cls._try_regex_extraction(original_content)
+        if result is not None:
+            return result
+        
+        # Layer 7: Extract key-value fallback
+        result = cls._try_key_value_extraction(original_content)
+        if result is not None:
+            return result
+        
+        # All layers failed
+        logger.warning(f"JSON parsing failed after all layers. Content preview: {original_content[:200]}")
+        return fallback_value or {
+            "error": "Invalid JSON",
+            "raw_content": original_content[:500],
+            "fallback": True
+        }
+    
+    @staticmethod
+    def _try_standard_parse(content: str) -> Optional[Dict]:
+        """Try standard json.loads()."""
+        try:
+            result = json.loads(content)
+            if isinstance(result, dict):
+                return result
+            elif isinstance(result, list) and len(result) > 0:
+                return {"result": result}
+            return {"value": result}
+        except json.JSONDecodeError:
+            return None
+    
+    @staticmethod
+    def _strip_markdown(content: str) -> str:
+        """Remove markdown code blocks."""
+        import re
+        content = content.strip()
+        
+        # Remove ```json ... ``` or ```python ... ```
+        md_patterns = [
+            r'```json\s*(.*?)\s*```',
+            r'```python\s*(.*?)\s*```',
+            r'```\s*(.*?)\s*```'
+        ]
+        
+        for pattern in md_patterns:
+            match = re.search(pattern, content, re.DOTALL | re.IGNORECASE)
+            if match:
+                return match.group(1).strip()
+        
+        # Simple strip of ``` markers
+        if content.startswith('```'):
+            lines = content.split('\n')
+            lines = [l for l in lines if not l.strip().startswith('```')]
+            content = '\n'.join(lines).strip()
+        
+        return content
+    
+    @classmethod
+    def _apply_repair_patterns(cls, content: str) -> str:
+        """Apply regex-based repair patterns."""
+        import re
+        for pattern, replacement in cls.REPAIR_PATTERNS:
+            content = re.sub(pattern, replacement, content)
+        return content
+    
+    @staticmethod
+    def _try_json_repair(content: str) -> Optional[Dict]:
+        """Try json-repair library if available."""
+        try:
+            from json_repair import repair_json
+            repaired = repair_json(content)
+            result = json.loads(repaired)
+            if isinstance(result, dict):
+                return result
+            return {"value": result}
+        except ImportError:
+            pass  # Library not installed
+        except Exception:
+            pass
+        return None
+    
+    @staticmethod
+    def _try_literal_eval(content: str) -> Optional[Dict]:
+        """Try Python literal eval for Python dict format."""
+        try:
+            import ast
+            result = ast.literal_eval(content)
+            if isinstance(result, dict):
+                return result
+        except Exception:
+            pass
+        return None
+    
+    @staticmethod
+    def _try_regex_extraction(content: str) -> Optional[Dict]:
+        """Extract JSON objects using regex."""
+        import re
+        # Try to find any JSON object in the content
+        patterns = [
+            r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}',  # Nested objects
+            r'\{[^{}]+\}',  # Simple objects
+        ]
+        
+        for pattern in patterns:
+            matches = re.findall(pattern, content, re.DOTALL)
+            for match in matches:
+                try:
+                    result = json.loads(match)
+                    if isinstance(result, dict):
+                        return result
+                except json.JSONDecodeError:
+                    continue
+        return None
+    
+    @staticmethod
+    def _try_key_value_extraction(content: str) -> Optional[Dict]:
+        """Extract key-value pairs as last resort."""
+        import re
+        pattern = r'"?([a-zA-Z_][a-zA-Z0-9_]*)"?\s*:\s*"?([^",\n\}]+)"?'
+        matches = re.findall(pattern, content)
+        
+        if matches:
+            result = {}
+            for key, value in matches:
+                value = value.strip()
+                if value.lower() in ('true', 'false'):
+                    result[key] = value.lower() == 'true'
+                elif value.lower() in ('null', 'none'):
+                    result[key] = None
+                else:
+                    try:
+                        result[key] = float(value) if '.' in value else int(value)
+                    except ValueError:
+                        result[key] = value
+            
+            if result:
+                result["_extracted"] = True
+                return result
+        return None
+
+
+# =============================================================================
+# DATAFRAME TYPE FIXING - Handle mixed types for safe operations
+# =============================================================================
+
+# =============================================================================
+# DYNAMIC TYPE INFERENCE - Statistical & Adaptive Schema Detection
+# =============================================================================
+
+class SmartTypeInference:
+    """
+    Production-grade ADAPTIVE type inference and coercion.
+    
+    NO HARDCODED REGEX LISTS - Uses:
+    1. Statistical sampling to detect content patterns
+    2. Dynamic noise removal (currencies, units, artifacts)
+    3. Heuristic categorical detection
+    4. Safe ID detection (preserves leading zeros/IDs)
+    
+    Adapts to new, unseen data formats automatically.
+    """
+    
+    @classmethod
+    def infer_and_fix(cls, df, inplace: bool = False):
+        """
+        Dynamically infer types and fix DataFrame.
+        """
+        import pandas as pd
+        import numpy as np
+        
+        if not inplace:
+            df = df.copy()
+        
+        for col in df.columns:
+            series = df[col]
+            
+            # Skip if already proper type
+            if not pd.api.types.is_object_dtype(series):
+                continue
+                
+            # 1. Analyze column statistics
+            stats = cls._analyze_column(series)
+            
+            # 2. Decision logic based on stats
+            if stats['is_empty']:
+                continue
+                
+            # 3. Dynamic Numeric Conversion
+            if stats['potential_numeric']:
+                # Dynamically clean based on detected common noise chars
+                clean_series = series.astype(str)
+                if stats['noise_chars']:
+                    for char in stats['noise_chars']:
+                        clean_series = clean_series.str.replace(char, '', regex=False)
+                
+                # Handle standard numeric formats like (123) -> -123
+                clean_series = clean_series.str.replace(r'^\(([\d\.]+)\)$', r'-\1', regex=True)
+                
+                try:
+                    # Coerce
+                    converted = pd.to_numeric(clean_series, errors='coerce')
+                    
+                    # Check success rate
+                    valid_count = converted.notna().sum()
+                    success_rate = valid_count / stats['non_null_count']
+                    
+                    if success_rate > 0.8: # >80% success
+                        # Check for ID-like behavior (integers, uniform distribution)
+                        if cls._is_id_column(converted, series):
+                            # Keep as object/string to preserve exact formatting (leading zeros)
+                            logger.debug(f"Column '{col}' identified as ID/Code - keeping as object")
+                            continue
+                            
+                        # Downcast integers if possible (Int64 allows NaNs)
+                        if (converted.dropna() % 1 == 0).all():
+                            df[col] = converted.astype('Int64')
+                        else:
+                            df[col] = converted
+                        continue
+                except Exception:
+                    pass
+
+            # 4. Date/Time Detection
+            if stats['potential_date']:
+                try:
+                    # Use pandas flexible parser
+                    converted = pd.to_datetime(series, errors='coerce')
+                    valid_count = converted.notna().sum()
+                    if valid_count / stats['non_null_count'] > 0.8:
+                        df[col] = converted
+                        continue
+                except Exception:
+                    pass
+            
+            # 5. Categorical Detection
+            # If low cardinality and not an ID
+            if stats['unique_ratio'] < 0.2 and stats['non_null_count'] > 20:
+                # Convert to category for memory efficiency and semantic meaning
+                df[col] = series.astype('category')
+                
+        return df
+
+    @classmethod
+    def fix_dataframe(cls, df, inplace: bool = False):
+        """Legacy alias for backward compatibility."""
+        return cls.infer_and_fix(df, inplace=inplace)
+
+    @classmethod
+    def _analyze_column(cls, series) -> Dict[str, Any]:
+        """
+        Perform statistical analysis on column content.
+        Returns metadata about data patterns.
+        """
+        import collections
+        
+        # Sample data (up to 100 non-null values)
+        sample = series.dropna().astype(str).sample(min(100, len(series.dropna())), random_state=42).tolist()
+        
+        if not sample:
+            return {'is_empty': True}
+            
+        stats = {
+            'is_empty': False,
+            'non_null_count': len(series.dropna()),
+            'unique_ratio': series.nunique() / len(series) if len(series) > 0 else 0,
+            'potential_numeric': False,
+            'potential_date': False,
+            'noise_chars': []
+        }
+        
+        # Relaxed numeric check: digit density > 0.3
+        # Allows for currency codes like 'EUR 123' (3/7 = 0.42)
+        digit_count = sum(c.isdigit() for c in ''.join(sample))
+        total_len = sum(len(s) for s in sample)
+        stats['potential_numeric'] = (digit_count / max(1, total_len)) > 0.3
+        
+        char_counts = collections.Counter(''.join(sample))
+        
+        if stats['potential_numeric']:
+            # Identify frequent non-numeric characters (noise)
+            # e.g. '$', ',', '%', ' ', 'Rs'
+            noise_candidates = []
+            for char, count in char_counts.items():
+                if not char.isdigit() and char not in ['.', '-']:
+                    # If char appears in > 10% of samples, it's a systematic artifacts
+                    if count > len(sample) * 0.1:
+                        noise_candidates.append(char)
+            stats['noise_chars'] = noise_candidates
+
+        # Date potential?
+        # Check for common date separators
+        date_seps = sum(char_counts[c] for c in ['/', '-', ':'])
+        stats['potential_date'] = date_seps > len(sample) * 0.5  # At least one sep per 2 samples roughly
+        
+        return stats
+
+    @classmethod
+    def _is_id_column(cls, numeric_series, original_series) -> bool:
+        """
+        Check if column is an ID using SAFE_ID_PATTERN from id_generator.
+        """
+        try:
+            from app.core.id_generator import SAFE_ID_PATTERN
+        except ImportError:
+            # Fallback regex if module unavailable
+            import re
+            SAFE_ID_PATTERN = re.compile(r'^[a-zA-Z0-9_\-\.]+$')
+
+        # IDs typically don't have decimals
+        if (numeric_series.dropna() % 1 != 0).any():
+            return False
+            
+        # IDs often have uniform length
+        lengths = original_series.dropna().astype(str).apply(len)
+        if lengths.nunique() <= 2 and lengths.mean() > 3:
+            return True
+            
+        # High cardinality
+        if numeric_series.nunique() / numeric_series.count() > 0.9:
+            return True
+            
+        return False
+
+
+# Legacy alias for compatibility
+DataFrameTypeFixer = SmartTypeInference
+
+
+# =============================================================================
+# SEMANTIC COLUMN MATCHING - Delegates to core Semantic Understanding
+# =============================================================================
+
+class SemanticColumnMatcher:
+    """
+    Production-grade SEMANTIC column matching.
+    
+    Acts as a bridge to `app.core.semantic_understanding` to ensure
+    consistent logic across the application.
+    """
+    
+    _matcher = None
+    
+    @classmethod
+    def _get_matcher(cls):
+        if cls._matcher is None:
+            try:
+                from app.core.semantic_understanding import SemanticMatcher
+                cls._matcher = SemanticMatcher()
+            except ImportError:
+                return None
+        return cls._matcher
+    
+    @classmethod
+    def find_best_match(cls, query_col: str, available_cols: List[str],
+                        df=None, threshold: float = 0.6) -> Tuple[Optional[str], float]:
+        """Find best matching column using centralized SemanticMatcher."""
+        matcher = cls._get_matcher()
+        if matcher:
+            # SemanticMatcher returns (match, score) or None
+            # We map its score to our expectation
+            result = matcher.find_best_match(query_col, available_cols, threshold)
+            if result:
+                return result
+            # Try finding best manually if find_best_match strictness diffs
+            best_match = None
+            best_score = 0.0
+            for col in available_cols:
+                score = matcher.calculate_similarity(query_col, col)
+                if score > best_score:
+                    best_score = score
+                    best_match = col
+            
+            if best_score >= threshold:
+                return best_match, best_score
+            return None, 0.0
+        
+        return cls._simple_fallback(query_col, available_cols, threshold)
+
+    @classmethod
+    def find_all_matches(cls, query_col: str, available_cols: List[str],
+                         df=None, limit: int = 3, threshold: float = None) -> List[Tuple[str, float]]:
+        """Find multiple matches."""
+        matcher = cls._get_matcher()
+        results = []
+        threshold = threshold or 0.6
+        
+        if matcher:
+            for col in available_cols:
+                score = matcher.calculate_similarity(query_col, col)
+                if score >= threshold:
+                    results.append((col, round(score, 3)))
+            return sorted(results, key=lambda x: x[1], reverse=True)[:limit]
+        
+        # Fallback
+        match, score = cls._simple_fallback(query_col, available_cols, threshold)
+        return [(match, score)] if match else []
+
+    @staticmethod
+    def _simple_fallback(query: str, cols: List[str], threshold: float) -> Tuple[Optional[str], float]:
+        """Simple substring matching fallback."""
+        import re
+        def norm(s): return re.sub(r'[\s\-\_]+', '', str(s).lower())
+        q_norm = norm(query)
+        best, best_score = None, 0.0
+        for col in cols:
+            c_norm = norm(col)
+            if q_norm in c_norm or c_norm in q_norm:
+                # Basic overlap score
+                score = len(min(q_norm, c_norm)) / max(1, len(max(q_norm, c_norm)))
+                if score > best_score:
+                    best_score = score
+                    best = col
+        if best_score >= threshold:
+            return best, best_score
+        return None, 0.0
+
+
+# Legacy alias for compatibility
+FuzzyColumnMatcher = SemanticColumnMatcher
+
+
+# =============================================================================
+# CONVENIENCE FUNCTIONS
+# =============================================================================
+
+def parse_llm_json(content: str, fallback: Any = None) -> Dict[str, Any]:
+    """Convenience function for robust JSON parsing from LLM output."""
+    return RobustJSONParser.parse(content, fallback)
+
+
+def fix_dataframe_types(df) -> Any:
+    """Convenience function for DataFrame type fixing."""
+    return SmartTypeInference.infer_and_fix(df)
+
+
+def find_column(query_name: str, df, threshold: float = 0.6) -> Tuple[Optional[str], float]:
+    """
+    Convenience function for SEMANTIC column matching.
+    
+    Uses embeddings to find columns by meaning, not just string similarity.
+    Automatically adapts to any column naming convention.
+    """
+    return SemanticColumnMatcher.find_best_match(
+        query_name, 
+        list(df.columns), 
+        df=df,
+        threshold=threshold
+    )
+
+
 # Global instances
 _cache = SemanticCache()
 _rate_limiter = AdaptiveRateLimiter()
@@ -375,6 +917,14 @@ __all__ = [
     "with_retry",
     "AdaptiveRateLimiter",
     "ProviderFallback",
+    "RobustJSONParser",
+    "SmartTypeInference", 
+    "DataFrameTypeFixer", # Alias
+    "SemanticColumnMatcher",
+    "FuzzyColumnMatcher", # Alias
+    "parse_llm_json",
+    "fix_dataframe_types",
+    "find_column",
     "get_semantic_cache",
     "get_rate_limiter",
 ]

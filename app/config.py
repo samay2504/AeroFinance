@@ -80,11 +80,54 @@ class CacheSettings(BaseSettings):
         env_prefix = "CACHE_"
 
 
+class DeploymentSettings(BaseSettings):
+    """
+    Deployment environment configuration.
+    
+    Controls storage backend selection based on deployment context:
+    - local: Uses local filesystem + optional Redis
+    - aws: Uses S3 for DataFrames + ElastiCache for metadata
+    
+    Environment Variables:
+        DEPLOYMENT_ENV: 'local' or 'aws'
+        DEPLOYMENT_AWS_S3_BUCKET: S3 bucket name for production
+        DEPLOYMENT_AWS_S3_PREFIX: S3 key prefix for DataFrames
+        AWS_DEFAULT_REGION: AWS region (uses shared AWS config)
+    """
+    env: str = Field(default="local", description="Deployment environment: 'local' or 'aws'")
+    aws_s3_bucket: Optional[str] = Field(default=None, description="S3 bucket for production storage")
+    aws_s3_prefix: str = Field(default="dataframes/", description="S3 key prefix")
+    temp_dir: str = Field(default="/tmp/ai_ca", description="Temp directory for Lambda/serverless")
+    enable_local_cache: bool = Field(default=True, description="Enable local LRU cache even in AWS mode")
+    
+    model_config = {
+        "env_prefix": "DEPLOYMENT_",
+        "extra": "ignore",
+    }
+    
+    @property
+    def aws_region(self) -> str:
+        """Get AWS region from shared AWS_DEFAULT_REGION env var."""
+        return os.getenv("AWS_DEFAULT_REGION", "ap-south-1")
+    
+    @property
+    def is_aws(self) -> bool:
+        """Check if running in AWS mode."""
+        return self.env.lower() == "aws" or bool(self.aws_s3_bucket)
+    
+    @property
+    def is_local(self) -> bool:
+        """Check if running in local mode."""
+        return not self.is_aws
+
+
 class StorageSettings(BaseSettings):
     """File storage configuration."""
     file_store_path: str = Field(default=str(DATA_DIR))
     dataframe_cache_path: str = Field(default=str(CACHE_DIR))
     max_lru_dataframes: int = Field(default=10)
+    parquet_compression: str = Field(default="snappy", description="Parquet compression: snappy, gzip, zstd")
+    max_dataframe_size_mb: int = Field(default=500, description="Max DataFrame size before chunking")
     
     class Config:
         env_prefix = "STORAGE_"
@@ -132,6 +175,7 @@ class Settings(BaseSettings):
     vectordb: VectorDBSettings = Field(default_factory=VectorDBSettings)
     cache: CacheSettings = Field(default_factory=CacheSettings)
     storage: StorageSettings = Field(default_factory=StorageSettings)
+    deployment: DeploymentSettings = Field(default_factory=DeploymentSettings)
     duckdb: DuckDBSettings = Field(default_factory=DuckDBSettings)
     sandbox: SandboxSettings = Field(default_factory=SandboxSettings)
     zmq: ZMQSettings = Field(default_factory=ZMQSettings)
@@ -169,6 +213,7 @@ except Exception as e:
         vectordb=VectorDBSettings.model_construct(),
         cache=CacheSettings.model_construct(),
         storage=StorageSettings.model_construct(),
+        deployment=DeploymentSettings.model_construct(),
         duckdb=DuckDBSettings.model_construct(),
         sandbox=SandboxSettings.model_construct(),
         zmq=ZMQSettings.model_construct(),

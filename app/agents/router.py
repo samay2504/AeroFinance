@@ -13,6 +13,12 @@ from typing import Dict, Any, Optional, List
 from functools import lru_cache
 import hashlib
 
+try:
+    from app.core.dll_fix import apply_dll_fix
+    apply_dll_fix()
+except ImportError:
+    pass
+
 logger = logging.getLogger(__name__)
 
 

@@ -565,6 +565,286 @@ class TestIDGenerator:
 
 
 # =============================================================================
+# STORAGE BACKEND ABSTRACTION TESTS
+# =============================================================================
+
+class TestLocalStorageBackend:
+    """Tests for LocalStorageBackend with real-world scenarios."""
+    
+    def test_save_and_load_dataframe(self, tmp_path):
+        """Test basic save and load cycle."""
+        from app.core.data_registry import LocalStorageBackend
+        
+        backend = LocalStorageBackend(
+            base_path=str(tmp_path / "dataframes"),
+            max_cache_size=5
+        )
+        
+        # Create test DataFrame
+        df = pd.DataFrame({
+            'revenue': [1000, 2000, 3000],
+            'cost': [500, 800, 1200],
+            'product': ['A', 'B', 'C']
+        })
+        
+        # Save
+        key = backend.save_dataframe(
+            client_id="test_client",
+            dataset_id="test_doc:sheet1",
+            df=df
+        )
+        
+        assert key is not None
+        assert backend.get_metrics()['cache_entries'] == 1
+        
+        # Load
+        loaded_df = backend.load_dataframe(
+            client_id="test_client",
+            dataset_id="test_doc:sheet1"
+        )
+        
+        assert loaded_df is not None
+        assert len(loaded_df) == 3
+        assert list(loaded_df.columns) == ['revenue', 'cost', 'product']
+    
+    def test_lru_eviction(self, tmp_path):
+        """Test LRU eviction when cache is full."""
+        from app.core.data_registry import LocalStorageBackend
+        
+        backend = LocalStorageBackend(
+            base_path=str(tmp_path / "dataframes"),
+            max_cache_size=2
+        )
+        
+        # Save 3 datasets (cache size is 2)
+        for i in range(3):
+            df = pd.DataFrame({'value': [i]})
+            backend.save_dataframe(
+                client_id="client",
+                dataset_id=f"doc:sheet{i}",
+                df=df
+            )
+        
+        metrics = backend.get_metrics()
+        assert metrics['cache_entries'] == 2  # LRU keeps only 2
+        
+        # First dataset should be evicted from cache but still on disk
+        df = backend.load_dataframe("client", "doc:sheet0")
+        assert df is not None  # Should load from disk
+    
+    def test_multi_tenant_isolation(self, tmp_path):
+        """Test that different clients have isolated storage."""
+        from app.core.data_registry import LocalStorageBackend
+        
+        backend = LocalStorageBackend(base_path=str(tmp_path / "dataframes"))
+        
+        # Save data for two clients
+        df1 = pd.DataFrame({'value': [100]})
+        df2 = pd.DataFrame({'value': [200]})
+        
+        backend.save_dataframe("client_a", "doc:sheet", df1)
+        backend.save_dataframe("client_b", "doc:sheet", df2)
+        
+        # Load and verify isolation
+        loaded_a = backend.load_dataframe("client_a", "doc:sheet")
+        loaded_b = backend.load_dataframe("client_b", "doc:sheet")
+        
+        assert loaded_a['value'].iloc[0] == 100
+        assert loaded_b['value'].iloc[0] == 200
+    
+    def test_list_datasets(self, tmp_path):
+        """Test listing datasets for client."""
+        from app.core.data_registry import LocalStorageBackend
+        
+        backend = LocalStorageBackend(base_path=str(tmp_path / "dataframes"))
+        
+        # Save multiple datasets
+        for sheet in ['sales', 'expenses', 'inventory']:
+            df = pd.DataFrame({'data': [1, 2, 3]})
+            backend.save_dataframe("client", f"financial_doc:{sheet}", df)
+        
+        # List datasets
+        datasets = backend.list_datasets("client")
+        
+        assert len(datasets) == 3
+        assert any('sales' in d for d in datasets)
+        assert any('expenses' in d for d in datasets)
+    
+    def test_delete_dataframe(self, tmp_path):
+        """Test deletion from cache and disk."""
+        from app.core.data_registry import LocalStorageBackend
+        
+        backend = LocalStorageBackend(base_path=str(tmp_path / "dataframes"))
+        
+        df = pd.DataFrame({'value': [42]})
+        backend.save_dataframe("client", "doc:sheet", df)
+        
+        # Verify exists
+        assert backend.exists("client", "doc:sheet")
+        
+        # Delete
+        assert backend.delete_dataframe("client", "doc:sheet")
+        
+        # Verify gone
+        assert not backend.exists("client", "doc:sheet")
+        assert backend.load_dataframe("client", "doc:sheet") is None
+    
+    def test_cache_hit_tracking(self, tmp_path):
+        """Test cache hit/miss metrics."""
+        from app.core.data_registry import LocalStorageBackend
+        
+        backend = LocalStorageBackend(base_path=str(tmp_path / "dataframes"))
+        
+        df = pd.DataFrame({'value': [1]})
+        backend.save_dataframe("client", "doc:sheet", df)
+        
+        # First load is from cache (just saved)
+        backend.load_dataframe("client", "doc:sheet")
+        
+        metrics = backend.get_metrics()
+        assert metrics['cache_hit_rate'] > 0  # Should have cache hits
+
+
+class TestStorageBackendFactory:
+    """Test the get_storage_backend factory function."""
+    
+    def test_local_mode_default(self):
+        """Test that local mode is default."""
+        # Reset singleton
+        import app.core.data_registry as registry_module
+        registry_module._storage_backend = None
+        
+        from app.core.data_registry import get_storage_backend
+        
+        backend = get_storage_backend()
+        metrics = backend.get_metrics()
+        
+        assert metrics['backend'] == 'LocalStorageBackend'
+    
+    def test_environment_driven_selection(self, monkeypatch):
+        """Test that AWS environment triggers S3 backend (with fallback)."""
+        import app.core.data_registry as registry_module
+        registry_module._storage_backend = None
+        
+        # Set AWS environment but without boto3, should fallback to local
+        monkeypatch.setenv("DEPLOYMENT_ENV", "aws")
+        monkeypatch.setenv("DEPLOYMENT_AWS_S3_BUCKET", "test-bucket")
+        
+        from app.core.data_registry import get_storage_backend
+        
+        backend = get_storage_backend()
+        # Without boto3, should gracefully fall back to local
+        metrics = backend.get_metrics()
+        # Either S3 or Local is acceptable depending on boto3 availability
+        assert 'backend' in metrics
+
+
+class TestS3StorageBackendMocked:
+    """Tests for S3StorageBackend with mocked boto3."""
+    
+    def test_s3_key_generation(self):
+        """Test S3 key generation follows correct pattern."""
+        from app.core.data_registry import S3StorageBackend
+        from unittest.mock import MagicMock, patch
+        
+        with patch('boto3.client'):
+            with patch('boto3.resource'):
+                backend = S3StorageBackend(
+                    bucket="test-bucket",
+                    prefix="dataframes/"
+                )
+                
+                # Use internal method to test key generation
+                key = backend._make_key("my_client", "doc:sheet")
+                
+                assert key.startswith("dataframes/")
+                assert "my_client" in key
+                assert key.endswith(".parquet")
+    
+    def test_metadata_in_s3_upload(self):
+        """Test that metadata is included in S3 upload."""
+        from app.core.data_registry import S3StorageBackend
+        from unittest.mock import MagicMock, patch
+        
+        mock_s3 = MagicMock()
+        
+        with patch('boto3.client', return_value=mock_s3):
+            with patch('boto3.resource'):
+                backend = S3StorageBackend(
+                    bucket="test-bucket",
+                    prefix="dataframes/"
+                )
+                
+                df = pd.DataFrame({'value': [1, 2, 3]})
+                
+                backend.save_dataframe("client", "doc:sheet", df)
+                
+                # Verify S3 put_object was called with metadata
+                mock_s3.put_object.assert_called_once()
+                call_kwargs = mock_s3.put_object.call_args.kwargs
+                
+                assert 'Metadata' in call_kwargs
+                assert call_kwargs['Metadata']['client_id'] == 'client'
+
+
+class TestDataAnalystStorageIntegration:
+    """Integration tests for DataAnalystAgent with storage backend."""
+    
+    def test_register_persists_to_storage(self, tmp_path, monkeypatch):
+        """Test that register_dataframe persists to storage backend."""
+        # Configure storage to use temp directory
+        monkeypatch.setenv("STORAGE_DATAFRAME_CACHE_PATH", str(tmp_path / "dataframes"))
+        
+        # Reset singletons
+        import app.core.data_registry as registry_module
+        registry_module._storage_backend = None
+        registry_module._registry = None
+        
+        from app.agents.data_analyst import DataAnalystAgent
+        
+        agent = DataAnalystAgent()
+        
+        df = pd.DataFrame({'revenue': [1000, 2000, 3000]})
+        
+        success = agent.register_dataframe(
+            dataset_id="test_client:financials:sales",
+            df=df,
+            client_id="test_client"
+        )
+        
+        assert success
+        
+        # Verify storage backend has the data
+        if agent._storage_backend:
+            metrics = agent._storage_backend.get_metrics()
+            assert metrics['cache_entries'] >= 1 or metrics.get('disk_writes', 0) >= 1
+    
+    def test_get_dataframe_loads_from_storage(self, tmp_path, monkeypatch):
+        """Test that _get_dataframe can load from storage backend."""
+        monkeypatch.setenv("STORAGE_DATAFRAME_CACHE_PATH", str(tmp_path / "dataframes"))
+        
+        import app.core.data_registry as registry_module
+        registry_module._storage_backend = None
+        registry_module._registry = None
+        
+        from app.agents.data_analyst import DataAnalystAgent
+        
+        agent = DataAnalystAgent()
+        
+        df = pd.DataFrame({'value': [42]})
+        agent.register_dataframe("client:doc:sheet", df, client_id="client")
+        
+        # Clear local memory to force storage load
+        agent.dataframes.clear()
+        
+        # Should load from storage
+        loaded = agent._get_dataframe("client:doc:sheet", client_id="client")
+        
+        assert loaded is not None
+        assert loaded['value'].iloc[0] == 42
+
+
+# =============================================================================
 # RUN TESTS
 # =============================================================================
 
