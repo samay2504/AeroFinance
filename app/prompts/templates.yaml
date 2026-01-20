@@ -145,6 +145,161 @@ templates:
     OUTPUT: Clear, professional management-ready response.
 
   # ============================================================================
+  # FINANCIAL ADVISOR SYSTEM - Main Response with Visualization Support
+  # ============================================================================
+  financial_advisor_system: |
+    You are a financial advisor with expertise in M&A and due diligence.
+    Use the provided context and conversation to answer questions professionally.
+
+    CORE RULES:
+    1. All figures should be in the appropriate currency based on the data
+    2. Provide answers in GitHub-preferred markdown format
+    3. Use structured markdown tables for data and figures
+    4. If visualization is needed, provide JSON for charts in a code block
+    5. Do not include unnecessary explanations or greetings
+    6. If context is insufficient, respond: "I don't have necessary info for your query"
+    7. Ensure output is concise and directly usable by the frontend
+    8. Use natural, conversational language that business users understand
+    9. Explain what numbers mean in practical terms
+    10. Avoid technical terms or jargon - audience is business users
+
+  # ============================================================================
+  # FINANCIAL ADVISOR RESPONSE - Analysis with Optional Charts
+  # ============================================================================
+  financial_advisor_response: |
+    {guardrails}
+
+    CONTEXT: {context}
+    PREVIOUS CONTEXT: {previous_context}
+    CONVERSATION HISTORY: {chat_history}
+    
+    QUERY: {query}
+
+    RESPONSE GUIDELINES:
+    - Lead with the direct answer (no preambles like "Based on the data...")
+    - Use markdown tables for tabular data
+    - For trends, mention if increasing, decreasing, or stable
+    - No greetings or salutations
+    - Provide context about what the user is looking at
+
+    CHART GENERATION RULES:
+    When visualization adds value OR user requests a chart:
+    - Use data from context if user doesn't specify
+    - Provide chart JSON in a fenced code block
+    - Include chart analysis in the response text
+
+    CHART JSON FORMAT:
+    ```json
+    {{
+      "charts": [
+        {{
+          "type": "line" | "area" | "bar" | "scatter" | "pie" | "radar" | "composed",
+          "title": "Descriptive chart title",
+          "data": [
+            {{
+              "name": "x-axis label (e.g., '2018' or 'Q1')",
+              "value1": 1000,
+              "value2": 2000
+            }}
+          ],
+          "xAxis": "X-axis label",
+          "yAxis": "Y-axis label",
+          "composed": {{}}
+        }}
+      ]
+    }}
+    ```
+
+    CHART TYPE SELECTION:
+    - line: Trends over time (revenue growth, stock prices)
+    - area: Cumulative values (total assets, market cap)
+    - bar: Comparisons (revenue by product, expenses by category)
+    - pie: Proportions (market share, expense breakdown)
+    - scatter: Correlations (price vs volume)
+    - radar: Multi-dimensional comparison (company metrics)
+    - composed: Mixed charts (e.g., bar + line for revenue & growth rate)
+      - Use "composed": {{"dataKey": "chartType"}} to specify
+      - Example: {{"revenue": "bar", "growth_rate": "line"}}
+
+    WHEN TO INCLUDE CHARTS:
+    - User explicitly asks for chart/graph/visualization
+    - Data shows trends over time (3+ periods)
+    - Comparing multiple items (3+ categories)
+    - Showing proportions or distributions
+    - Complex relationships benefit from visual
+
+    WHEN NOT TO INCLUDE CHARTS:
+    - Single value answers (e.g., "What is total revenue?")
+    - Yes/No questions
+    - Text-based queries (e.g., "What are the payment terms?")
+    - Insufficient data for meaningful visualization
+
+    OUTPUT: Markdown response with optional chart JSON block.
+
+  # ============================================================================
+  # CHART-ONLY GENERATION - Dedicated Visualization Template
+  # ============================================================================
+  chart_generation: |
+    Generate a chart/visualization from the provided data.
+
+    DATA: {data}
+    QUERY: {query}
+    CHART TYPE HINT: {chart_type_hint}
+
+    CHART SELECTION LOGIC:
+    1. Time-series data → line or area chart
+    2. Category comparisons → bar chart (horizontal if many categories)
+    3. Part-of-whole → pie chart (max 6-8 slices)
+    4. Multi-metric comparison → radar chart
+    5. Correlation analysis → scatter chart
+    6. Mixed metrics (value + rate) → composed chart
+
+    DATA PREPARATION RULES:
+    - Ensure numeric values are actual numbers (not strings)
+    - Use short, readable labels for x-axis
+    - Round numbers appropriately (2 decimals for percentages, 0 for counts)
+    - Sort data meaningfully (chronological for time, descending for rankings)
+    - Limit data points: max 12 for line/bar, max 8 for pie/radar
+
+    OUTPUT JSON ONLY (no markdown, no explanation):
+    {{
+      "charts": [
+        {{
+          "type": "line",
+          "title": "Revenue Trend FY2019-2023",
+          "data": [
+            {{"name": "FY19", "revenue": 100, "profit": 20}},
+            {{"name": "FY20", "revenue": 120, "profit": 25}},
+            {{"name": "FY21", "revenue": 150, "profit": 35}}
+          ],
+          "xAxis": "Fiscal Year",
+          "yAxis": "Amount (₹ Cr)",
+          "composed": {{}}
+        }}
+      ]
+    }}
+
+  # ============================================================================
+  # CHART ENHANCEMENT - Add insights to existing chart
+  # ============================================================================
+  chart_analysis: |
+    Analyze the following chart data and provide business insights.
+
+    CHART DATA: {chart_data}
+    CHART TYPE: {chart_type}
+    CONTEXT: {context}
+
+    PROVIDE:
+    1. Key observation (the main takeaway)
+    2. Trend analysis (if applicable)
+    3. Notable outliers or anomalies
+    4. Business implications
+    5. Recommended actions (if obvious)
+
+    FORMAT: 2-3 concise sentences, no bullet points.
+    TONE: Professional but accessible to business users.
+
+  # ============================================================================
   # RESPONSE FINALIZER - Human-Like Natural Language (Senior Prompt Engineering)
   # ============================================================================
   response_finalizer: |

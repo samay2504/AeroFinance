@@ -48,7 +48,7 @@ except ImportError as e:
 
 
 # ==============================================================================
-# HUMAN-LIKE RESPONSE FORMATTER - LLM-Powered Natural Language
+# HUMAN-LIKE RESPONSE FORMATTER - LLM-Powered Natural Language with Chart Support
 # ==============================================================================
 def format_human_response(
     query: str,
@@ -62,11 +62,16 @@ def format_human_response(
     """
     Generate human-like, conversational responses using LLM.
     
-    Transforms raw values into natural language sentences.
+    Now supports chart generation for visualization queries.
+    Transforms raw values into natural language sentences with optional charts.
     """
     from app.core.llm_wrapper import get_llm_wrapper
+    from app.core.prompts import ChartExtractor, get_financial_advisor_prompt
     
     result_str = str(result) if result is not None else ""
+    
+    # Detect if user wants a chart
+    wants_chart, chart_type_hint = ChartExtractor.detect_chart_intent(query)
     
     # Build context for LLM
     data_context = f"""
@@ -81,7 +86,18 @@ Explanation: {explanation}
     try:
         llm = get_llm_wrapper()
         
-        prompt = f"""You are a professional AI Chartered Accountant. Convert this data analysis result into a natural, human-like response.
+        if wants_chart:
+            # Use financial advisor prompt with chart generation
+            sys_prompt, user_prompt = get_financial_advisor_prompt(
+                query=query,
+                context=data_context,
+                force_chart=True,
+                chart_type_hint=chart_type_hint
+            )
+            natural_response = llm.invoke(f"{sys_prompt}\n\n{user_prompt}")
+        else:
+            # Standard response formatting
+            prompt = f"""You are a professional AI Chartered Accountant. Convert this data analysis result into a natural, human-like response.
 
 {data_context}
 
@@ -100,24 +116,35 @@ Examples:
 
 Now generate a natural response:"""
 
-        natural_response = llm.invoke(prompt)
+            natural_response = llm.invoke(prompt)
+        
+        # Extract charts if present
+        clean_text, charts = ChartExtractor.extract_charts(natural_response)
         
         # Clean up response
-        if natural_response:
-            natural_response = natural_response.strip()
-            # Remove any leading "Response:" or similar
+        if clean_text:
+            clean_text = clean_text.strip()
+            # Remove any leading prefixes
             for prefix in ["Response:", "Answer:", "Result:", "Natural response:"]:
-                if natural_response.lower().startswith(prefix.lower()):
-                    natural_response = natural_response[len(prefix):].strip()
+                if clean_text.lower().startswith(prefix.lower()):
+                    clean_text = clean_text[len(prefix):].strip()
             
-            response = f"📊 {natural_response}"
+            response = f"📊 {clean_text}"
         else:
             # Fallback to simple formatting
             response = _format_simple_response(query, result, value)
+        
+        # Add chart display if charts were generated
+        if charts:
+            response += "\n\n📈 **Chart Generated:**"
+            for i, chart in enumerate(charts):
+                response += f"\n```json\n{json.dumps(chart, indent=2)}\n```"
+                response += f"\n*(Type: {chart['type']}, Title: {chart['title']}, Data points: {len(chart['data'])})*"
             
     except Exception as e:
         # Fallback to simple formatting
         response = _format_simple_response(query, result, value)
+        logger.debug(f"LLM formatting failed: {e}")
     
     # Add collapsible source details
     response += "\n\n---"
@@ -125,6 +152,8 @@ Now generate a natural response:"""
     response += f"\n- **Dataset:** `{source}`"
     response += f"\n- **Method:** `{method}`"
     response += f"\n- **Response time:** {elapsed:.2f}s"
+    if wants_chart:
+        response += f"\n- **Chart requested:** Yes ({chart_type_hint or 'auto'})"
     response += f"\n</details>"
     
     return response
@@ -1006,12 +1035,20 @@ def show_help():
 ║   @web <query>          - Force web search track                       ║
 ║   @doc <query>          - Force document search track                  ║
 ║                                                                        ║
+║ CHART/VISUALIZATION:                                                   ║
+║   Ask for charts using keywords like:                                  ║
+║   - "chart", "graph", "plot", "visualize"                              ║
+║   - "trend", "growth", "YoY", "CAGR"                                   ║
+║   - "breakdown", "comparison", "distribution"                          ║
+║                                                                        ║
 ║ EXAMPLES:                                                              ║
 ║   load "D:\\Data\\NSE-DATA.xlsx"                                       ║
 ║   summary                                                              ║
 ║   sample nifty                                                         ║
 ║   What are the top 5 volume gainers?                                   ║
-║   What are the sheet names?                                            ║
+║   Show me a line chart of revenue trend                                ║
+║   Create a bar chart comparing expenses by category                    ║
+║   Pie chart of expense breakdown                                       ║
 ║   @web What is the current repo rate in India?                         ║
 ╚════════════════════════════════════════════════════════════════════════╝
 """)
