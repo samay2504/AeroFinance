@@ -588,6 +588,260 @@ class RobustJSONParser:
 
 
 # =============================================================================
+# SQL/CODE EXTRACTION - Extract SQL/Python from prose LLM responses
+# =============================================================================
+
+class SQLCodeExtractor:
+    """
+    Production-grade SQL and Python code extractor for when LLM returns prose.
+    
+    Based on 2024 research best practices:
+    - Two-step approach: When JSON fails, extract code directly
+    - Multiple extraction patterns for robustness
+    - Handles markdown, inline code, and natural language references
+    
+    Usage:
+        extractor = SQLCodeExtractor()
+        result = extractor.extract_sql(llm_response)
+        if result['success']:
+            sql = result['sql']
+    """
+    
+    # SQL patterns in order of specificity
+    SQL_PATTERNS = [
+        # Markdown SQL code block
+        r'```sql\s*(SELECT.*?)```',
+        r'```SQL\s*(SELECT.*?)```',
+        # Generic code block with SELECT
+        r'```\s*(SELECT.*?)```',
+        # Inline SQL with quotes
+        r'["\'](SELECT\s+.*?)["\']',
+        # Raw SELECT statement (greedy but terminated)
+        r'\b(SELECT\s+(?:DISTINCT\s+)?(?:[\w\.\*\"\'\(\)\s,]+)\s+FROM\s+[\w\.\"\'\s,]+(?:\s+WHERE\s+.*?)?(?:\s+(?:GROUP|ORDER|LIMIT|HAVING)\s+.*?)?)\s*(?:;|$|\n\n)',
+        # Simpler SELECT pattern
+        r'\b(SELECT\s+.+?\s+FROM\s+\w+.*?)(?:;|$)',
+    ]
+    
+    # Python patterns
+    PYTHON_PATTERNS = [
+        # Markdown Python code block
+        r'```python\s*(def\s+run.*?)```',
+        r'```Python\s*(def\s+run.*?)```',
+        # Generic code block with def run
+        r'```\s*(def\s+run.*?)```',
+        # Inline function definition
+        r'(def\s+run\s*\(.*?\):\s*(?:.*?\n)+?\s*return\s+.*)',
+    ]
+    
+    @classmethod
+    def extract_sql(cls, content: str) -> Dict[str, Any]:
+        """
+        Extract SQL query from LLM response.
+        
+        Args:
+            content: Raw LLM response text
+            
+        Returns:
+            {
+                "success": bool,
+                "sql": str or None,
+                "explanation": str,
+                "extraction_method": str
+            }
+        """
+        import re
+        
+        if not content or not content.strip():
+            return {
+                "success": False,
+                "sql": None,
+                "explanation": "Empty content",
+                "extraction_method": "none"
+            }
+        
+        # Try each pattern
+        for i, pattern in enumerate(cls.SQL_PATTERNS):
+            try:
+                match = re.search(pattern, content, re.DOTALL | re.IGNORECASE)
+                if match:
+                    sql = match.group(1).strip()
+                    # Validate it looks like SQL
+                    if cls._is_valid_sql(sql):
+                        return {
+                            "success": True,
+                            "sql": sql,
+                            "explanation": f"Extracted from pattern {i+1}",
+                            "extraction_method": f"pattern_{i+1}"
+                        }
+            except Exception as e:
+                logger.debug(f"SQL extraction pattern {i+1} failed: {e}")
+                continue
+        
+        # Last resort: Look for SELECT...FROM anywhere
+        select_match = re.search(r'\bSELECT\b', content, re.IGNORECASE)
+        from_match = re.search(r'\bFROM\b', content, re.IGNORECASE)
+        
+        if select_match and from_match and from_match.start() > select_match.start():
+            # Extract everything between SELECT and the next statement terminator
+            start = select_match.start()
+            # Find end: semicolon, double newline, or end of content
+            end_patterns = [r';', r'\n\n', r'\n(?=[A-Z][a-z])', r'$']
+            end_pos = len(content)
+            
+            for ep in end_patterns:
+                m = re.search(ep, content[start:])
+                if m:
+                    candidate_end = start + m.end()
+                    if candidate_end < end_pos:
+                        end_pos = candidate_end
+                    break
+            
+            sql = content[start:end_pos].strip().rstrip(';').strip()
+            if cls._is_valid_sql(sql):
+                return {
+                    "success": True, 
+                    "sql": sql,
+                    "explanation": "Extracted using keyword boundaries",
+                    "extraction_method": "keyword_boundary"
+                }
+        
+        return {
+            "success": False,
+            "sql": None,
+            "explanation": "No valid SQL found in response",
+            "extraction_method": "none"
+        }
+    
+    @classmethod
+    def extract_python(cls, content: str) -> Dict[str, Any]:
+        """
+        Extract Python code (specifically run(df) function) from LLM response.
+        
+        Args:
+            content: Raw LLM response text
+            
+        Returns:
+            {
+                "success": bool,
+                "code": str or None,
+                "explanation": str,
+                "extraction_method": str
+            }
+        """
+        import re
+        
+        if not content or not content.strip():
+            return {
+                "success": False,
+                "code": None,
+                "explanation": "Empty content",
+                "extraction_method": "none"
+            }
+        
+        # Try Python patterns
+        for i, pattern in enumerate(cls.PYTHON_PATTERNS):
+            try:
+                match = re.search(pattern, content, re.DOTALL)
+                if match:
+                    code = match.group(1).strip()
+                    if 'def run' in code and 'return' in code:
+                        return {
+                            "success": True,
+                            "code": code,
+                            "explanation": f"Extracted from pattern {i+1}",
+                            "extraction_method": f"pattern_{i+1}"
+                        }
+            except Exception:
+                continue
+        
+        # Try to find def run even without code blocks
+        run_match = re.search(
+            r'(def\s+run\s*\(\s*df\s*\)\s*:\s*\n(?:[ \t]+.*\n)*)',
+            content,
+            re.MULTILINE
+        )
+        if run_match:
+            code = run_match.group(1).strip()
+            return {
+                "success": True,
+                "code": code,
+                "explanation": "Extracted function definition",
+                "extraction_method": "function_def"
+            }
+        
+        return {
+            "success": False,
+            "code": None,
+            "explanation": "No valid Python code found",
+            "extraction_method": "none"
+        }
+    
+    @staticmethod
+    def _is_valid_sql(sql: str) -> bool:
+        """Basic validation that string looks like valid SQL."""
+        if not sql or len(sql) < 10:
+            return False
+        
+        sql_upper = sql.upper()
+        
+        # Must have SELECT and FROM
+        if 'SELECT' not in sql_upper or 'FROM' not in sql_upper:
+            return False
+        
+        # Should not contain obvious prose
+        prose_indicators = [
+            'I WOULD', 'I THINK', 'YOU SHOULD', 'PLEASE NOTE',
+            'HOWEVER', 'UNFORTUNATELY', 'THE QUERY', 'THIS QUERY'
+        ]
+        for indicator in prose_indicators:
+            if indicator in sql_upper:
+                return False
+        
+        return True
+    
+    @classmethod
+    def enhance_json_response(cls, parsed_json: Dict[str, Any], raw_content: str) -> Dict[str, Any]:
+        """
+        Enhance a partially failed JSON parse by extracting SQL/code.
+        
+        If the JSON has error/fallback flags but the raw content contains
+        valid SQL or code, extract and add it.
+        
+        Args:
+            parsed_json: Result from RobustJSONParser.parse()
+            raw_content: Original raw LLM response
+            
+        Returns:
+            Enhanced JSON with sql/code if extraction succeeded
+        """
+        # Check if this is a failed parse that we can enhance
+        if not parsed_json.get("fallback") and not parsed_json.get("error"):
+            return parsed_json  # Already good
+        
+        # Try SQL extraction
+        if "sql" not in parsed_json or not parsed_json.get("sql"):
+            sql_result = cls.extract_sql(raw_content)
+            if sql_result["success"]:
+                parsed_json["sql"] = sql_result["sql"]
+                parsed_json["explanation"] = sql_result.get("explanation", "SQL extracted from response")
+                parsed_json.pop("error", None)
+                parsed_json.pop("fallback", None)
+                logger.info(f"Enhanced JSON with extracted SQL: {sql_result['extraction_method']}")
+        
+        # Try Python extraction
+        if "code" not in parsed_json or not parsed_json.get("code"):
+            code_result = cls.extract_python(raw_content)
+            if code_result["success"]:
+                parsed_json["code"] = code_result["code"]
+                parsed_json["explanation"] = code_result.get("explanation", "Code extracted from response")
+                parsed_json.pop("error", None)
+                parsed_json.pop("fallback", None)
+                logger.info(f"Enhanced JSON with extracted code: {code_result['extraction_method']}")
+        
+        return parsed_json
+
+
+# =============================================================================
 # DATAFRAME TYPE FIXING - Handle mixed types for safe operations
 # =============================================================================
 

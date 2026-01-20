@@ -38,19 +38,19 @@ if sys.platform == 'win32':
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
-# Add torch DLL directory to PATH before importing torch
+
+# Apply DLL fix using centralized module (not hardcoded paths)
 if sys.platform == 'win32':
-    torch_lib = r'd:\Projects2.0\Valuenaire\.conda\Lib\site-packages\torch\lib'
-    if os.path.exists(torch_lib):
-        os.environ['PATH'] = torch_lib + os.pathsep + os.environ.get('PATH', '')
-        try:
-            os.add_dll_directory(torch_lib)
-        except Exception:
-            pass
+    # Add project root to path first (before imports)
+    import pathlib
+    _project_root = pathlib.Path(__file__).parent.parent
+    sys.path.insert(0, str(_project_root))
     try:
-        import torch  # noqa
-    except Exception:
+        from app.core.dll_fix import apply_dll_fix
+        apply_dll_fix()
+    except ImportError:
         pass
+
 
 import time
 import json
@@ -63,9 +63,10 @@ from enum import Enum
 import warnings
 warnings.filterwarnings("ignore")
 
-# Add project root to path
+# Define PROJECT_ROOT (for non-Windows or for later use)
 PROJECT_ROOT = Path(__file__).parent.parent
-sys.path.insert(0, str(PROJECT_ROOT))
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 # Setup logging
 logging.basicConfig(

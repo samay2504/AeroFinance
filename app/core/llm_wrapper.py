@@ -1372,8 +1372,14 @@ class LLMWrapper:
 
             # Use RobustJSONParser for production-grade JSON parsing
             try:
-                from app.core.llm_utils import RobustJSONParser
-                return RobustJSONParser.parse(content)
+                from app.core.llm_utils import RobustJSONParser, SQLCodeExtractor
+                parsed = RobustJSONParser.parse(content)
+                
+                # If parsing failed or returned fallback, try to enhance with SQL/code extraction
+                if parsed.get("fallback") or parsed.get("error"):
+                    parsed = SQLCodeExtractor.enhance_json_response(parsed, content)
+                
+                return parsed
             except ImportError:
                 # Fallback to basic parsing if utilities not available
                 pass
@@ -1405,6 +1411,14 @@ class LLMWrapper:
                     return {
                         "code": code_match.group(1).strip(),
                         "explanation": "Extracted from code block"
+                    }
+                
+                # Extract SQL from prose (last resort)
+                sql_match = re.search(r'\b(SELECT\s+.+?\s+FROM\s+\w+.*?)(?:;|$)', content, re.DOTALL | re.IGNORECASE)
+                if sql_match:
+                    return {
+                        "sql": sql_match.group(1).strip(),
+                        "explanation": "SQL extracted from prose response"
                     }
 
                 return {"error": "Invalid JSON", "raw_content": content[:500], "fallback": True}
