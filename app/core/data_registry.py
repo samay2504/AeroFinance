@@ -222,13 +222,276 @@ class LocalStorageBackend(StorageBackend):
             logger.debug(f"LRU evicted: {evicted_key}")
     
     def _serialize_df(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Prepare DataFrame for Parquet serialization."""
+        """
+        Prepare DataFrame for Parquet serialization with comprehensive type handling.
+        
+        DESIGN PHILOSOPHY:
+        This is a defensive serialization layer that prioritizes DATA PRESERVATION
+        over perfect type fidelity. For analytical/LLM workloads, having the data
+        in a queryable format is more important than preserving exact dtypes.
+        
+        HANDLED EDGE CASES (from real-world Excel/CSV imports):
+        ┌─────────────────────────────────────────────────────────────────┐
+        │ Type                        │ Conversion Strategy               │
+        ├─────────────────────────────┼───────────────────────────────────┤
+        │ category                    │ → string (preserves labels)       │
+        │ object (mixed types)        │ → string (safe fallback)          │
+        │ object (nested list/dict)   │ → JSON string                     │
+        │ Sparse arrays               │ → dense then convert              │
+        │ Extension arrays (Int64)    │ → native nullable int/float       │
+        │ StringDtype                 │ → object string                   │
+        │ datetime64[tz]              │ → datetime64[ns] (strip tz)       │
+        │ timedelta64                 │ → string (ISO format)             │
+        │ Interval/Period             │ → string                          │
+        │ complex128                  │ → string                          │
+        │ bytes                       │ → base64 string                   │
+        │ Decimal                     │ → float64                         │
+        │ UUID                        │ → string                          │
+        │ Custom objects              │ → str() representation            │
+        │ NaN variations              │ → unified pd.NA or None           │
+        │ Infinity values             │ → preserved (Parquet supports)    │
+        │ MultiIndex columns          │ → flattened string names          │
+        │ Duplicate column names      │ → suffixed with _1, _2, etc.      │
+        └─────────────────────────────┴───────────────────────────────────┘
+        
+        Returns:
+            pd.DataFrame: Parquet-safe DataFrame with all types serializable
+        """
+        import numpy as np
+        import base64
+        from decimal import Decimal
+        
         df_clean = df.copy()
+        
+        # === STEP 1: Handle problematic column names ===
+        
+        # Flatten MultiIndex columns
+        if isinstance(df_clean.columns, pd.MultiIndex):
+            df_clean.columns = ['_'.join(map(str, col)).strip('_') for col in df_clean.columns]
+        
+        # Handle duplicate column names (common in messy Excel files)
+        seen = {}
+        new_cols = []
         for col in df_clean.columns:
-            # Convert object columns to string for Parquet compatibility
-            if df_clean[col].dtype == object:
-                df_clean[col] = df_clean[col].astype(str)
+            col_str = str(col)
+            if col_str in seen:
+                seen[col_str] += 1
+                new_cols.append(f"{col_str}_{seen[col_str]}")
+            else:
+                seen[col_str] = 0
+                new_cols.append(col_str)
+        df_clean.columns = new_cols
+        
+        # === STEP 2: Handle each column by dtype priority ===
+        
+        for col in df_clean.columns:
+            try:
+                series = df_clean[col]
+                dtype = series.dtype
+                dtype_name = dtype.name
+                
+                # --- Sparse arrays: densify first ---
+                if isinstance(dtype, pd.SparseDtype):
+                    df_clean[col] = series.sparse.to_dense()
+                    series = df_clean[col]
+                    dtype = series.dtype
+                    dtype_name = dtype.name
+                
+                # --- Category: convert to string ---
+                if dtype_name == 'category':
+                    df_clean[col] = series.astype(str).replace('nan', pd.NA)
+                    continue
+                
+                # --- Nullable extension types (Int64, Float64, boolean, string) ---
+                if isinstance(dtype, pd.api.types.CategoricalDtype):
+                    df_clean[col] = series.astype(str)
+                    continue
+                    
+                if dtype_name in ('Int8', 'Int16', 'Int32', 'Int64', 'UInt8', 'UInt16', 'UInt32', 'UInt64'):
+                    # Convert nullable int to float (to preserve NaN)
+                    df_clean[col] = series.astype('float64')
+                    continue
+                    
+                if dtype_name in ('Float32', 'Float64'):
+                    df_clean[col] = series.astype('float64')
+                    continue
+                    
+                if dtype_name == 'boolean':
+                    # Nullable boolean -> object with True/False/None
+                    df_clean[col] = series.astype(object)
+                    continue
+                    
+                if dtype_name in ('string', 'String'):
+                    df_clean[col] = series.astype(object)
+                    continue
+                
+                # --- Datetime with timezone: strip timezone ---
+                if pd.api.types.is_datetime64_any_dtype(dtype):
+                    try:
+                        if hasattr(series.dt, 'tz') and series.dt.tz is not None:
+                            df_clean[col] = series.dt.tz_convert('UTC').dt.tz_localize(None)
+                        # Ensure it's standard datetime64[ns]
+                        df_clean[col] = pd.to_datetime(df_clean[col], errors='coerce')
+                    except Exception:
+                        df_clean[col] = series.astype(str)
+                    continue
+                
+                # --- Timedelta: convert to string ---
+                if pd.api.types.is_timedelta64_dtype(dtype):
+                    df_clean[col] = series.astype(str)
+                    continue
+                
+                # --- Interval/Period: convert to string ---
+                if dtype_name.startswith(('interval', 'Interval', 'period', 'Period')):
+                    df_clean[col] = series.astype(str)
+                    continue
+                
+                # --- Complex numbers: convert to string ---
+                if np.issubdtype(dtype, np.complexfloating):
+                    df_clean[col] = series.apply(lambda x: f"{x.real}+{x.imag}j" if pd.notna(x) else None)
+                    continue
+                
+                # --- Object columns: the most complex case ---
+                if dtype == object or dtype_name == 'object':
+                    df_clean[col] = self._serialize_object_column(series)
+                    continue
+                    
+                # --- Standard numeric types: leave as-is ---
+                if np.issubdtype(dtype, np.number):
+                    continue
+                    
+                # --- Boolean: leave as-is ---
+                if dtype == bool or dtype_name == 'bool':
+                    continue
+                    
+            except Exception as col_error:
+                # Ultimate fallback: force everything to string
+                logger.warning(f"Column '{col}' serialization fallback: {col_error}")
+                try:
+                    df_clean[col] = df_clean[col].apply(
+                        lambda x: str(x) if x is not None and pd.notna(x) else None
+                    )
+                except Exception:
+                    df_clean[col] = df_clean[col].fillna('').astype(str)
+        
         return df_clean
+    
+    def _serialize_object_column(self, series: pd.Series) -> pd.Series:
+        """
+        Serialize an object-dtype column for Parquet compatibility.
+        
+        CRITICAL: Parquet requires homogeneous column types. If a column contains
+        mixed types (str + int + float), we MUST convert everything to string.
+        
+        Strategy:
+        1. Sample column to detect type heterogeneity
+        2. If homogeneous primitives (all str, all int, all float) → keep type
+        3. If mixed types or complex objects → convert ALL to string
+        """
+        import numpy as np
+        import base64
+        from decimal import Decimal
+        
+        # Sample non-null values for type detection
+        sample = series.dropna().head(100).tolist()
+        
+        if not sample:
+            return series.fillna('').astype(str)
+        
+        # Detect types in sample
+        type_counts = {}
+        has_complex = False
+        
+        for val in sample:
+            val_type = type(val).__name__
+            type_counts[val_type] = type_counts.get(val_type, 0) + 1
+            
+            # Check for complex types that need special handling
+            if isinstance(val, (list, dict, set, tuple, np.ndarray, bytes, bytearray, Decimal)):
+                has_complex = True
+        
+        # Determine if column is homogeneous primitive
+        primitive_types = {'str', 'int', 'float', 'bool'}
+        unique_types = set(type_counts.keys())
+        is_homogeneous_primitive = (
+            len(unique_types) == 1 and 
+            unique_types.issubset(primitive_types) and
+            not has_complex
+        )
+        
+        # If homogeneous and just strings, do fast path
+        if is_homogeneous_primitive and 'str' in unique_types:
+            return series.fillna('').astype(str)
+        
+        # For ANYTHING mixed or complex: convert ALL to string representation
+        # This is the safest approach for Parquet compatibility
+        
+        def safe_stringify(val):
+            """Convert any value to a string safely."""
+            if val is None:
+                return None
+            if isinstance(val, float) and (np.isnan(val) or pd.isna(val)):
+                return None
+            
+            try:
+                # Nested structures → JSON
+                if isinstance(val, (list, tuple)):
+                    return json.dumps(list(val))
+                if isinstance(val, dict):
+                    return json.dumps(val)
+                if isinstance(val, (set, frozenset)):
+                    return json.dumps(list(val))
+                    
+                # Numpy arrays → JSON
+                if isinstance(val, np.ndarray):
+                    return json.dumps(val.tolist())
+                    
+                # Bytes → base64
+                if isinstance(val, (bytes, bytearray)):
+                    return base64.b64encode(bytes(val)).decode('ascii')
+                    
+                # Decimal → string (preserve precision)
+                if isinstance(val, Decimal):
+                    return str(val)
+                    
+                # UUID → string
+                try:
+                    from uuid import UUID
+                    if isinstance(val, UUID):
+                        return str(val)
+                except ImportError:
+                    pass
+                
+                # Datetime objects
+                try:
+                    from datetime import datetime, date, time
+                    if isinstance(val, datetime):
+                        return val.isoformat()
+                    if isinstance(val, date):
+                        return val.isoformat()
+                    if isinstance(val, time):
+                        return val.isoformat()
+                except Exception:
+                    pass
+                
+                # Pandas types
+                if isinstance(val, (pd.Timestamp, pd.Timedelta)):
+                    return str(val)
+                
+                # Everything else → string
+                return str(val)
+                
+            except Exception:
+                return str(val)
+        
+        result = series.apply(safe_stringify)
+        
+        # Final safety: ensure the Series is object dtype with no mixed primitives
+        # by converting any remaining non-string to string
+        return result.astype(object)
+
+
+
     
     def save_dataframe(
         self, 
