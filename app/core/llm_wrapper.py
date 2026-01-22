@@ -380,8 +380,8 @@ LOG_RETENTION_CONFIG = {
     # S3 upload settings
     "s3": {
         "batch_upload_interval_hours": int(os.getenv("LOG_S3_BATCH_INTERVAL_HOURS", "24")),
-        "bucket": os.getenv("S3_LOG_BUCKET"),
-        "prefix": os.getenv("S3_LOG_PREFIX", "logs/ai-ca"),
+        "bucket": os.getenv("LOG_S3_BUCKET", os.getenv("DEPLOYMENT_AWS_S3_BUCKET")),
+        "prefix": os.getenv("LOG_S3_PREFIX", "logs/ai-ca"),
     }
 }
 
@@ -1737,7 +1737,7 @@ class LLMWrapper:
                     self._llm_provider = new_provider
                     self.llm = new_provider.llm
                     self.provider_name = new_provider.current_provider
-                    logger.info(f"✅ Switched to: {self.provider_name}")
+                    logger.info(f"[OK] Switched to: {self.provider_name}")
                     return True
                 else:
                     self._failed_providers.add(provider_name)

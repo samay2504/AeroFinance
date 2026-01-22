@@ -162,15 +162,32 @@ class ZMQSettings(BaseSettings):
         env_prefix = "ZMQ_"
 
 
+class LoggingSettings(BaseSettings):
+    """Logging configuration."""
+    level: str = Field(default="INFO")
+    format: str = Field(default="json")
+    dir: str = Field(default="./data/logs")
+    to_s3: bool = Field(default=False)
+    s3_bucket: Optional[str] = Field(default=None)
+    s3_prefix: str = Field(default="logs/ai-ca")
+    high_value_retention_days: int = Field(default=365)
+    medium_value_retention_days: int = Field(default=14)
+    low_value_retention_hours: int = Field(default=72)
+    s3_batch_interval_hours: int = Field(default=24)
+
+    class Config:
+        env_prefix = "LOG_"
+
+
 class Settings(BaseSettings):
     """Main application settings."""
     app_name: str = Field(default="AI-CA")
     debug: bool = Field(default=False)
-    log_level: str = Field(default="INFO")
     host: str = Field(default="0.0.0.0")
     port: int = Field(default=8000)
     
     # Sub-settings
+    logging: LoggingSettings = Field(default_factory=LoggingSettings)
     llm: LLMSettings = Field(default_factory=LLMSettings)
     vectordb: VectorDBSettings = Field(default_factory=VectorDBSettings)
     cache: CacheSettings = Field(default_factory=CacheSettings)

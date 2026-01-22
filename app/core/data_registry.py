@@ -1004,7 +1004,7 @@ class DataRegistry:
                 client = UpstashRedis(url=url, token=auth_token)
                 # Verify
                 client.get("test_connection")
-                logger.info("✅ Connected to Upstash Redis")
+                logger.info("[OK] Connected to Upstash Redis")
                 return client
             except Exception as e:
                 logger.warning(f"Upstash connection failed: {e}")
@@ -1017,7 +1017,7 @@ class DataRegistry:
                 logger.info(f"Connecting to standard Redis: {url}")
                 client = redis.from_url(url, decode_responses=True)
                 client.ping()
-                logger.info("✅ Connected to standard Redis")
+                logger.info("[OK] Connected to standard Redis")
                 return client
             except Exception as e:
                 logger.warning(f"Standard Redis failed: {e}")
@@ -1072,7 +1072,7 @@ class DataRegistry:
             local_url = f"redis://localhost:{port}/0"
             client = redis.from_url(local_url, decode_responses=True)
             client.ping()
-            logger.info("✅ Connected to Local Docker Redis")
+            logger.info("[OK] Connected to Local Docker Redis")
             return client
             
         except Exception as e:

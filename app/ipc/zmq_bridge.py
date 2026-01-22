@@ -98,45 +98,33 @@ class ZMQBridge:
                     logger.error(f"ZMQ listener error: {e}")
 
     def _process_message(self, message: str) -> Dict[str, Any]:
-        """Process incoming JSON message."""
+        from app.core.id_generator import generate_request_id
+        
         try:
             data = json.loads(message)
         except json.JSONDecodeError as e:
-            return {"error": f"Invalid JSON: {e}", "request_id": None}
+            req_id = generate_request_id()
+            return {"status": "error", "request_id": req_id, "data": None, "error": {"code": "INVALID_JSON", "message": str(e)}}
 
         action = data.get("action")
-        request_id = data.get("request_id")
+        request_id = data.get("request_id") or generate_request_id()
         payload = data.get("payload", {})
 
         if not action:
-            return {
-                "error": "Missing action field",
-                "request_id": request_id
-            }
+            return {"status": "error", "request_id": request_id, "data": None, "error": {"code": "MISSING_ACTION", "message": "Missing action field"}}
 
         handler = self._handlers.get(action)
         if not handler:
-            return {
-                "error": f"Unknown action: {action}",
-                "request_id": request_id,
-                "available_actions": list(self._handlers.keys())
-            }
+            return {"status": "error", "request_id": request_id, "data": None, "error": {"code": "UNKNOWN_ACTION", "message": f"Unknown action: {action}", "available_actions": list(self._handlers.keys())}}
 
         try:
             result = handler(payload)
-            return {
-                "success": True,
-                "request_id": request_id,
-                "action": action,
-                "result": result
-            }
+            is_streaming = result.get("streaming", False) if isinstance(result, dict) else False
+            return {"status": "ok", "request_id": request_id, "data": result, "error": None, "meta": {"action": action, "streaming": is_streaming}}
         except Exception as e:
             logger.error(f"Handler error for {action}: {e}")
-            return {
-                "error": str(e),
-                "request_id": request_id,
-                "action": action
-            }
+            return {"status": "error", "request_id": request_id, "data": None, "error": {"code": "HANDLER_ERROR", "message": str(e)}}
+
 
 
 # Default handlers

@@ -4,8 +4,9 @@ Production-grade Agentic AI Chartered Accountant RAG System.
 """
 import sys
 import os
+import time
+from collections import defaultdict
 
-# Windows DLL path fix
 try:
     from app.core.dll_fix import apply_dll_fix
     apply_dll_fix()
@@ -15,22 +16,136 @@ except ImportError:
 import logging
 import argparse
 import json
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 from pathlib import Path
 from contextlib import asynccontextmanager
+from datetime import datetime
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Query
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Query, Request, Header
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 import uvicorn
 
-# Configure logging
+from app.core.id_generator import generate_request_id, get_iso_timestamp, normalize_client_id
+from app.config import settings
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     handlers=[logging.StreamHandler(sys.stdout)]
 )
 logger = logging.getLogger("ai-ca")
+
+MAX_UPLOAD_SIZE_MB = int(os.getenv("MAX_UPLOAD_SIZE_MB", "50"))
+ALLOWED_EXTENSIONS = {"xlsx", "xls", "csv", "pdf", "docx", "json"}
+RATE_LIMIT_REQUESTS = int(os.getenv("RATE_LIMIT_REQUESTS", "100"))
+RATE_LIMIT_WINDOW_SEC = int(os.getenv("RATE_LIMIT_WINDOW_SEC", "60"))
+
+_rate_limit_store: Dict[str, List[float]] = defaultdict(list)
+
+
+class APIEnvelope(BaseModel):
+    status: str = Field(..., description="'ok' or 'error'")
+    request_id: str = Field(..., description="Unique request identifier")
+    data: Optional[Any] = Field(None, description="Response payload")
+    error: Optional[Dict[str, Any]] = Field(None, description="Error details if status=error")
+
+
+def make_response(
+    data: Any = None, 
+    request_id: str = None,
+    status: str = "ok",
+    error_code: str = None,
+    error_message: str = None
+) -> Dict[str, Any]:
+    request_id = request_id or generate_request_id()
+    if status == "error":
+        return {
+            "status": "error",
+            "request_id": request_id,
+            "data": None,
+            "error": {"code": error_code or "UNKNOWN_ERROR", "message": error_message or "An error occurred"}
+        }
+    return {"status": "ok", "request_id": request_id, "data": data, "error": None}
+
+
+def log_request(
+    request_id: str,
+    route: str,
+    user_id: str = None,
+    doc_id: str = None,
+    status: str = "ok",
+    duration_ms: float = 0,
+    extra: Dict[str, Any] = None,
+    log_type: str = "request"
+):
+    log_entry = {
+        "timestamp": get_iso_timestamp(),
+        "level": "INFO" if status == "ok" else "ERROR",
+        "request_id": request_id,
+        "route": route,
+        "status": status,
+        "duration_ms": round(duration_ms, 2),
+        "log_type": log_type
+    }
+    if user_id:
+        log_entry["user_id"] = user_id
+    if doc_id:
+        log_entry["doc_id"] = doc_id
+    if extra:
+        log_entry.update({k: v for k, v in extra.items() if k not in ("content", "file_content", "data", "password", "token")})
+    
+    logger.info(json.dumps(log_entry))
+    
+    
+    log_base = Path(settings.logging.dir)
+    try:
+        date_str = datetime.utcnow().strftime('%Y-%m-%d')
+        safe_client = normalize_client_id(user_id) if user_id else "system"
+        
+        if log_type == "request":
+            log_dir = log_base / "requests" / safe_client / date_str
+        elif log_type == "upload":
+            log_dir = log_base / "uploads" / safe_client / date_str
+        elif log_type == "query":
+            log_dir = log_base / "queries" / safe_client / date_str
+        elif log_type == "error":
+            log_dir = log_base / "errors" / safe_client / date_str
+        else:
+            log_dir = log_base / "misc" / safe_client / date_str
+        
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_file = log_dir / f"{request_id}.json"
+        with open(log_file, 'w', encoding='utf-8') as f:
+            json.dump(log_entry, f, indent=2, ensure_ascii=False)
+    except Exception:
+        pass
+    
+    if settings.logging.to_s3:
+        try:
+            from app.core.data_registry import get_data_registry
+            registry = get_data_registry()
+            if hasattr(registry, '_backend') and hasattr(registry._backend, '_s3_client'):
+                bucket = settings.logging.s3_bucket or settings.deployment.aws_s3_bucket
+                if bucket:
+                    prefix = settings.logging.s3_prefix.strip("/")
+                    s3_key = f"{prefix}/{log_type}/{safe_client}/{date_str}/{request_id}.json"
+                    registry._backend._s3_client.put_object(
+                        Bucket=bucket, Key=s3_key, Body=json.dumps(log_entry, ensure_ascii=False).encode('utf-8')
+                    )
+        except Exception:
+            pass
+
+
+def check_rate_limit(client_key: str) -> bool:
+    now = time.time()
+    window_start = now - RATE_LIMIT_WINDOW_SEC
+    _rate_limit_store[client_key] = [t for t in _rate_limit_store[client_key] if t > window_start]
+    if len(_rate_limit_store[client_key]) >= RATE_LIMIT_REQUESTS:
+        return False
+    _rate_limit_store[client_key].append(now)
+    return True
 
 
 # Request/Response models
@@ -132,9 +247,10 @@ app.add_middleware(
 from app.core.prompts import format_natural_response as _format_natural_response
 
 
-@app.get("/health", response_model=HealthResponse)
-async def health_check():
-    """Health check endpoint."""
+@app.get("/health")
+async def health_check(x_request_id: Optional[str] = Header(None)):
+    request_id = x_request_id or generate_request_id()
+    start_time = time.time()
     from app.config import settings
     
     components = {"api": "ok", "sql_engine": "unknown", "vector_db": "unknown", "llm": "unknown"}
@@ -160,106 +276,107 @@ async def health_check():
     except Exception:
         components["llm"] = "error"
     
-    return HealthResponse(
-        status="ok",
-        version="1.0.0",
-        provider=components["llm"],
-        components=components
+    uptime_s = int(time.time() - start_time)
+    log_request(request_id, "/health", duration_ms=(time.time() - start_time) * 1000)
+    return make_response(
+        data={"version": "1.0.0", "provider": components["llm"], "components": components, "uptime_s": uptime_s},
+        request_id=request_id
     )
 
 
-@app.post("/v1/ai-ca/upload", response_model=UploadResponse)
+@app.post("/v1/ai-ca/upload")
 async def upload_file(
     file: UploadFile = File(...),
     client_id: str = Form(...),
-    ingest_all: bool = Form(True)
+    ingest_all: bool = Form(True),
+    x_request_id: Optional[str] = Header(None)
 ):
-    """Upload and ingest Excel/CSV/JSON file with unique document ID generation."""
+    request_id = x_request_id or generate_request_id()
+    start_time = time.time()
+    doc_id = None
+    safe_client = normalize_client_id(client_id)
+    
     try:
+        if not check_rate_limit(safe_client):
+            return JSONResponse(
+                status_code=429,
+                content=make_response(request_id=request_id, status="error", error_code="RATE_LIMIT_EXCEEDED", error_message="Too many requests")
+            )
+        
+        filename = file.filename or "uploaded_file"
+        ext = filename.rsplit('.', 1)[-1].lower() if '.' in filename else ''
+        
+        if ext not in ALLOWED_EXTENSIONS:
+            log_request(request_id, "/v1/ai-ca/upload", user_id=safe_client, status="error", duration_ms=(time.time() - start_time) * 1000)
+            return JSONResponse(
+                status_code=400,
+                content=make_response(request_id=request_id, status="error", error_code="INVALID_INPUT", error_message=f"Unsupported file type: .{ext}. Allowed: {', '.join(ALLOWED_EXTENSIONS)}")
+            )
+        
+        content = await file.read()
+        size_mb = len(content) / (1024 * 1024)
+        if size_mb > MAX_UPLOAD_SIZE_MB:
+            log_request(request_id, "/v1/ai-ca/upload", user_id=safe_client, status="error", duration_ms=(time.time() - start_time) * 1000)
+            return JSONResponse(
+                status_code=400,
+                content=make_response(request_id=request_id, status="error", error_code="INVALID_INPUT", error_message=f"File too large: {size_mb:.1f}MB. Max: {MAX_UPLOAD_SIZE_MB}MB")
+            )
+        
         from app.core.data_registry import get_data_registry
         from app.agents.data_analyst import get_data_analyst_agent
         from app.core.id_generator import generate_doc_id, generate_dataset_id
         
         registry = get_data_registry()
         agent = get_data_analyst_agent()
+        doc_id = generate_doc_id(safe_client, filename)
+        dataset_ids = []
+        sheet_names = []
+        sheets_count = 0
         
-        # Read file content
-        content = await file.read()
-        filename = file.filename or "uploaded_file"
-        
-        # Generate unique document ID
-        doc_id = generate_doc_id(client_id, filename)
-        logger.info(f"Generated doc_id: {doc_id} for {filename}")
-        
-        # Register callback with proper hierarchical IDs
         def register_cb(dataset_id: str, df, metadata: dict):
-            # Build proper hierarchical dataset ID: client:doc:sheet
+            nonlocal sheets_count
             sheet_name = dataset_id.split(':')[-1] if ':' in dataset_id else dataset_id
-            full_dataset_id = generate_dataset_id(client_id, doc_id, sheet_name)
-            
-            agent.register_dataframe(
-                full_dataset_id, df,
-                preprocessing_report=metadata.get("preprocessing"),
-                client_id=client_id
-            )
-            # Update the metadata with the full ID
+            full_dataset_id = generate_dataset_id(safe_client, doc_id, sheet_name)
+            agent.register_dataframe(full_dataset_id, df, preprocessing_report=metadata.get("preprocessing"), client_id=safe_client)
             metadata["full_dataset_id"] = full_dataset_id
-        
-        # Detect file type and use appropriate ingestor
-        ext = filename.rsplit('.', 1)[-1].lower() if '.' in filename else ''
+            dataset_ids.append(full_dataset_id)
+            sheet_names.append(sheet_name)
+            sheets_count += 1
         
         if ext == 'json':
-            # JSON file
             from app.ingest.json_ingest import JSONIngestor
             ingestor = JSONIngestor()
-            result = ingestor.ingest_json_file(
-                file_content=content,
-                filename=filename,
-                client_id=client_id,
-                register_callback=register_cb
-            )
+            result = ingestor.ingest_json_file(file_content=content, filename=filename, client_id=safe_client, register_callback=register_cb)
             results = result.get("datasets", [])
             success = result.get("success", False)
-            
         elif ext in ['xlsx', 'xls', 'csv']:
-            # Excel/CSV file
             from app.ingest.excel_ingest import ExcelIngestor
             ingestor = ExcelIngestor()
-            
             if ingest_all:
-                results = ingestor.ingest_all_sheets(
-                    file_content=content,
-                    filename=filename,
-                    client_id=client_id,
-                    register_callback=register_cb
-                )
+                results = ingestor.ingest_all_sheets(file_content=content, filename=filename, client_id=safe_client, register_callback=register_cb)
             else:
-                result = ingestor.ingest_best_sheet(
-                    file_content=content,
-                    filename=filename,
-                    client_id=client_id,
-                    register_callback=register_cb
-                )
+                result = ingestor.ingest_best_sheet(file_content=content, filename=filename, client_id=safe_client, register_callback=register_cb)
                 results = [result]
             success = any(r.get("success") for r in results)
-            
         else:
-            raise HTTPException(
-                status_code=400, 
-                detail=f"Unsupported file type: .{ext}. Supported: .xlsx, .xls, .csv, .json"
-            )
+            success = False
+            results = []
         
-        return UploadResponse(
-            success=success,
-            doc_id=doc_id,
-            datasets=results
+        duration_ms = (time.time() - start_time) * 1000
+        log_request(request_id, "/v1/ai-ca/upload", user_id=safe_client, doc_id=doc_id, status="ok" if success else "error", duration_ms=duration_ms, extra={"sheets_count": sheets_count, "filename": filename}, log_type="upload")
+        
+        return make_response(
+            data={"doc_id": doc_id, "sheet_names": sheet_names, "sheets_count": sheets_count, "dataset_ids": dataset_ids, "datasets": results},
+            request_id=request_id
         )
         
-    except HTTPException:
-        raise
     except Exception as e:
+        log_request(request_id, "/v1/ai-ca/upload", user_id=safe_client, doc_id=doc_id, status="error", duration_ms=(time.time() - start_time) * 1000, extra={"error": str(e)}, log_type="error")
         logger.error(f"Upload error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        return JSONResponse(
+            status_code=500,
+            content=make_response(request_id=request_id, status="error", error_code="INTERNAL_ERROR", error_message=str(e))
+        )
 
 
 class JSONIngestRequest(BaseModel):
@@ -650,28 +767,34 @@ async def query(request: QueryRequest):
 
 
 @app.get("/v1/ai-ca/datasets")
-async def list_datasets(client_id: str = Query(...)):
-    """List datasets for a client."""
+async def list_datasets(client_id: str = Query(...), x_request_id: Optional[str] = Header(None)):
+    request_id = x_request_id or generate_request_id()
+    start_time = time.time()
+    safe_client = normalize_client_id(client_id)
+    
     try:
         from app.core.data_registry import get_data_registry
-        
         registry = get_data_registry()
-        datasets = registry.list_for_client(client_id)
+        datasets = registry.list_for_client(safe_client)
         
-        return {
-            "success": True,
-            "client_id": client_id,
-            "datasets": datasets,
-            "count": len(datasets)
-        }
-        
+        log_request(request_id, "/v1/ai-ca/datasets", user_id=safe_client, duration_ms=(time.time() - start_time) * 1000)
+        return make_response(
+            data={"client_id": safe_client, "datasets": datasets, "count": len(datasets)},
+            request_id=request_id
+        )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        log_request(request_id, "/v1/ai-ca/datasets", user_id=safe_client, status="error", duration_ms=(time.time() - start_time) * 1000)
+        return JSONResponse(
+            status_code=500,
+            content=make_response(request_id=request_id, status="error", error_code="INTERNAL_ERROR", error_message=str(e))
+        )
 
 
 @app.get("/v1/ai-ca/metrics")
-async def get_metrics():
-    """Get system metrics."""
+async def get_metrics(x_request_id: Optional[str] = Header(None)):
+    request_id = x_request_id or generate_request_id()
+    start_time = time.time()
+    
     try:
         from app.core.llm_wrapper import get_llm_wrapper
         from app.core.data_registry import get_data_registry
@@ -679,14 +802,99 @@ async def get_metrics():
         llm = get_llm_wrapper()
         registry = get_data_registry()
         
-        return {
-            "llm": llm.get_metrics(),
-            "datasets": len(registry.list_all()),
-            "provider": llm.provider_name
-        }
-        
+        log_request(request_id, "/v1/ai-ca/metrics", duration_ms=(time.time() - start_time) * 1000)
+        return make_response(
+            data={"llm": llm.get_metrics(), "datasets": len(registry.list_all()), "provider": llm.provider_name},
+            request_id=request_id
+        )
     except Exception as e:
-        return {"error": str(e)}
+        log_request(request_id, "/v1/ai-ca/metrics", status="error", duration_ms=(time.time() - start_time) * 1000)
+        return make_response(request_id=request_id, status="error", error_code="INTERNAL_ERROR", error_message=str(e))
+
+
+class IDCreateRequest(BaseModel):
+    user_id: str
+    namespace: Optional[str] = "default"
+    meta: Optional[Dict[str, Any]] = None
+
+
+class IDValidateRequest(BaseModel):
+    id: str
+    user_id: str
+
+
+_id_store: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+
+
+@app.post("/api/ids/create")
+async def create_id(request: IDCreateRequest, x_request_id: Optional[str] = Header(None)):
+    request_id = x_request_id or generate_request_id()
+    start_time = time.time()
+    safe_user = normalize_client_id(request.user_id)
+    
+    try:
+        from app.core.id_generator import generate_short_id
+        
+        new_id = generate_short_id(request.namespace or "id")
+        entry = {
+            "id": new_id,
+            "user_id": safe_user,
+            "namespace": request.namespace or "default",
+            "meta": request.meta or {},
+            "created_at": get_iso_timestamp()
+        }
+        _id_store[safe_user].append(entry)
+        
+        log_request(request_id, "/api/ids/create", user_id=safe_user, duration_ms=(time.time() - start_time) * 1000)
+        return make_response(data={"id": new_id, "user_id": safe_user}, request_id=request_id)
+    except Exception as e:
+        log_request(request_id, "/api/ids/create", user_id=safe_user, status="error", duration_ms=(time.time() - start_time) * 1000)
+        return JSONResponse(
+            status_code=500,
+            content=make_response(request_id=request_id, status="error", error_code="INTERNAL_ERROR", error_message=str(e))
+        )
+
+
+@app.get("/api/ids/list")
+async def list_ids(user_id: str = Query(...), x_request_id: Optional[str] = Header(None)):
+    request_id = x_request_id or generate_request_id()
+    start_time = time.time()
+    safe_user = normalize_client_id(user_id)
+    
+    try:
+        ids = _id_store.get(safe_user, [])
+        log_request(request_id, "/api/ids/list", user_id=safe_user, duration_ms=(time.time() - start_time) * 1000)
+        return make_response(data=ids, request_id=request_id)
+    except Exception as e:
+        log_request(request_id, "/api/ids/list", user_id=safe_user, status="error", duration_ms=(time.time() - start_time) * 1000)
+        return JSONResponse(
+            status_code=500,
+            content=make_response(request_id=request_id, status="error", error_code="INTERNAL_ERROR", error_message=str(e))
+        )
+
+
+@app.post("/api/ids/validate")
+async def validate_id(request: IDValidateRequest, x_request_id: Optional[str] = Header(None)):
+    request_id = x_request_id or generate_request_id()
+    start_time = time.time()
+    safe_user = normalize_client_id(request.user_id)
+    
+    try:
+        from app.core.id_generator import validate_user_id
+        
+        ids = _id_store.get(safe_user, [])
+        match = next((entry for entry in ids if entry["id"] == request.id), None)
+        valid = match is not None
+        meta = match.get("meta", {}) if match else {}
+        
+        log_request(request_id, "/api/ids/validate", user_id=safe_user, duration_ms=(time.time() - start_time) * 1000)
+        return make_response(data={"valid": valid, "meta": meta}, request_id=request_id)
+    except Exception as e:
+        log_request(request_id, "/api/ids/validate", user_id=safe_user, status="error", duration_ms=(time.time() - start_time) * 1000)
+        return JSONResponse(
+            status_code=500,
+            content=make_response(request_id=request_id, status="error", error_code="INTERNAL_ERROR", error_message=str(e))
+        )
 
 
 # CLI Runner
