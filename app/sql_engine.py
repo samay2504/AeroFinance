@@ -64,58 +64,89 @@ class SQLEngine:
 
     def _clean_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        Clean DataFrame for DuckDB registration.
-        - Sanitize column names
-        - Handle NA values
-        - Coerce numeric strings
+        Clean DataFrame for DuckDB registration (Production-Grade).
+        
+        Handles:
+        1. Sanitize column names
+        2. Serialize complex objects (numpy arrays, lists) to JSON
+        3. Handle mixed types
         """
+        import json
+        import numpy as np
+        
         df = df.copy()
 
-        # Sanitize column names
+        # 1. Sanitize column names
         new_columns = {}
         for col in df.columns:
             new_name = self._sanitize_column_name(col)
-            if new_name in new_columns.values():
-                # Handle duplicates
-                i = 1
-                while f"{new_name}_{i}" in new_columns.values():
-                    i += 1
-                new_name = f"{new_name}_{i}"
+            # Handle duplicates
+            original_new_name = new_name
+            i = 1
+            while new_name in new_columns.values():
+                new_name = f"{original_new_name}_{i}"
+                i += 1
             new_columns[col] = new_name
         df.columns = [new_columns[c] for c in df.columns]
 
-        # Clean values (with future-proof pandas API - avoids FutureWarning)
-        na_values = {"Na/p", "N/A", "n/a", "NA", "-", "--", "None", "none", "NULL", "null", ""}
+        # 2. Robust Type Cleaning
         for col in df.columns:
-            if df[col].dtype == object:
-                # Use boolean mask instead of replace() to avoid FutureWarning
-                # This is the pandas 2.x production-grade approach
-                mask = df[col].isin(na_values) | df[col].isna()
-                df.loc[mask, col] = np.nan
-                # Explicitly infer types after NA replacement
-                df[col] = df[col].infer_objects(copy=False)
+            dtype = df[col].dtype
+            
+            # --- Handle Object Type Columns ---
+            if dtype == object:
+                # SAFETY FIRST: Sampling was causing issues (missed numpy arrays deep in file).
+                # New approach: Check a larger sample (up to 1000) or just default to safe serialization
+                # for columns that are likely to contain mixed data.
                 
-                # Try numeric conversion for string columns
-                sample = df[col].dropna().head(10)
-                if len(sample) > 0:
+                # Check first 500 non-nulls (good balance for performance/safety)
+                sample = df[col].dropna().head(500).tolist()
+                
+                has_complex = False
+                if not sample:
+                    # Empirically, empty object cols are often best treated as string
+                    pass
+                else:
+                    # Check for complex types
+                    has_complex = any(isinstance(x, (np.ndarray, list, dict, set, bytes)) for x in sample)
+                
+                if has_complex:
+                    # Serialize complex objects to JSON string
+                    def _safe_serialize(val):
+                        if val is None: return None
+                        if hasattr(val, 'tolist'): return json.dumps(val.tolist()) # Numpy
+                        if isinstance(val, (list, dict, set)): return json.dumps(val)
+                        if isinstance(val, bytes): return val.decode('ascii', errors='ignore')
+                        return str(val)
+                    
+                    df[col] = df[col].apply(_safe_serialize)
+                else:
+                    # Even if no complex types found in sample, we should be careful with mixed str/numeric
                     try:
-                        # Check if looks numeric (with commas, percentages, parens for negative)
-                        test_vals = sample.astype(str).str.replace(",", "").str.replace("%", "")
-                        test_vals = test_vals.str.replace(r"^\((.*)\)$", r"-\1", regex=True)
-                        pd.to_numeric(test_vals, errors="raise")
-                        
-                        # Apply conversion
-                        df[col] = (
+                        # Clean common financial formatting
+                        series_clean = (
                             df[col].astype(str)
-                            .str.replace(",", "")
-                            .str.replace("%", "")
-                            .str.replace(r"^\((.*)\)$", r"-\1", regex=True)
+                            .str.replace(r'[\$,]', '', regex=True)
+                            .str.replace(r'^\((.*)\)$', r'-\1', regex=True)
+                            .str.replace('%', '', regex=False)
                         )
-                        df[col] = pd.to_numeric(df[col], errors="coerce")
-                    except (ValueError, TypeError):
+                        pd.to_numeric(series_clean, errors='raise')
+                        df[col] = pd.to_numeric(series_clean, errors='coerce')
+                    except Exception:
                         pass
 
+            # --- Handle Category ---
+            elif dtype.name == 'category':
+                df[col] = df[col].astype(str).replace('nan', None)
+
+            # --- Handle Datetimes ---
+            elif pd.api.types.is_datetime64_any_dtype(dtype):
+                 if hasattr(df[col].dt, 'tz') and df[col].dt.tz is not None:
+                     df[col] = df[col].dt.tz_localize(None)
+
         return df
+
+
 
     def register_dataframe(
         self,

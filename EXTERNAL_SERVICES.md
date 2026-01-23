@@ -128,6 +128,7 @@ REDIS_TOKEN=your-token
 ENABLE_E2B=true
 E2B_API_KEY=your-key
 ```
+**Requirement**: `pip install e2b-code-interpreter` (for Remote Mode)
 
 ---
 

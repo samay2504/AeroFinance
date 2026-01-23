@@ -382,18 +382,14 @@ class LocalStorageBackend(StorageBackend):
         
         CRITICAL: Parquet requires homogeneous column types. If a column contains
         mixed types (str + int + float), we MUST convert everything to string.
-        
-        Strategy:
-        1. Sample column to detect type heterogeneity
-        2. If homogeneous primitives (all str, all int, all float) → keep type
-        3. If mixed types or complex objects → convert ALL to string
         """
         import numpy as np
         import base64
         from decimal import Decimal
         
-        # Sample non-null values for type detection
-        sample = series.dropna().head(100).tolist()
+        # Increase sample size for better detection (was 100, now 500)
+        # Still keeps performance reasonable while reducing risk of missing outliers
+        sample = series.dropna().head(500).tolist()
         
         if not sample:
             return series.fillna('').astype(str)
@@ -406,7 +402,6 @@ class LocalStorageBackend(StorageBackend):
             val_type = type(val).__name__
             type_counts[val_type] = type_counts.get(val_type, 0) + 1
             
-            # Check for complex types that need special handling
             if isinstance(val, (list, dict, set, tuple, np.ndarray, bytes, bytearray, Decimal)):
                 has_complex = True
         
@@ -424,75 +419,25 @@ class LocalStorageBackend(StorageBackend):
             return series.fillna('').astype(str)
         
         # For ANYTHING mixed or complex: convert ALL to string representation
-        # This is the safest approach for Parquet compatibility
-        
         def safe_stringify(val):
-            """Convert any value to a string safely."""
-            if val is None:
-                return None
-            if isinstance(val, float) and (np.isnan(val) or pd.isna(val)):
-                return None
-            
+            if val is None: return None
+            if isinstance(val, float) and (np.isnan(val) or pd.isna(val)): return None
             try:
-                # Nested structures → JSON
-                if isinstance(val, (list, tuple)):
-                    return json.dumps(list(val))
-                if isinstance(val, dict):
+                if isinstance(val, (list, tuple, dict, set, frozenset, np.ndarray)):
+                    if isinstance(val, np.ndarray): val = val.tolist()
+                    if isinstance(val, (set, frozenset)): val = list(val)
                     return json.dumps(val)
-                if isinstance(val, (set, frozenset)):
-                    return json.dumps(list(val))
-                    
-                # Numpy arrays → JSON
-                if isinstance(val, np.ndarray):
-                    return json.dumps(val.tolist())
-                    
-                # Bytes → base64
                 if isinstance(val, (bytes, bytearray)):
                     return base64.b64encode(bytes(val)).decode('ascii')
-                    
-                # Decimal → string (preserve precision)
-                if isinstance(val, Decimal):
-                    return str(val)
-                    
-                # UUID → string
-                try:
-                    from uuid import UUID
-                    if isinstance(val, UUID):
-                        return str(val)
-                except ImportError:
-                    pass
-                
-                # Datetime objects
-                try:
-                    from datetime import datetime, date, time
-                    if isinstance(val, datetime):
-                        return val.isoformat()
-                    if isinstance(val, date):
-                        return val.isoformat()
-                    if isinstance(val, time):
-                        return val.isoformat()
-                except Exception:
-                    pass
-                
-                # Pandas types
-                if isinstance(val, (pd.Timestamp, pd.Timedelta)):
-                    return str(val)
-                
-                # Everything else → string
+                if isinstance(val, Decimal): return str(val)
+                if isinstance(val, (pd.Timestamp, pd.Timedelta)): return str(val)
                 return str(val)
-                
-            except Exception:
+            except:
                 return str(val)
         
         result = series.apply(safe_stringify)
-        
-        # Final safety: ensure the Series is object dtype with no mixed primitives
-        # by converting any remaining non-string to string
         return result.astype(object)
 
-
-
-    
     def save_dataframe(
         self, 
         client_id: str, 
@@ -500,7 +445,7 @@ class LocalStorageBackend(StorageBackend):
         df: pd.DataFrame,
         metadata: Optional[Dict[str, Any]] = None
     ) -> str:
-        """Save DataFrame to local filesystem with LRU caching."""
+        """Save DataFrame to local filesystem with LRU caching and self-healing resilience."""
         key = self._make_key(client_id, dataset_id)
         path = self._get_path(client_id, dataset_id)
         
@@ -511,18 +456,38 @@ class LocalStorageBackend(StorageBackend):
             self._cache[key] = df
             self._evict_lru()
             
-            # Persist to disk
+            # Persist to disk with Retry/Fallback logic
             try:
                 path.parent.mkdir(parents=True, exist_ok=True)
-                df_clean = self._serialize_df(df)
-                df_clean.to_parquet(path, index=False, compression=self.compression)
-                self._disk_writes += 1
-                logger.debug(f"Saved to disk: {path}")
+                
+                # Attempt 1: Standard Serialization
+                try:
+                    df_clean = self._serialize_df(df)
+                    df_clean.to_parquet(path, index=False, compression=self.compression)
+                    self._disk_writes += 1
+                    logger.debug(f"Saved to disk: {path}")
+                    
+                except Exception as e_parquet:
+                    logger.warning(f"Standard persistence failed for {dataset_id}: {e_parquet}. Retrying with Brute Force cleaning...")
+                    
+                    # Attempt 2: Brute Force Cleaning (Convert ALL object/category cols to string)
+                    # This fixes PyArrow type inference errors on mixed columns
+                    df_retry = df.copy()
+                    for col in df_retry.columns:
+                        if df_retry[col].dtype == object or df_retry[col].dtype.name == 'category':
+                            df_retry[col] = df_retry[col].astype(str)
+                    
+                    # Try saving again
+                    df_retry.to_parquet(path, index=False, compression=self.compression)
+                    self._disk_writes += 1
+                    logger.info(f"Self-healed persistence for {dataset_id} using brute force stringification.")
+
             except Exception as e:
-                logger.error(f"Failed to persist {dataset_id}: {e}")
-                # Data is still in cache, so operation partially succeeded
+                logger.error(f"Failed to persist {dataset_id} after retries: {e}")
+                # Data is still in cache, so operation partially succeeded (System doesn't crash)
         
         return key
+
     
     def load_dataframe(
         self, 
@@ -1231,11 +1196,19 @@ class DataRegistry:
         # Try to persist to Parquet (non-blocking - log errors but don't fail)
         parquet_path = self._parquet_path(dataset_id, safe_client_id)
         try:
-            # Convert object columns to string to avoid Parquet type issues
+            # Convert problematic columns to string to avoid Parquet type issues
             df_clean = df.copy()
             for col in df_clean.columns:
-                if df_clean[col].dtype == object:
+                col_dtype = df_clean[col].dtype
+                # Handle object, category, and mixed-type columns
+                if col_dtype == object or str(col_dtype) == 'category':
                     df_clean[col] = df_clean[col].astype(str)
+                # Handle nullable integer types with mixed data
+                elif 'Int' in str(col_dtype) or 'int' in str(col_dtype).lower():
+                    try:
+                        df_clean[col] = pd.to_numeric(df_clean[col], errors='coerce')
+                    except Exception:
+                        df_clean[col] = df_clean[col].astype(str)
             df_clean.to_parquet(parquet_path, index=False)
             meta["parquet_path"] = str(parquet_path)
         except Exception as e:

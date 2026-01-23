@@ -1453,8 +1453,11 @@ class DataAnalystAgent:
         client_id: Optional[str]
     ) -> Optional[AnalysisResult]:
         """
-        Generate summary using LLM with RAG context.
-        Combines document vector search with data sample for comprehensive summary.
+        Generate summary using LLM with optional RAG context.
+        
+        RAG is ONLY used for unstructured documents (JSON, DOCX, PDF).
+        For structured data files (Excel, CSV), RAG is skipped since the data
+        is already structured and doesn't need vector search.
         """
         if not self._llm:
             return None
@@ -1463,24 +1466,34 @@ class DataAnalystAgent:
             # Build context from multiple sources
             context_parts = []
             
-            # 1. Get RAG context if available
+            # 1. Get RAG context ONLY for unstructured documents (JSON, DOCX, PDF)
+            # SKIP RAG for structured data files (Excel, CSV) - they don't need vector search
             rag_context = ""
-            try:
-                from app.rag.ingest import get_rag_pipeline
-                rag = get_rag_pipeline()
-                if rag and rag.is_available and client_id:
-                    # Search for relevant document content
-                    rag_result = rag.query(
-                        question=query,
-                        client_id=client_id,
-                        top_k=5,
-                        score_threshold=0.3
-                    )
-                    if rag_result.get("contexts"):
-                        rag_context = "\n".join([c["text"] for c in rag_result["contexts"][:3]])
-                        context_parts.append(f"DOCUMENT CONTEXT:\n{rag_context}")
-            except Exception as e:
-                logger.debug(f"RAG context not available: {e}")
+            is_structured_data = any(indicator in df_id.lower() for indicator in [
+                '.xlsx', '.xls', '.csv', '_excel', '_csv', ':sheet', 'innovist_mis', 'balance_sheet', 
+                'income_statement', 'cash_flow', 'trial_balance', 'pl_consolidated'
+            ])
+            
+            if not is_structured_data:
+                # Only use RAG for unstructured documents (JSON, DOCX, PDF)
+                try:
+                    from app.rag.ingest import get_rag_pipeline
+                    rag = get_rag_pipeline()
+                    if rag and rag.is_available and client_id:
+                        # Search for relevant document content
+                        rag_result = rag.query(
+                            question=query,
+                            client_id=client_id,
+                            top_k=5,
+                            score_threshold=0.3
+                        )
+                        if rag_result.get("contexts"):
+                            rag_context = "\n".join([c["text"] for c in rag_result["contexts"][:3]])
+                            context_parts.append(f"DOCUMENT CONTEXT:\n{rag_context}")
+                except Exception as e:
+                    logger.debug(f"RAG context not available: {e}")
+            else:
+                logger.debug(f"Skipping RAG for structured data file: {df_id}")
             
             # 2. Get data sample and structure
             label_col = None

@@ -349,7 +349,12 @@ class RouterAgent:
         summary_patterns = [
             "what is this data", "what is this file", "overview", 
             "summarize", "describe this", "what does this contain",
-            "what information", "tell me about this", "what am i looking at"
+            "what information", "tell me about this", "what am i looking at",
+            # Additional patterns for common variations
+            "what is the data", "what is the file", "about the data",
+            "data about", "file about", "what does the", "explain the data",
+            "explain this data", "describe the data", "describe the file",
+            "tell me about the", "what are we looking at"
         ]
         for pattern in summary_patterns:
             if pattern in query_lower:
