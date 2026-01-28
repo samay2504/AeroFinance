@@ -1465,14 +1465,9 @@ class DataAnalystAgent:
         try:
             # Build context from multiple sources
             context_parts = []
-            
-            # 1. Get RAG context ONLY for unstructured documents (JSON, DOCX, PDF)
-            # SKIP RAG for structured data files (Excel, CSV) - they don't need vector search
+    
             rag_context = ""
-            is_structured_data = any(indicator in df_id.lower() for indicator in [
-                '.xlsx', '.xls', '.csv', '_excel', '_csv', ':sheet', 'innovist_mis', 'balance_sheet', 
-                'income_statement', 'cash_flow', 'trial_balance', 'pl_consolidated'
-            ])
+            is_structured_data = df is not None and len(df) > 0
             
             if not is_structured_data:
                 # Only use RAG for unstructured documents (JSON, DOCX, PDF)
@@ -1493,7 +1488,7 @@ class DataAnalystAgent:
                 except Exception as e:
                     logger.debug(f"RAG context not available: {e}")
             else:
-                logger.debug(f"Skipping RAG for structured data file: {df_id}")
+                logger.info(f"RAG SKIPPED for structured data: {df_id} (rows={len(df)})")
             
             # 2. Get data sample and structure
             label_col = None

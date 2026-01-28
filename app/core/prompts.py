@@ -664,9 +664,13 @@ TRACK_DATA: Use when the user wants to:
 - Find specific values, records, or metrics in datasets
 - Ask about sheet names, columns, rows, or data structure
 - Ask "what is [term]" when that term might exist in loaded data
+- SEARCH/FIND content in data: "Is there any mention of...", "Find company names", "Does it contain..."
+- Entity extraction: "What companies are mentioned?", "List all names in the data"
+- Content verification: "Check if there is...", "Verify if exists..."
 - Any question that can be answered by looking at tabular data
 EXAMPLES: "how many sheets", "what are the sheet names", "total revenue", 
-          "what is nifty", "show volume gainers", "list top stocks"
+          "what is nifty", "show volume gainers", "list top stocks",
+          "is there any mention of a company name", "find company names"
 
 TRACK_DOC: Use when the user wants to:
 - Look up definitions, policies, or clauses from DOCUMENTS (PDFs, contracts)
@@ -682,11 +686,18 @@ TRACK_WEB: Use when the user wants to:
 - Answer questions requiring up-to-date information
 EXAMPLES: "current repo rate", "latest GST rules", "today's market news"
 
+IMPORTANT DISTINCTION - Content Search vs Summary:
+- "Is there any mention of X?" = SEARCH in data → TRACK_DATA (entity extraction)
+- "Give me a summary" = SUMMARIZE data → handled separately, but also TRACK_DATA context
+- "Does it contain X?" = SEARCH → TRACK_DATA
+- "What is this about?" = Summary request → handled separately
+
 DECISION PRIORITY:
-1. If data is loaded AND query seems related to analyzing that data → TRACK_DATA
-2. If asking about document content/policies → TRACK_DOC  
-3. If needing real-time/external info → TRACK_WEB
-4. When in doubt with loaded data → TRACK_DATA
+1. If query is a SEARCH/FIND/MENTION query with loaded data → TRACK_DATA (entity extraction)
+2. If data is loaded AND query seems related to analyzing that data → TRACK_DATA
+3. If asking about document content/policies → TRACK_DOC  
+4. If needing real-time/external info → TRACK_WEB
+5. When in doubt with loaded data → TRACK_DATA
 
 OUTPUT: Return ONLY the track code (TRACK_DATA, TRACK_DOC, or TRACK_WEB).
 """)

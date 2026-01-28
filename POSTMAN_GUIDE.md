@@ -17,7 +17,33 @@
 
 ---
 
-## 🚀 Getting Started
+## ⚡ Quick Start (30 seconds)
+
+**1. Start Server**
+```powershell
+cd d:\Projects2.0\Valuenaire\Re
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+```
+
+**2. Verify Server (GET request)**
+- URL: `http://localhost:8000/health`
+- Should return 200 with status "ok"
+
+**3. Upload File (POST, form-data)**
+- URL: `http://localhost:8000/v1/ai-ca/upload`
+- **Body Type:** form-data (NOT JSON)
+- Fields: `file` (File type), `client_id` (Text), `ingest_all` (Text)
+- Save the `doc_id` from response
+
+**4. Query Data (POST, raw JSON)**
+- URL: `http://localhost:8000/v1/ai-ca/query`
+- **Body Type:** raw JSON
+- JSON: `{"client": "test_user", "query": "What was total revenue?", ...}`
+- Should return result with analysis
+
+⚠️ **422 Error?** Check body type matches (form-data for upload, JSON for query)
+
+---
 
 ### Prerequisites
 
@@ -198,23 +224,26 @@ GET {{base_url}}/health
 POST {{base_url}}/v1/ai-ca/upload
 ```
 
-**Content-Type:** `multipart/form-data`
+⚠️ **CRITICAL: Body Type must be `form-data` (NOT JSON)**
 
 **Form Data Fields:**
-| Key | Type | Required | Description |
-|-----|------|----------|-------------|
-| `file` | File | ✅ Yes | The file to upload |
-| `client_id` | Text | ✅ Yes | User/client identifier |
-| `ingest_all` | Text | No | `true` (default) or `false` |
+| Key | Type | Required | Value |
+|-----|------|----------|-------|
+| `file` | **File** | ✅ Yes | Select your Excel/CSV/JSON file |
+| `client_id` | **Text** | ✅ Yes | `test_user` |
+| `ingest_all` | **Text** | No | `true` or `false` |
 
-**Example in Postman:**
+**Step-by-Step in Postman:**
 1. Method: `POST`
 2. URL: `{{base_url}}/v1/ai-ca/upload`
-3. Body → **form-data**
-4. Add fields:
-   - `file`: Select file (Click "Select Files")
-   - `client_id`: `test_user`
-   - `ingest_all`: `true`
+3. **Body Tab** → Click **form-data** button (NOT "raw")
+4. Add three rows:
+   - Row 1: Key=`file`, Type=**File** (dropdown), Value=Select file
+   - Row 2: Key=`client_id`, Type=**Text**, Value=`test_user`
+   - Row 3: Key=`ingest_all`, Type=**Text**, Value=`true`
+5. Click **Send**
+
+⚠️ **Common Mistake:** If you're getting 422 error, verify Body is set to **form-data** (not raw/JSON)
 
 **Sample Success Response (200 OK):**
 ```json
@@ -308,13 +337,13 @@ POST {{base_url}}/v1/ai-ca/ingest-json
 POST {{base_url}}/v1/ai-ca/query
 ```
 
-**Content-Type:** `application/json`
+⚠️ **CRITICAL: Body Type must be `raw` JSON (NOT form-data)**
 
 **Request Body:**
 ```json
 {
     "client": "test_user",
-    "query": "What was the total revenue in FY21?",
+    "query": "What was the total revenue?",
     "dataset_id": null,
     "session_id": null,
     "use_cache": true
@@ -324,11 +353,24 @@ POST {{base_url}}/v1/ai-ca/query
 **Request Body Fields:**
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `client` | string | ✅ Yes | Client/user identifier |
+| `client` | string | ✅ Yes | Client/user identifier (⚠️ NOT `client_id`) |
 | `query` | string | ✅ Yes | Natural language question |
-| `dataset_id` | string | No | Specific dataset to query |
+| `dataset_id` | string | No | Specific dataset to query (null to auto-select) |
 | `session_id` | string | No | Conversation session ID |
 | `use_cache` | boolean | No | Use cached results (default: true) |
+
+**Step-by-Step in Postman:**
+1. Method: `POST`
+2. URL: `{{base_url}}/v1/ai-ca/query`
+3. **Headers Tab** → Verify `Content-Type: application/json`
+4. **Body Tab** → Click **raw** button (select **JSON** from dropdown)
+5. Paste the request body JSON above
+6. Click **Send**
+
+⚠️ **Common Mistakes (Cause 422 Error):**
+- Using `client_id` instead of `client` field
+- Body set to **form-data** instead of **raw**
+- `use_cache` as string `"true"` instead of boolean `true`
 
 **Sample Success Response:**
 ```json
@@ -660,15 +702,40 @@ pm.test("Error response has error object", function() {
 
 ## 🔧 Troubleshooting
 
-### Common Issues
+### 422 Unprocessable Entity - MOST COMMON
+
+**Root Cause:** Pydantic validation failed - request format doesn't match API schema.
+
+**For Upload Endpoint (POST /v1/ai-ca/upload):**
+- ❌ **Wrong:** Body type is "raw" or "JSON" 
+- ✅ **Correct:** Body type is **form-data**
+- ❌ **Wrong:** Field names are `file_upload`, `user_id`, `ingest`
+- ✅ **Correct:** Field names are exactly `file`, `client_id`, `ingest_all`
+
+**For Query Endpoint (POST /v1/ai-ca/query):**
+- ❌ **Wrong:** Body type is "form-data"
+- ✅ **Correct:** Body type is **raw JSON**
+- ❌ **Wrong:** Field name is `client_id`
+- ✅ **Correct:** Field name is `client`
+- ❌ **Wrong:** `use_cache: "true"` (string)
+- ✅ **Correct:** `use_cache: true` (boolean)
+
+**Debug Steps:**
+1. Open Postman **Console** (Bottom-left corner)
+2. Send request and check the actual request body being sent
+3. Compare with examples in this guide
+4. Verify field names character-by-character (case-sensitive)
+5. Verify Body type matches endpoint requirement
+
+### Other Common Issues
 
 | Issue | Cause | Solution |
 |-------|-------|----------|
-| `Connection refused` | Server not running | Start server with `uvicorn` |
-| `422 Unprocessable Entity` | Missing required fields | Check request body schema |
-| `429 Too Many Requests` | Rate limit hit | Wait 60 seconds |
-| `500 Internal Error` | Server exception | Check server logs |
-| `CORS error` | Cross-origin blocked | Server has `*` CORS, check browser |
+| `Connection refused` | Server not running | Start server with `uvicorn app.main:app --reload` |
+| `404 Not Found` | Wrong endpoint URL | Check URL starts with `/v1/ai-ca/` |
+| `429 Too Many Requests` | Rate limit hit | Wait 60 seconds before retrying |
+| `500 Internal Error` | Server exception | Check server console logs for error details |
+| `CORS error` | Browser blocking request | Use Postman (not browser) or enable CORS |
 
 ### Debug Mode
 
@@ -680,22 +747,24 @@ uvicorn app.main:app --reload --log-level debug
 
 ### View Server Logs
 
-Logs are output to stdout in JSON format AND saved to hierarchical folder structure:
-
-**Console Output (JSON):**
+Watch for this format on successful requests:
 ```json
 {
     "timestamp": "2026-01-22T12:55:33.776288Z",
     "level": "INFO",
     "request_id": "req_86533776_2993897e",
     "route": "/v1/ai-ca/upload",
-    "user_id": "test_user",
-    "doc_id": "doc_86533776_9d8caf",
     "status": "ok",
-    "duration_ms": 1234.56,
-    "log_type": "upload"
+    "duration_ms": 1234.56
 }
 ```
+
+Error logs show:
+```
+INFO:     127.0.0.1:50122 - "POST /v1/ai-ca/query HTTP/1.1" 422 Unprocessable Entity
+```
+
+If you see 422, check Postman request format against this guide.
 
 ---
 

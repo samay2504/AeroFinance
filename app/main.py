@@ -614,7 +614,7 @@ async def query(request: QueryRequest):
                     query=request.query,
                     raw_result=best_result.result,
                     explanation=best_result.explanation,
-                    llm=llm
+                    llm_wrapper=llm
                 )
                 
                 return QueryResponse(
@@ -627,34 +627,35 @@ async def query(request: QueryRequest):
                     metadata={"dataset_id": best_dataset_id, "route": track, "raw_value": best_result.value}
                 )
             
-            # FALLBACK: RAG Semantic Search
-            try:
-                from app.rag.ingest import get_rag_pipeline
-                rag = get_rag_pipeline()
-                if rag and rag.is_available:
-                    rag_results = rag._ingestor.search(
-                        query=request.query,
-                        client_id=request.client,
-                        top_k=3,
-                        score_threshold=0.3
-                    )
-                    if rag_results:
-                        context = "\n\n".join([
-                            f"Source: {r.get('metadata', {}).get('table_name', 'data')}\n{r.get('content', '')[:800]}"
-                            for r in rag_results[:3]
-                        ])
-                        prompt = f"Based on this data:\n\n{context}\n\nAnswer: {request.query}"
-                        response = llm.invoke(prompt)
-                        return QueryResponse(
-                            success=True,
-                            result=response,
-                            method="rag:semantic",
-                            explanation="Answer synthesized from indexed data",
-                            query_id=query_id,
-                            metadata={"route": track, "fallback": "rag"}
+            # FALLBACK: RAG Semantic Search (disabled for structured datasets to minimize latency)
+            if not datasets:  # only consider RAG when no structured data is available
+                try:
+                    from app.rag.ingest import get_rag_pipeline
+                    rag = get_rag_pipeline()
+                    if rag and rag.is_available:
+                        rag_results = rag._ingestor.search(
+                            query=request.query,
+                            client_id=request.client,
+                            top_k=3,
+                            score_threshold=0.3
                         )
-            except Exception as e:
-                logger.debug(f"RAG fallback failed: {e}")
+                        if rag_results:
+                            context = "\n\n".join([
+                                f"Source: {r.get('metadata', {}).get('table_name', 'data')}\n{r.get('content', '')[:800]}"
+                                for r in rag_results[:3]
+                            ])
+                            prompt = f"Based on this data:\n\n{context}\n\nAnswer: {request.query}"
+                            response = llm.invoke(prompt)
+                            return QueryResponse(
+                                success=True,
+                                result=response,
+                                method="rag:semantic",
+                                explanation="Answer synthesized from indexed data",
+                                query_id=query_id,
+                                metadata={"route": track, "fallback": "rag"}
+                            )
+                except Exception as e:
+                    logger.debug(f"RAG fallback failed: {e}")
             
             # FALLBACK: Comprehensive LLM analysis
             try:
@@ -895,6 +896,152 @@ async def validate_id(request: IDValidateRequest, x_request_id: Optional[str] = 
             status_code=500,
             content=make_response(request_id=request_id, status="error", error_code="INTERNAL_ERROR", error_message=str(e))
         )
+
+
+# =============================================================================
+# STREAMING QUERY ENDPOINT - Server-Sent Events for real-time token streaming
+# =============================================================================
+from fastapi.responses import StreamingResponse
+import asyncio
+
+
+class StreamQueryRequest(BaseModel):
+    """Streaming query request."""
+    client: str
+    query: str
+    dataset_id: Optional[str] = None
+
+
+@app.post("/v1/ai-ca/query/stream")
+async def stream_query(request: StreamQueryRequest):
+    """
+    Stream query response using Server-Sent Events (SSE).
+    
+    Postman Usage:
+    - Method: POST
+    - URL: http://localhost:8000/v1/ai-ca/query/stream
+    - Body (raw JSON): {"client": "test_user", "query": "What is total revenue?"}
+    - Headers: Accept: text/event-stream
+    
+    Response: Real-time token-by-token streaming visible in Postman.
+    """
+    from app.core.id_generator import generate_query_id
+    
+    query_id = generate_query_id()
+    safe_client = normalize_client_id(request.client)
+    
+    async def generate_sse():
+        """Generate Server-Sent Events stream."""
+        try:
+            # Send initial metadata
+            yield f"event: start\ndata: {json.dumps({'query_id': query_id, 'client': safe_client, 'status': 'processing'})}\n\n"
+            
+            # Import dependencies
+            from app.agents.data_analyst import get_data_analyst_agent
+            from app.agents.router import get_router_agent
+            from app.core.llm_wrapper import get_llm_wrapper
+            from app.core.data_registry import get_data_registry
+            
+            agent = get_data_analyst_agent()
+            router = get_router_agent()
+            llm = get_llm_wrapper()
+            registry = get_data_registry()
+            
+            # Get datasets
+            datasets = registry.list_for_client(safe_client)
+            has_data = len(datasets) > 0
+            
+            # Route query
+            route_result = router.route(request.query, has_loaded_data=has_data)
+            track = route_result.get("track", "TRACK_DATA")
+            
+            yield f"event: route\ndata: {json.dumps({'track': track, 'confidence': route_result.get('confidence', 0)})}\n\n"
+            
+            # Execute based on track
+            result_text = ""
+            method = "unknown"
+            
+            if track == "TRACK_DOC_SUMMARY" and datasets:
+                # Summary mode - stream summaries
+                summaries = []
+                for i, ds in enumerate(datasets[:3]):
+                    ds_id = ds.get("dataset_id", "")
+                    sheet_name = ds_id.split(":")[-1] if ":" in ds_id else ds_id
+                    yield f"event: progress\ndata: {json.dumps({'sheet': sheet_name, 'index': i+1, 'total': min(len(datasets), 3)})}\n\n"
+                    
+                    summary_result = agent.summarize_dataset(ds_id, client_id=safe_client)
+                    if summary_result.get("value"):
+                        summary_text = f"**{sheet_name}:** {summary_result['value']}"
+                        summaries.append(summary_text)
+                        # Stream each word for visibility
+                        for word in summary_text.split():
+                            yield f"event: token\ndata: {json.dumps({'token': word + ' '})}\n\n"
+                            await asyncio.sleep(0.01)  # Small delay for visibility
+                        newline_token = "\n\n"
+                        yield f"event: token\ndata: {json.dumps({'token': newline_token})}\n\n"
+                
+                result_text = "\n\n".join(summaries)
+                method = "summarize_dataset"
+                
+            elif track == "TRACK_DATA" and datasets:
+                # Data query - find best match and execute
+                matched_id = request.dataset_id
+                if not matched_id:
+                    matched_id = agent.match_dataset_by_query(request.query, datasets)
+                if not matched_id and datasets:
+                    matched_id = datasets[0].get("dataset_id")
+                
+                yield f"event: progress\ndata: {json.dumps({'step': 'executing_sql', 'dataset': matched_id})}\n\n"
+                
+                sql_result = agent.execute_sql_query(
+                    query=request.query,
+                    df_id=matched_id,
+                    client_id=safe_client
+                )
+                
+                if sql_result and sql_result.success:
+                    result_text = str(sql_result.result)
+                    method = sql_result.method
+                    # Stream result
+                    for word in result_text.split():
+                        yield f"event: token\ndata: {json.dumps({'token': word + ' '})}\n\n"
+                        await asyncio.sleep(0.01)
+                else:
+                    result_text = sql_result.error if sql_result else "Query execution failed"
+                    method = "error"
+                    
+            else:
+                # Fallback - use LLM directly
+                yield f"event: progress\ndata: {json.dumps({'step': 'llm_generation'})}\n\n"
+                
+                try:
+                    response = llm.invoke(f"Answer this query: {request.query}")
+                    result_text = response
+                    method = "llm_direct"
+                    # Stream response
+                    for word in result_text.split():
+                        yield f"event: token\ndata: {json.dumps({'token': word + ' '})}\n\n"
+                        await asyncio.sleep(0.01)
+                except Exception as e:
+                    result_text = f"Error: {str(e)}"
+                    method = "error"
+            
+            # Send final result
+            yield f"event: complete\ndata: {json.dumps({'query_id': query_id, 'result': result_text, 'method': method, 'success': method != 'error'})}\n\n"
+            
+        except Exception as e:
+            logger.error(f"Stream error: {e}")
+            yield f"event: error\ndata: {json.dumps({'error': str(e), 'query_id': query_id})}\n\n"
+    
+    return StreamingResponse(
+        generate_sse(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"  # Disable nginx buffering
+        }
+    )
 
 
 # CLI Runner
