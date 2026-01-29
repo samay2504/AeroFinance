@@ -15,6 +15,14 @@ class QueryRequest(BaseModel):
     use_cache: bool = True
 
 
+class StreamQueryRequest(BaseModel):
+    """Streaming query request."""
+
+    client: str
+    query: str
+    dataset_id: Optional[str] = None
+
+
 class QueryResponse(BaseModel):
     """Query response with unique IDs for audit trail."""
 
@@ -65,6 +73,21 @@ class RehydrateRequest(BaseModel):
 
     client_id: str
     dataset_ids: Optional[List[str]] = None
+
+
+class IDCreateRequest(BaseModel):
+    """Request to create a short ID."""
+
+    user_id: str
+    namespace: Optional[str] = "default"
+    meta: Optional[Dict[str, Any]] = None
+
+
+class IDValidateRequest(BaseModel):
+    """Request to validate an ID."""
+
+    id: str
+    user_id: str
 
 
 class RootResponse(BaseModel):
