@@ -3,6 +3,18 @@ LLM Wrapper - Orchestrates LLM calls with caching, retry logic, structured outpu
 Integrates with llm_provider for multi-provider orchestration.
 Includes structured interaction logging for observability.
 """
+# CRITICAL: Apply DLL fix FIRST before any imports that might trigger torch/transformers loading
+import sys
+import os
+
+# Must be done before any other imports on Windows
+if sys.platform == 'win32':
+    try:
+        from app.core.dll_fix import apply_dll_fix
+        apply_dll_fix()
+    except ImportError:
+        pass
+
 import logging
 import logging.handlers
 import time
@@ -10,16 +22,9 @@ from typing import Any, Dict, List, Optional, Union, Callable
 import json
 import re
 import hashlib
-import os
-import sys
 from datetime import datetime, timedelta
 from functools import wraps
 from pathlib import Path
-
-# Prevent transformers from loading torch which causes DLL issues on Windows
-# We don't use HuggingFace models, so this is safe
-os.environ['TRANSFORMERS_OFFLINE'] = '1'
-os.environ['HF_HUB_DISABLE_TELEMETRY'] = '1'
 
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from langchain_core.prompts import PromptTemplate
@@ -375,8 +380,8 @@ LOG_RETENTION_CONFIG = {
     # S3 upload settings
     "s3": {
         "batch_upload_interval_hours": int(os.getenv("LOG_S3_BATCH_INTERVAL_HOURS", "24")),
-        "bucket": os.getenv("S3_LOG_BUCKET"),
-        "prefix": os.getenv("S3_LOG_PREFIX", "logs/ai-ca"),
+        "bucket": os.getenv("LOG_S3_BUCKET", os.getenv("DEPLOYMENT_AWS_S3_BUCKET")),
+        "prefix": os.getenv("LOG_S3_PREFIX", "logs/ai-ca"),
     }
 }
 
@@ -1116,6 +1121,521 @@ def get_kv_cache() -> KVCache:
     return _kv_cache
 
 
+# =============================================================================
+# HOT PROMPT CACHE - Production-grade, Deployment-friendly Caching
+# =============================================================================
+class HotPromptCache:
+    """
+    Production-grade hot prompt cache for cloud LLM APIs.
+    
+    DEPLOYMENT-FRIENDLY FEATURES:
+    - Graceful degradation: Works without Redis/Qdrant (L1-only mode)
+    - Lazy initialization: Optional services loaded on first use
+    - Health checks: Built-in readiness/liveness probes
+    - Zero-config defaults: Works out of the box
+    - Environment-driven: All settings via env vars
+    
+    CACHE TIERS:
+    - L1 (Memory): In-memory LRU with weighted eviction (always available)
+    - L2 (Redis): Distributed cache with TTL (optional, for multi-instance)
+    - L3 (Embeddings): Semantic similarity matching (optional, highest hit rate)
+    
+    ALGORITHM:
+    1. Hash system prompt to create prefix key (enables prefix reuse)
+    2. L1 lookup: O(1) in-memory, ~0.01ms
+    3. L2 lookup: Redis GET, ~1-5ms (if configured)
+    4. L3 lookup: Embedding similarity search, ~10-50ms (if configured)
+    5. On miss: Return None, caller invokes LLM
+    6. On response: Store in all active tiers
+    
+    EVICTION STRATEGY (Weighted LFU-LRU hybrid):
+    - Score = access_count / (age_seconds + 1)
+    - Evicts lowest scored entries first
+    - Balances frequency AND recency
+    
+    Usage:
+        cache = get_hot_prompt_cache()
+        
+        cached = cache.get(system_prompt, user_query)
+        if cached:
+            return cached  # Hit: ~0.1ms
+        
+        response = llm.invoke(...)  # Miss: ~500-2000ms
+        cache.put(system_prompt, user_query, response)
+    """
+    
+    def __init__(
+        self,
+        max_entries: int = 1000,
+        default_ttl_seconds: int = 1800,
+        prefix_ttl_seconds: int = 7200,
+        enable_semantic_dedup: bool = True,
+        similarity_threshold: float = 0.92,
+        redis_client: Optional[Any] = None,
+        embedding_provider: str = "auto"  # auto, jina, openai, sentence-transformers
+    ):
+        self.max_entries = max_entries
+        self.default_ttl = default_ttl_seconds
+        self.prefix_ttl = prefix_ttl_seconds
+        self.enable_semantic = enable_semantic_dedup
+        self.similarity_threshold = similarity_threshold
+        self.embedding_provider = embedding_provider
+        
+        # L1: In-memory LRU cache (always available)
+        self._l1_cache: OrderedDict = OrderedDict()
+        self._l1_sizes: Dict[str, int] = {}
+        self._l1_timestamps: Dict[str, float] = {}
+        self._l1_access_count: Dict[str, int] = {}
+        
+        # L2: Redis (optional, lazy-checked)
+        self._redis = redis_client
+        self._redis_healthy = redis_client is not None
+        
+        # L3: Embedding-based semantic cache (optional, lazy-loaded)
+        self._embeddings_enabled = enable_semantic_dedup
+        self._embedding_model = None
+        self._query_embeddings: Dict[str, List[float]] = {}  # key -> embedding
+        self._embedding_dim = 0
+        
+        # Prefix cache for system prompts
+        self._prefix_hashes: Dict[str, str] = {}
+        
+        # Thread safety
+        self._lock = threading.RLock()
+        
+        # Metrics (atomic counters)
+        self._metrics = {
+            "l1_hits": 0,
+            "l2_hits": 0,
+            "l3_hits": 0,
+            "misses": 0,
+            "evictions": 0,
+            "l2_errors": 0,
+            "l3_errors": 0
+        }
+        
+        # Deployment status
+        self._initialized = True
+        self._startup_time = time.time()
+        
+        logger.info(
+            f"HotPromptCache initialized: "
+            f"L1=memory({max_entries}), "
+            f"L2={'redis' if redis_client else 'disabled'}, "
+            f"L3={'semantic' if enable_semantic_dedup else 'disabled'}, "
+            f"ttl={default_ttl_seconds}s"
+        )
+    
+    # =========================================================================
+    # CORE CACHE OPERATIONS
+    # =========================================================================
+    
+    def _hash(self, text: str) -> str:
+        """Create stable hash of text."""
+        return hashlib.md5(text.encode()).hexdigest()[:20]
+    
+    def _hash_prefix(self, system_prompt: str) -> str:
+        """Hash system prompt prefix for prefix caching."""
+        normalized = " ".join(system_prompt.split())
+        return f"pfx:{self._hash(normalized)}"
+    
+    def _make_key(self, system_prompt: str, user_query: str) -> str:
+        """Create cache key from system prompt + user query."""
+        prefix_hash = self._hash_prefix(system_prompt)
+        query_hash = self._hash(user_query)
+        return f"{prefix_hash}:{query_hash}"
+    
+    def get(
+        self,
+        system_prompt: str,
+        user_query: str,
+        check_semantic: bool = True
+    ) -> Optional[str]:
+        """
+        Get cached response with multi-tier fallback.
+        
+        Lookup order: L1 (memory) → L2 (redis) → L3 (embeddings)
+        
+        Args:
+            system_prompt: The system/context prompt
+            user_query: The user's query
+            check_semantic: Whether to check L3 semantic similarity
+            
+        Returns:
+            Cached response or None
+        """
+        key = self._make_key(system_prompt, user_query)
+        
+        with self._lock:
+            # ------- L1: In-memory (fastest) -------
+            if key in self._l1_cache:
+                timestamp = self._l1_timestamps.get(key, 0)
+                if time.time() - timestamp < self.default_ttl:
+                    self._l1_cache.move_to_end(key)
+                    self._l1_access_count[key] = self._l1_access_count.get(key, 0) + 1
+                    self._metrics["l1_hits"] += 1
+                    return self._l1_cache[key]
+                else:
+                    self._remove_l1_entry(key)
+            
+            # ------- L2: Redis (distributed) -------
+            if self._redis and self._redis_healthy:
+                try:
+                    redis_val = self._redis.get(f"hpc:{key}")
+                    if redis_val:
+                        response = redis_val.decode() if isinstance(redis_val, bytes) else redis_val
+                        self._put_l1(key, response)  # Promote to L1
+                        self._metrics["l2_hits"] += 1
+                        return response
+                except Exception as e:
+                    self._metrics["l2_errors"] += 1
+                    if self._metrics["l2_errors"] > 10:
+                        logger.warning(f"L2 Redis disabled due to errors: {e}")
+                        self._redis_healthy = False
+            
+            # ------- L3: Embedding-based semantic search -------
+            if check_semantic and self._embeddings_enabled and len(user_query) > 20:
+                try:
+                    semantic_match = self._l3_semantic_lookup(system_prompt, user_query)
+                    if semantic_match:
+                        self._metrics["l3_hits"] += 1
+                        return semantic_match
+                except Exception as e:
+                    self._metrics["l3_errors"] += 1
+                    logger.debug(f"L3 semantic lookup error: {e}")
+            
+            self._metrics["misses"] += 1
+            return None
+    
+    def put(
+        self,
+        system_prompt: str,
+        user_query: str,
+        response: str,
+        ttl_override: Optional[int] = None
+    ):
+        """
+        Cache a response in all active tiers.
+        
+        Args:
+            system_prompt: The system/context prompt
+            user_query: The user's query
+            response: The LLM response to cache
+            ttl_override: Custom TTL (seconds)
+        """
+        key = self._make_key(system_prompt, user_query)
+        ttl = ttl_override or self.default_ttl
+        
+        with self._lock:
+            # L1: Always store in memory
+            self._put_l1(key, response)
+            
+            # Track prefix
+            prefix_hash = self._hash_prefix(system_prompt)
+            if prefix_hash not in self._prefix_hashes:
+                self._prefix_hashes[prefix_hash] = key
+            
+            # L2: Store in Redis if available
+            if self._redis and self._redis_healthy:
+                try:
+                    self._redis.setex(f"hpc:{key}", ttl, response)
+                except Exception:
+                    pass  # Fail silently for L2
+            
+            # L3: Store embedding for semantic search
+            if self._embeddings_enabled:
+                try:
+                    self._store_embedding(key, user_query, response)
+                except Exception:
+                    pass  # Fail silently for L3
+    
+    # =========================================================================
+    # L1: IN-MEMORY CACHE OPERATIONS
+    # =========================================================================
+    
+    def _put_l1(self, key: str, response: str):
+        """Store in L1 with weighted LRU eviction."""
+        while len(self._l1_cache) >= self.max_entries:
+            self._evict_one()
+        
+        self._l1_cache[key] = response
+        self._l1_sizes[key] = len(response)
+        self._l1_timestamps[key] = time.time()
+        self._l1_access_count[key] = 1
+        self._l1_cache.move_to_end(key)
+    
+    def _remove_l1_entry(self, key: str):
+        """Remove entry from L1."""
+        self._l1_cache.pop(key, None)
+        self._l1_sizes.pop(key, None)
+        self._l1_timestamps.pop(key, None)
+        self._l1_access_count.pop(key, None)
+        self._query_embeddings.pop(key, None)
+    
+    def _evict_one(self):
+        """Evict lowest-scored entry (weighted LFU-LRU)."""
+        if not self._l1_cache:
+            return
+        
+        now = time.time()
+        scores = {}
+        for key in self._l1_cache:
+            access = self._l1_access_count.get(key, 1)
+            age = now - self._l1_timestamps.get(key, now)
+            scores[key] = access / (age + 1)
+        
+        evict_key = min(scores, key=scores.get)
+        self._remove_l1_entry(evict_key)
+        self._metrics["evictions"] += 1
+    
+    # =========================================================================
+    # L3: EMBEDDING-BASED SEMANTIC CACHE
+    # =========================================================================
+    
+    def _get_embedding_model(self):
+        """Lazy-load embedding model with provider fallback."""
+        if self._embedding_model is not None:
+            return self._embedding_model
+        
+        # Try providers in order of preference
+        providers_to_try = []
+        
+        if self.embedding_provider == "auto":
+            providers_to_try = ["jina", "sentence-transformers"]
+        else:
+            providers_to_try = [self.embedding_provider]
+        
+        for provider in providers_to_try:
+            try:
+                if provider == "jina":
+                    # Jina AI (free tier: 1M tokens/month)
+                    jina_key = os.getenv("JINA_API_KEY")
+                    if jina_key:
+                        import requests
+                        self._embedding_model = ("jina", jina_key)
+                        self._embedding_dim = 1024
+                        logger.info("L3 cache using Jina embeddings")
+                        return self._embedding_model
+                
+                elif provider == "sentence-transformers":
+                    # Local sentence-transformers (no API key needed)
+                    from sentence_transformers import SentenceTransformer
+                    model = SentenceTransformer('all-MiniLM-L6-v2')
+                    self._embedding_model = ("local", model)
+                    self._embedding_dim = 384
+                    logger.info("L3 cache using local sentence-transformers")
+                    return self._embedding_model
+                    
+            except ImportError:
+                continue
+            except Exception as e:
+                logger.debug(f"Embedding provider {provider} failed: {e}")
+                continue
+        
+        # Disable L3 if no provider available
+        self._embeddings_enabled = False
+        logger.info("L3 semantic cache disabled (no embedding provider available)")
+        return None
+    
+    def _compute_embedding(self, text: str) -> Optional[List[float]]:
+        """Compute embedding for text."""
+        model = self._get_embedding_model()
+        if not model:
+            return None
+        
+        provider, instance = model
+        
+        try:
+            if provider == "jina":
+                import requests
+                response = requests.post(
+                    "https://api.jina.ai/v1/embeddings",
+                    headers={"Authorization": f"Bearer {instance}"},
+                    json={"model": "jina-embeddings-v3", "input": [text[:2000]], "task": "text-matching"},
+                    timeout=5
+                )
+                if response.status_code == 200:
+                    return response.json()["data"][0]["embedding"]
+            
+            elif provider == "local":
+                return instance.encode(text[:500]).tolist()
+                
+        except Exception as e:
+            logger.debug(f"Embedding computation failed: {e}")
+        
+        return None
+    
+    def _store_embedding(self, key: str, query: str, response: str):
+        """Store embedding for semantic matching."""
+        # Only store embedding for substantial queries
+        if len(query) < 20:
+            return
+        
+        embedding = self._compute_embedding(query)
+        if embedding:
+            self._query_embeddings[key] = embedding
+    
+    def _l3_semantic_lookup(self, system_prompt: str, user_query: str) -> Optional[str]:
+        """Find semantically similar cached query."""
+        if not self._query_embeddings or not self._embeddings_enabled:
+            return None
+        
+        query_embedding = self._compute_embedding(user_query)
+        if not query_embedding:
+            return None
+        
+        prefix_hash = self._hash_prefix(system_prompt)
+        best_match_key = None
+        best_similarity = 0.0
+        
+        # Cosine similarity search
+        import math
+        
+        def cosine_sim(a, b):
+            dot = sum(x * y for x, y in zip(a, b))
+            norm_a = math.sqrt(sum(x * x for x in a))
+            norm_b = math.sqrt(sum(x * x for x in b))
+            return dot / (norm_a * norm_b) if norm_a and norm_b else 0
+        
+        for key, cached_embedding in self._query_embeddings.items():
+            # Only compare within same prefix (system prompt)
+            if not key.startswith(prefix_hash):
+                continue
+            
+            similarity = cosine_sim(query_embedding, cached_embedding)
+            if similarity > best_similarity and similarity >= self.similarity_threshold:
+                best_similarity = similarity
+                best_match_key = key
+        
+        if best_match_key and best_match_key in self._l1_cache:
+            logger.debug(f"L3 semantic match: similarity={best_similarity:.3f}")
+            return self._l1_cache[best_match_key]
+        
+        return None
+    
+    # =========================================================================
+    # DEPLOYMENT & OPERATIONS
+    # =========================================================================
+    
+    def invalidate_prefix(self, system_prompt: str):
+        """Invalidate all entries with given system prompt."""
+        prefix_hash = self._hash_prefix(system_prompt)
+        
+        with self._lock:
+            keys_to_remove = [k for k in self._l1_cache if k.startswith(prefix_hash)]
+            for key in keys_to_remove:
+                self._remove_l1_entry(key)
+            
+            if self._redis and self._redis_healthy:
+                try:
+                    for key in self._redis.scan_iter(f"hpc:{prefix_hash}:*"):
+                        self._redis.delete(key)
+                except Exception:
+                    pass
+        
+        logger.debug(f"Invalidated {len(keys_to_remove)} entries")
+    
+    def preload_prompts(self, prompts: List[Tuple[str, str, str]]):
+        """Preload common prompts for cache warming."""
+        for system_prompt, user_query, response in prompts:
+            self.put(system_prompt, user_query, response)
+        logger.info(f"HotPromptCache preloaded {len(prompts)} prompts")
+    
+    def health_check(self) -> Dict[str, Any]:
+        """Kubernetes-style health check for deployment probes."""
+        return {
+            "status": "healthy" if self._initialized else "unhealthy",
+            "uptime_seconds": round(time.time() - self._startup_time, 1),
+            "l1_status": "ok",
+            "l2_status": "ok" if self._redis_healthy else "disabled",
+            "l3_status": "ok" if self._embeddings_enabled else "disabled",
+            "entries": len(self._l1_cache),
+            "hit_rate": self.get_metrics().get("hit_rate", 0)
+        }
+    
+    def get_metrics(self) -> Dict[str, Any]:
+        """Get comprehensive cache metrics."""
+        with self._lock:
+            total = sum(v for k, v in self._metrics.items() if not k.endswith("errors"))
+            total_hits = self._metrics["l1_hits"] + self._metrics["l2_hits"] + self._metrics["l3_hits"]
+            hit_rate = total_hits / max(1, total) if total > 0 else 0
+            
+            return {
+                "entries": len(self._l1_cache),
+                "max_entries": self.max_entries,
+                "l1_hits": self._metrics["l1_hits"],
+                "l2_hits": self._metrics["l2_hits"],
+                "l3_hits": self._metrics["l3_hits"],
+                "misses": self._metrics["misses"],
+                "evictions": self._metrics["evictions"],
+                "hit_rate": round(hit_rate, 3),
+                "l2_errors": self._metrics["l2_errors"],
+                "l3_errors": self._metrics["l3_errors"],
+                "l2_healthy": self._redis_healthy,
+                "l3_enabled": self._embeddings_enabled,
+                "prefix_count": len(self._prefix_hashes),
+                "embedding_count": len(self._query_embeddings),
+                "total_size_chars": sum(self._l1_sizes.values())
+            }
+
+
+# =============================================================================
+# GLOBAL CACHE FACTORY (Deployment-friendly lazy initialization)
+# =============================================================================
+_hot_prompt_cache: Optional[HotPromptCache] = None
+
+def get_hot_prompt_cache() -> HotPromptCache:
+    """
+    Get or create global hot prompt cache.
+    
+    Environment Variables:
+        HOT_CACHE_MAX_ENTRIES: Max L1 entries (default: 1000)
+        HOT_CACHE_TTL_SECONDS: Default TTL (default: 1800 = 30 min)
+        HOT_CACHE_SEMANTIC: Enable L3 semantic cache (default: true)
+        HOT_CACHE_SIMILARITY: Semantic similarity threshold (default: 0.92)
+        HOT_CACHE_EMBEDDING_PROVIDER: jina, sentence-transformers, auto
+        REDIS_URL: Redis connection URL for L2 (optional)
+        JINA_API_KEY: For Jina embeddings (optional)
+    """
+    global _hot_prompt_cache
+    if _hot_prompt_cache is None:
+        # Read configuration from environment
+        max_entries = int(os.getenv("HOT_CACHE_MAX_ENTRIES", "1000"))
+        ttl = int(os.getenv("HOT_CACHE_TTL_SECONDS", "1800"))
+        enable_semantic = os.getenv("HOT_CACHE_SEMANTIC", "true").lower() == "true"
+        similarity = float(os.getenv("HOT_CACHE_SIMILARITY", "0.92"))
+        embedding_provider = os.getenv("HOT_CACHE_EMBEDDING_PROVIDER", "auto")
+        
+        # Try Redis for L2 (graceful fallback)
+        redis_client = None
+        redis_url = os.getenv("REDIS_URL")
+        if redis_url:
+            try:
+                import redis
+                redis_client = redis.from_url(redis_url, socket_timeout=2, socket_connect_timeout=2)
+                redis_client.ping()
+                logger.info("HotPromptCache L2 (Redis) connected")
+            except Exception as e:
+                logger.info(f"HotPromptCache L2 (Redis) unavailable: {e}")
+                redis_client = None
+        
+        _hot_prompt_cache = HotPromptCache(
+            max_entries=max_entries,
+            default_ttl_seconds=ttl,
+            enable_semantic_dedup=enable_semantic,
+            similarity_threshold=similarity,
+            redis_client=redis_client,
+            embedding_provider=embedding_provider
+        )
+    return _hot_prompt_cache
+
+
+def reset_hot_prompt_cache():
+    """Reset the global cache (useful for testing)."""
+    global _hot_prompt_cache
+    _hot_prompt_cache = None
+
+
 class LLMWrapper:
     """High-level wrapper around LLM providers with caching and structured output."""
 
@@ -1146,7 +1666,8 @@ class LLMWrapper:
         try:
             if config.get("redis_enabled"):
                 import redis
-                redis_url = config.get("redis_url", "redis://localhost:6379/0")
+                # Read from config, then env, then fallback
+                redis_url = config.get("redis_url") or os.getenv("REDIS_URL", "redis://localhost:6379/0")
                 self._redis_client = redis.from_url(redis_url)
                 self._redis_client.ping()
                 logger.info("Redis cache connected")
@@ -1216,7 +1737,7 @@ class LLMWrapper:
                     self._llm_provider = new_provider
                     self.llm = new_provider.llm
                     self.provider_name = new_provider.current_provider
-                    logger.info(f"✅ Switched to: {self.provider_name}")
+                    logger.info(f"[OK] Switched to: {self.provider_name}")
                     return True
                 else:
                     self._failed_providers.add(provider_name)
@@ -1364,7 +1885,21 @@ class LLMWrapper:
             if not content:
                 return {"error": "Empty response from LLM", "fallback": True}
 
-            # Parse JSON
+            # Use RobustJSONParser for production-grade JSON parsing
+            try:
+                from app.core.llm_utils import RobustJSONParser, SQLCodeExtractor
+                parsed = RobustJSONParser.parse(content)
+                
+                # If parsing failed or returned fallback, try to enhance with SQL/code extraction
+                if parsed.get("fallback") or parsed.get("error"):
+                    parsed = SQLCodeExtractor.enhance_json_response(parsed, content)
+                
+                return parsed
+            except ImportError:
+                # Fallback to basic parsing if utilities not available
+                pass
+
+            # Basic JSON parsing fallback
             try:
                 return json.loads(content)
             except json.JSONDecodeError:
@@ -1391,6 +1926,14 @@ class LLMWrapper:
                     return {
                         "code": code_match.group(1).strip(),
                         "explanation": "Extracted from code block"
+                    }
+                
+                # Extract SQL from prose (last resort)
+                sql_match = re.search(r'\b(SELECT\s+.+?\s+FROM\s+\w+.*?)(?:;|$)', content, re.DOTALL | re.IGNORECASE)
+                if sql_match:
+                    return {
+                        "sql": sql_match.group(1).strip(),
+                        "explanation": "SQL extracted from prose response"
                     }
 
                 return {"error": "Invalid JSON", "raw_content": content[:500], "fallback": True}

@@ -254,7 +254,7 @@ class LLMProvider:
                 if self.llm:
                     model_name = getattr(self.llm, "model_name", getattr(self.llm, "model", "unknown"))
                     self.current_provider = key
-                    logger.info(f"✅ Initialized {display_name} with model: {model_name}")
+                    logger.info(f"[OK] Initialized {display_name} with model: {model_name}")
                     return
             except Exception as e:
                 error_msg = str(e)
@@ -376,7 +376,7 @@ class LLMProvider:
                 )
                 test_response = llm.invoke("Test")
                 if test_response:
-                    logger.info(f"✅ Groq model {model} initialized")
+                    logger.info(f"[OK] Groq model {model} initialized")
                     return llm
             except Exception:
                 continue
@@ -396,7 +396,7 @@ class LLMProvider:
                 llm = ChatOllama(model=model)
                 test = llm.invoke("Test")
                 if test:
-                    logger.info(f"✅ Ollama (LangChain) initialized with {model}")
+                    logger.info(f"[OK] Ollama (LangChain) initialized with {model}")
                     return llm
             except Exception as e:
                 logger.warning(f"LangChain Ollama failed: {e}")
@@ -434,7 +434,7 @@ class LLMProvider:
             cli = OllamaCLIWrapper(model)
             test = cli.invoke("Test")
             if test:
-                logger.info(f"✅ Ollama CLI initialized with {model}")
+                logger.info(f"[OK] Ollama CLI initialized with {model}")
                 return cli
         except Exception as e:
             logger.warning(f"Ollama CLI failed: {e}")
@@ -515,7 +515,7 @@ class LLMProvider:
                 wrapper = OpenRouterHTTPWrapper(api_key, m)
                 test = wrapper.invoke("Test")
                 if test:
-                    logger.info(f"✅ OpenRouter initialized with {m}")
+                    logger.info(f"[OK] OpenRouter initialized with {m}")
                     return wrapper
             except Exception as e:
                 logger.warning(f"OpenRouter model {m} failed: {str(e)[:100]}")

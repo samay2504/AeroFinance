@@ -617,9 +617,32 @@ data/dataframe_cache/
 
 ---
 
-## Version History
-
-| Version | Date | Changes |
-|---------|------|---------|
-| 1.1.0 | 2026-01-12 | Added S3-compatible hierarchical storage & hierarchical ID system |
 | 1.0.0 | 2026-01-12 | Initial release with unique ID system |
+
+---
+
+## Code Execution Sandbox
+
+The system includes a secure Python execution environment for data analysis tasks. It supports two modes:
+
+### 1. Local Restricted Sandbox (Default)
+- **Security**: AST-based code validation, restricted globals, blocked imports (os, sys, net).
+- **Modules**: `pandas`, `numpy`, `math`, `statistics`, `datetime` only.
+- **Usage**: Lightweight queries, simple aggregations.
+
+### 2. E2B Remote Sandbox (Optional)
+- **Provider**: E2B (e2b-code-interpreter)
+- **Security**: Full VM isolation, internet access (controlled), long-running tasks.
+- **Capabilities**: 
+  - Matplotlib/Seaborn chart generation
+  - Complex statistical modeling
+  - External API calls (if configured)
+- **Configuration**:
+  ```env
+  ENABLE_E2B=true
+  E2B_API_KEY=sk_...
+  ```
+
+The system automatically routes requests:
+- Simple tasks → Local Sandbox (Fast)
+- Complex/unsafe tasks → E2B (Secure/Powerful)

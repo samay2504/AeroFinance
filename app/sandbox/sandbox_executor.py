@@ -401,6 +401,15 @@ class SandboxExecutor:
         # Check for run function
         has_run = self.validator.check_has_run_function(code)
 
+        # Fix mixed DataFrame types before execution to prevent type errors
+        try:
+            from app.core.llm_utils import DataFrameTypeFixer
+            df = DataFrameTypeFixer.fix_dataframe(df)
+        except ImportError:
+            pass  # Utilities not available, continue with original df
+        except Exception as e:
+            logger.debug(f"DataFrame type fixing skipped: {e}")
+
         # Create sandbox environment
         sandbox_globals = self._create_sandbox_globals(df)
         sandbox_locals = {}
@@ -440,8 +449,17 @@ class SandboxExecutor:
             logger.warning(f"Sandbox execution failed: {e}")
             
         except KeyError as e:
-            # Common error: column doesn't exist
-            result["error"] = f"KeyError: {str(e)} (Column or key not found in data)"
+            # Common error: column doesn't exist - try to suggest similar column
+            error_msg = f"KeyError: {str(e)} (Column or key not found in data)"
+            try:
+                from app.core.llm_utils import FuzzyColumnMatcher
+                key_str = str(e).strip("'\"")
+                match, score = FuzzyColumnMatcher.find_best_match(key_str, list(df.columns))
+                if match and score >= 60:
+                    error_msg += f". Did you mean '{match}'? (similarity: {score}%)"
+            except Exception:
+                pass
+            result["error"] = error_msg
             result["stderr"] = stderr_capture.getvalue() + "\n" + traceback.format_exc()
             logger.warning(f"Sandbox execution failed: {e}")
             

@@ -338,6 +338,304 @@ def _load_yaml_templates() -> Dict[str, str]:
 _PROMPT_TEMPLATES = _load_yaml_templates()
 
 
+# ==============================================================================
+# CHART EXTRACTION - Extract and validate chart JSON from LLM responses
+# ==============================================================================
+class ChartExtractor:
+    """
+    Production-grade chart extraction from LLM responses.
+    
+    Features:
+    - Extracts chart JSON from markdown code blocks
+    - Validates against Recharts-compatible schema
+    - Normalizes data for frontend consumption
+    - Handles malformed JSON gracefully
+    """
+    
+    # Supported chart types (Recharts compatible)
+    VALID_CHART_TYPES = {"line", "area", "bar", "scatter", "pie", "radar", "composed"}
+    
+    # Chart JSON schema for validation
+    CHART_SCHEMA = {
+        "required": ["type", "title", "data"],
+        "optional": ["xAxis", "yAxis", "composed", "colors", "legend"]
+    }
+    
+    @classmethod
+    def extract_charts(cls, response: str) -> Tuple[str, List[Dict[str, Any]]]:
+        """
+        Extract chart JSON from LLM response.
+        
+        Args:
+            response: Raw LLM response text
+            
+        Returns:
+            Tuple of (text_without_chart_json, list_of_chart_objects)
+        """
+        charts = []
+        clean_text = response
+        
+        # Pattern to match JSON code blocks containing charts
+        json_pattern = r'```json\s*(\{[\s\S]*?"charts"[\s\S]*?\})\s*```'
+        matches = re.findall(json_pattern, response, re.IGNORECASE)
+        
+        for match in matches:
+            try:
+                parsed = cls._parse_chart_json(match)
+                if parsed:
+                    charts.extend(parsed)
+                    # Remove the JSON block from text
+                    clean_text = re.sub(
+                        r'```json\s*' + re.escape(match) + r'\s*```',
+                        '',
+                        clean_text,
+                        flags=re.IGNORECASE
+                    )
+            except Exception as e:
+                logger.debug(f"Failed to parse chart JSON: {e}")
+        
+        # Also try to find standalone chart objects
+        standalone_pattern = r'(\{[^{}]*"charts"\s*:\s*\[[^\]]+\][^{}]*\})'
+        for match in re.findall(standalone_pattern, response):
+            if match not in str(matches):  # Avoid duplicates
+                try:
+                    parsed = cls._parse_chart_json(match)
+                    if parsed:
+                        charts.extend(parsed)
+                except Exception:
+                    pass
+        
+        return clean_text.strip(), charts
+    
+    @classmethod
+    def _parse_chart_json(cls, json_str: str) -> Optional[List[Dict[str, Any]]]:
+        """Parse and validate chart JSON."""
+        import json
+        
+        try:
+            # Clean common JSON issues
+            cleaned = json_str.strip()
+            cleaned = re.sub(r',\s*}', '}', cleaned)  # Remove trailing commas
+            cleaned = re.sub(r',\s*]', ']', cleaned)
+            
+            data = json.loads(cleaned)
+            
+            # Extract charts array
+            if isinstance(data, dict) and "charts" in data:
+                charts = data["charts"]
+            elif isinstance(data, list):
+                charts = data
+            else:
+                return None
+            
+            # Validate and normalize each chart
+            valid_charts = []
+            for chart in charts:
+                validated = cls._validate_chart(chart)
+                if validated:
+                    valid_charts.append(validated)
+            
+            return valid_charts if valid_charts else None
+            
+        except json.JSONDecodeError:
+            return None
+    
+    @classmethod
+    def _validate_chart(cls, chart: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Validate a single chart object against schema."""
+        # Check required fields
+        for field in cls.CHART_SCHEMA["required"]:
+            if field not in chart:
+                logger.debug(f"Chart missing required field: {field}")
+                return None
+        
+        # Validate chart type
+        chart_type = chart.get("type", "").lower()
+        if chart_type not in cls.VALID_CHART_TYPES:
+            logger.debug(f"Invalid chart type: {chart_type}")
+            return None
+        
+        # Validate data array
+        data = chart.get("data", [])
+        if not isinstance(data, list) or len(data) == 0:
+            logger.debug("Chart data must be a non-empty array")
+            return None
+        
+        # Normalize the chart object
+        normalized = {
+            "type": chart_type,
+            "title": str(chart.get("title", "Chart")),
+            "data": cls._normalize_chart_data(data),
+            "xAxis": str(chart.get("xAxis", "")),
+            "yAxis": str(chart.get("yAxis", "")),
+        }
+        
+        # Handle composed charts
+        if chart_type == "composed" and "composed" in chart:
+            normalized["composed"] = chart["composed"]
+        
+        return normalized
+    
+    @classmethod
+    def _normalize_chart_data(cls, data: List[Dict]) -> List[Dict]:
+        """Normalize chart data for Recharts compatibility."""
+        normalized = []
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            
+            clean_item = {}
+            for key, value in item.items():
+                # Ensure numeric values are actually numbers
+                if isinstance(value, str):
+                    try:
+                        # Try to parse as number
+                        if '.' in value:
+                            clean_item[key] = float(value)
+                        else:
+                            clean_item[key] = int(value)
+                    except ValueError:
+                        clean_item[key] = value
+                else:
+                    clean_item[key] = value
+            
+            normalized.append(clean_item)
+        
+        return normalized
+    
+    # Cached semantic matcher instance for chart detection
+    _semantic_matcher = None
+    
+    @classmethod
+    def _get_semantic_matcher(cls):
+        """Lazy-load SemanticMatcher for financial synonym matching."""
+        if cls._semantic_matcher is None:
+            try:
+                from app.core.semantic_understanding import SemanticMatcher
+                cls._semantic_matcher = SemanticMatcher()
+                logger.debug("ChartExtractor loaded SemanticMatcher for intelligent intent detection")
+            except ImportError:
+                logger.debug("SemanticMatcher not available, using basic keyword matching")
+        return cls._semantic_matcher
+    
+    @classmethod
+    def detect_chart_intent(cls, query: str) -> Tuple[bool, Optional[str]]:
+        """
+        Detect if user wants a chart and what type.
+        Uses SemanticMatcher for domain-aware synonym expansion.
+        
+        Returns:
+            Tuple of (wants_chart, suggested_type)
+        """
+        query_lower = query.lower()
+        
+        # Explicit chart requests
+        chart_keywords = [
+            "chart", "graph", "plot", "visualize", "visualization",
+            "show me a", "draw", "display chart", "create chart"
+        ]
+        
+        wants_chart = any(kw in query_lower for kw in chart_keywords)
+        
+        # Detect specific chart type
+        chart_type = None
+        type_hints = {
+            "line": ["line chart", "line graph", "trend", "over time", "timeline"],
+            "bar": ["bar chart", "bar graph", "comparison", "compare", "breakdown by"],
+            "pie": ["pie chart", "pie graph", "breakdown", "distribution", "share", "proportion"],
+            "area": ["area chart", "cumulative", "stacked area", "filled"],
+            "scatter": ["scatter", "correlation", "relationship between", "x vs y"],
+            "radar": ["radar", "spider", "multi-dimensional", "multi-metric"],
+            "composed": ["combined", "dual axis", "bar and line", "mixed chart"],
+        }
+        
+        for ctype, hints in type_hints.items():
+            if any(hint in query_lower for hint in hints):
+                chart_type = ctype
+                break
+        
+        # ================================================================
+        # SEMANTIC CHART INTENT DETECTION
+        # Use SemanticMatcher to expand financial synonyms for better matching
+        # ================================================================
+        
+        # Core trend/comparison keywords that suggest visualization
+        trend_base_keywords = ["trend", "growth", "yoy", "cagr", "comparison"]
+        
+        # Get expanded synonyms using SemanticMatcher (if available)
+        expanded_trend_keywords = set(trend_base_keywords)
+        semantic_matcher = cls._get_semantic_matcher()
+        
+        if semantic_matcher:
+            # Expand each base keyword with financial synonyms
+            for keyword in trend_base_keywords:
+                try:
+                    synonyms = semantic_matcher.get_financial_synonyms(keyword)
+                    expanded_trend_keywords.update(synonyms)
+                except Exception:
+                    pass
+            
+            # Also add explicit financial patterns that suggest visualization
+            expanded_trend_keywords.update({
+                # Time-based patterns (line charts)
+                "year on year", "year over year", "y-o-y",
+                "quarter on quarter", "quarter over quarter", "q-o-q",
+                "month on month", "month over month", "m-o-m",
+                "compound annual growth rate", "compound growth",
+                "over the years", "across periods", "time series",
+                "historical", "trajectory", "progression",
+                
+                # Comparison patterns (bar charts)
+                "breakdown", "by category", "by segment", "by product",
+                "vs", "versus", "compared to", "relative to",
+                
+                # Proportion patterns (pie charts)
+                "share of", "portion of", "percentage breakdown",
+                "distribution of", "split between", "composition",
+            })
+        
+        # Check for any trend/visualization keywords
+        if not wants_chart:
+            for kw in expanded_trend_keywords:
+                if kw in query_lower:
+                    wants_chart = True
+                    # Infer chart type from keyword if not already set
+                    if chart_type is None:
+                        if kw in {"breakdown", "share of", "portion of", "percentage breakdown", 
+                                  "distribution of", "split between", "composition"}:
+                            chart_type = "pie"
+                        elif kw in {"vs", "versus", "compared to", "relative to", 
+                                    "by category", "by segment", "by product"}:
+                            chart_type = "bar"
+                        else:
+                            chart_type = "line"  # Default for trend keywords
+                    break
+        
+        return wants_chart, chart_type
+    
+    @classmethod
+    def format_response_with_charts(
+        cls, 
+        text: str, 
+        charts: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """
+        Format response with separated text and charts.
+        
+        Returns:
+            {
+                "text": "markdown text without chart JSON",
+                "charts": [...],
+                "has_charts": bool
+            }
+        """
+        return {
+            "text": text,
+            "charts": charts,
+            "has_charts": len(charts) > 0
+        }
+
+
 def get_router_prompt(query: str, client_context: str) -> str:
     """
     Classifies intent into: TRACK_DATA, TRACK_DOC, or TRACK_WEB.
@@ -366,9 +664,13 @@ TRACK_DATA: Use when the user wants to:
 - Find specific values, records, or metrics in datasets
 - Ask about sheet names, columns, rows, or data structure
 - Ask "what is [term]" when that term might exist in loaded data
+- SEARCH/FIND content in data: "Is there any mention of...", "Find company names", "Does it contain..."
+- Entity extraction: "What companies are mentioned?", "List all names in the data"
+- Content verification: "Check if there is...", "Verify if exists..."
 - Any question that can be answered by looking at tabular data
 EXAMPLES: "how many sheets", "what are the sheet names", "total revenue", 
-          "what is nifty", "show volume gainers", "list top stocks"
+          "what is nifty", "show volume gainers", "list top stocks",
+          "is there any mention of a company name", "find company names"
 
 TRACK_DOC: Use when the user wants to:
 - Look up definitions, policies, or clauses from DOCUMENTS (PDFs, contracts)
@@ -384,11 +686,18 @@ TRACK_WEB: Use when the user wants to:
 - Answer questions requiring up-to-date information
 EXAMPLES: "current repo rate", "latest GST rules", "today's market news"
 
+IMPORTANT DISTINCTION - Content Search vs Summary:
+- "Is there any mention of X?" = SEARCH in data → TRACK_DATA (entity extraction)
+- "Give me a summary" = SUMMARIZE data → handled separately, but also TRACK_DATA context
+- "Does it contain X?" = SEARCH → TRACK_DATA
+- "What is this about?" = Summary request → handled separately
+
 DECISION PRIORITY:
-1. If data is loaded AND query seems related to analyzing that data → TRACK_DATA
-2. If asking about document content/policies → TRACK_DOC  
-3. If needing real-time/external info → TRACK_WEB
-4. When in doubt with loaded data → TRACK_DATA
+1. If query is a SEARCH/FIND/MENTION query with loaded data → TRACK_DATA (entity extraction)
+2. If data is loaded AND query seems related to analyzing that data → TRACK_DATA
+3. If asking about document content/policies → TRACK_DOC  
+4. If needing real-time/external info → TRACK_WEB
+5. When in doubt with loaded data → TRACK_DATA
 
 OUTPUT: Return ONLY the track code (TRACK_DATA, TRACK_DOC, or TRACK_WEB).
 """)
@@ -398,6 +707,157 @@ OUTPUT: Return ONLY the track code (TRACK_DATA, TRACK_DOC, or TRACK_WEB).
         template=template_str
     )
     return template.format(guardrails=CA_SYSTEM_GUARDRAILS, query=query, context=client_context)
+
+
+def get_financial_advisor_prompt(
+    query: str,
+    context: str,
+    previous_context: str = "",
+    chat_history: str = "",
+    force_chart: bool = False,
+    chart_type_hint: Optional[str] = None
+) -> Tuple[str, str]:
+    """
+    Get financial advisor prompt with visualization support.
+    
+    Args:
+        query: User's question
+        context: Data context from RAG/SQL results
+        previous_context: Previous conversation context
+        chat_history: Full chat history
+        force_chart: If True, explicitly request chart generation
+        chart_type_hint: Suggested chart type (line, bar, pie, etc.)
+        
+    Returns:
+        Tuple of (system_prompt, user_prompt)
+    """
+    # Get system prompt from YAML or use default
+    system_prompt = _PROMPT_TEMPLATES.get("financial_advisor_system", """
+You are a financial advisor with expertise in M&A and due diligence.
+Use the provided context and conversation to answer questions professionally.
+
+CORE RULES:
+1. All figures should be in the appropriate currency based on the data
+2. Provide answers in GitHub-preferred markdown format
+3. Use structured markdown tables for data and figures
+4. If visualization is needed, provide JSON for charts in a code block
+5. Do not include unnecessary explanations or greetings
+6. If context is insufficient, respond: "I don't have necessary info for your query"
+7. Ensure output is concise and directly usable by the frontend
+8. Use natural, conversational language that business users understand
+9. Explain what numbers mean in practical terms
+10. Avoid technical terms or jargon - audience is business users
+""")
+    
+    # Get user prompt template
+    user_template = _PROMPT_TEMPLATES.get("financial_advisor_response", """
+{guardrails}
+
+CONTEXT: {context}
+PREVIOUS CONTEXT: {previous_context}
+CONVERSATION HISTORY: {chat_history}
+
+QUERY: {query}
+
+RESPONSE GUIDELINES:
+- Lead with the direct answer (no preambles like "Based on the data...")
+- Use markdown tables for tabular data
+- For trends, mention if increasing, decreasing, or stable
+- No greetings or salutations
+- Provide context about what the user is looking at
+
+{chart_instruction}
+
+OUTPUT: Markdown response with optional chart JSON block.
+""")
+    
+    # Build chart instruction based on intent
+    if force_chart:
+        chart_instruction = f"""
+CHART REQUIRED: Generate a {chart_type_hint or 'appropriate'} chart for this data.
+Use the following JSON format in a code block:
+```json
+{{
+  "charts": [
+    {{
+      "type": "{chart_type_hint or 'line'}",
+      "title": "Descriptive title",
+      "data": [{{"name": "label", "value": 100}}],
+      "xAxis": "X Label",
+      "yAxis": "Y Label"
+    }}
+  ]
+}}
+```
+"""
+    else:
+        chart_instruction = """
+CHART GENERATION (if applicable):
+Include a chart JSON when visualization adds value (trends, comparisons, proportions).
+Format: ```json {"charts": [{"type": "line|bar|pie|...", "title": "...", "data": [...], "xAxis": "...", "yAxis": "..."}]} ```
+"""
+    
+    # Format the user prompt
+    user_prompt = PromptTemplate(
+        input_variables=["guardrails", "context", "previous_context", "chat_history", "query", "chart_instruction"],
+        template=user_template
+    ).format(
+        guardrails=CA_SYSTEM_GUARDRAILS,
+        context=context or "No data context available.",
+        previous_context=previous_context or "None",
+        chat_history=chat_history or "None",
+        query=query,
+        chart_instruction=chart_instruction
+    )
+    
+    return system_prompt, user_prompt
+
+
+def get_chart_generation_prompt(
+    data: str,
+    query: str,
+    chart_type_hint: Optional[str] = None
+) -> str:
+    """
+    Get prompt for dedicated chart generation.
+    
+    Args:
+        data: Data to visualize (JSON or tabular)
+        query: What kind of chart/analysis user wants
+        chart_type_hint: Suggested chart type
+        
+    Returns:
+        Formatted prompt for chart-only generation
+    """
+    template_str = _PROMPT_TEMPLATES.get("chart_generation", """
+Generate a chart/visualization from the provided data.
+
+DATA: {data}
+QUERY: {query}
+CHART TYPE HINT: {chart_type_hint}
+
+OUTPUT JSON ONLY (no markdown, no explanation):
+{{
+  "charts": [
+    {{
+      "type": "line",
+      "title": "Chart Title",
+      "data": [{{"name": "Label", "value": 100}}],
+      "xAxis": "X Label",
+      "yAxis": "Y Label"
+    }}
+  ]
+}}
+""")
+    
+    return PromptTemplate(
+        input_variables=["data", "query", "chart_type_hint"],
+        template=template_str
+    ).format(
+        data=data,
+        query=query,
+        chart_type_hint=chart_type_hint or "auto-detect"
+    )
 
 
 def get_data_analyst_sql_prompt(schema_info: str, query: str, available_columns: str = "", data_sample: str = "", semantic_info: str = "") -> str:

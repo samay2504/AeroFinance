@@ -28,6 +28,11 @@ langchain-community>=0.0.20
 # Caching & IPC
 redis>=5.0.0
 pyzmq>=25.0.0
+upstash-redis>=1.0.0
+
+# AWS Cloud Storage & Services
+boto3>=1.34.0
+botocore>=1.34.0
 
 # HTTP & Web Scraping
 httpx>=0.26.0

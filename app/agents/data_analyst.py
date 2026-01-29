@@ -123,6 +123,16 @@ class DataAnalystAgent:
         except Exception as e:
             logger.warning(f"Data registry unavailable: {e}")
 
+        # Initialize storage backend for environment-aware DataFrame persistence
+        # This supports both local filesystem and AWS S3 based on deployment config
+        try:
+            from app.core.data_registry import get_storage_backend
+            self._storage_backend = get_storage_backend()
+            logger.debug(f"Storage backend: {self._storage_backend.get_metrics()['backend']}")
+        except Exception as e:
+            logger.warning(f"Storage backend unavailable, using in-memory only: {e}")
+            self._storage_backend = None
+
         try:
             from app.sql_templates import get_template_engine
             self._template_engine = get_template_engine()
@@ -195,17 +205,41 @@ class DataAnalystAgent:
             except ImportError:
                 safe_client_id = client_id.lower().replace(' ', '_').replace(':', '_')
 
+        # PRODUCTION FIX: Smart Type Inference (Handle messy currencies, preserve IDs)
+        try:
+            from app.core.llm_utils import SmartTypeInference
+            # Infer and fix types (inplace or copy)
+            df = SmartTypeInference.infer_and_fix(df)
+            logger.debug(f"Applied SmartTypeInference to dataset {dataset_id}")
+        except Exception as e:
+            logger.warning(f"SmartTypeInference failed for {dataset_id}: {e}")
+
         # PRODUCTION FIX: Sanitize column names (convert int/float to str)
         df = self._sanitize_dataframe_columns(df)
 
-        # Store locally
+        # Store in local memory (always available for SQL and immediate access)
         self.dataframes[dataset_id] = df
+
+        # Persist to storage backend (local filesystem or S3 based on environment)
+        # This ensures DataFrames survive process restarts in local mode
+        # and are accessible across instances in AWS mode
+        if self._storage_backend:
+            try:
+                storage_key = self._storage_backend.save_dataframe(
+                    client_id=safe_client_id or "default",
+                    dataset_id=dataset_id,
+                    df=df,
+                    metadata={"preprocessing": preprocessing_report} if preprocessing_report else None
+                )
+                logger.debug(f"Persisted to storage backend: {storage_key}")
+            except Exception as e:
+                logger.warning(f"Storage backend persistence failed for {dataset_id}: {e}")
 
         # Register with SQL engine
         if self._sql_engine:
             self._sql_engine.register_dataframe(dataset_id, df)
 
-        # Register with data registry
+        # Register with data registry (maintains metadata index)
         if self._data_registry:
             metadata = {"preprocessing": preprocessing_report} if preprocessing_report else {}
             self._data_registry.register(dataset_id, df, metadata, safe_client_id)
@@ -496,12 +530,59 @@ class DataAnalystAgent:
         return best_match if best_match else (datasets[0].get("dataset_id") if datasets else None)
 
     def _get_dataframe(self, dataset_id: str, client_id: Optional[str] = None) -> Optional[pd.DataFrame]:
-        """Get DataFrame by ID."""
+        """
+        Get DataFrame by ID with multi-layer lookup.
+        
+        Fallback Chain:
+        1. Local memory (self.dataframes) - fastest
+        2. Storage backend (Local/S3) - environment-aware persistence
+        3. Data registry - legacy fallback
+        
+        When loaded from storage, the DataFrame is:
+        - Added to local memory cache
+        - Registered with SQL engine for query execution
+        """
+        # 1. Check local memory first (fastest)
         if dataset_id in self.dataframes:
             return self.dataframes[dataset_id]
         
+        # Normalize client_id for storage lookup
+        safe_client_id = client_id
+        if client_id:
+            try:
+                from app.core.id_generator import normalize_client_id
+                safe_client_id = normalize_client_id(client_id)
+            except ImportError:
+                safe_client_id = client_id.lower().replace(' ', '_').replace(':', '_')
+        
+        # 2. Try storage backend (Local filesystem or S3)
+        if self._storage_backend:
+            try:
+                df = self._storage_backend.load_dataframe(
+                    client_id=safe_client_id or "default",
+                    dataset_id=dataset_id
+                )
+                if df is not None:
+                    # Hydrate local memory
+                    self.dataframes[dataset_id] = df
+                    # Register with SQL engine for immediate queries
+                    if self._sql_engine:
+                        self._sql_engine.register_dataframe(dataset_id, df)
+                    logger.debug(f"Loaded {dataset_id} from storage backend")
+                    return df
+            except Exception as e:
+                logger.warning(f"Storage backend load failed for {dataset_id}: {e}")
+        
+        # 3. Fallback to data registry
         if self._data_registry:
-            return self._data_registry.get(dataset_id, client_id)
+            df = self._data_registry.get(dataset_id, client_id)
+            if df is not None:
+                # Hydrate local memory
+                self.dataframes[dataset_id] = df
+                # Register with SQL engine
+                if self._sql_engine:
+                    self._sql_engine.register_dataframe(dataset_id, df)
+                return df
         
         return None
 
@@ -1372,8 +1453,11 @@ class DataAnalystAgent:
         client_id: Optional[str]
     ) -> Optional[AnalysisResult]:
         """
-        Generate summary using LLM with RAG context.
-        Combines document vector search with data sample for comprehensive summary.
+        Generate summary using LLM with optional RAG context.
+        
+        RAG is ONLY used for unstructured documents (JSON, DOCX, PDF).
+        For structured data files (Excel, CSV), RAG is skipped since the data
+        is already structured and doesn't need vector search.
         """
         if not self._llm:
             return None
@@ -1381,25 +1465,30 @@ class DataAnalystAgent:
         try:
             # Build context from multiple sources
             context_parts = []
-            
-            # 1. Get RAG context if available
+    
             rag_context = ""
-            try:
-                from app.rag.ingest import get_rag_pipeline
-                rag = get_rag_pipeline()
-                if rag and rag.is_available and client_id:
-                    # Search for relevant document content
-                    rag_result = rag.query(
-                        question=query,
-                        client_id=client_id,
-                        top_k=5,
-                        score_threshold=0.3
-                    )
-                    if rag_result.get("contexts"):
-                        rag_context = "\n".join([c["text"] for c in rag_result["contexts"][:3]])
-                        context_parts.append(f"DOCUMENT CONTEXT:\n{rag_context}")
-            except Exception as e:
-                logger.debug(f"RAG context not available: {e}")
+            is_structured_data = df is not None and len(df) > 0
+            
+            if not is_structured_data:
+                # Only use RAG for unstructured documents (JSON, DOCX, PDF)
+                try:
+                    from app.rag.ingest import get_rag_pipeline
+                    rag = get_rag_pipeline()
+                    if rag and rag.is_available and client_id:
+                        # Search for relevant document content
+                        rag_result = rag.query(
+                            question=query,
+                            client_id=client_id,
+                            top_k=5,
+                            score_threshold=0.3
+                        )
+                        if rag_result.get("contexts"):
+                            rag_context = "\n".join([c["text"] for c in rag_result["contexts"][:3]])
+                            context_parts.append(f"DOCUMENT CONTEXT:\n{rag_context}")
+                except Exception as e:
+                    logger.debug(f"RAG context not available: {e}")
+            else:
+                logger.info(f"RAG SKIPPED for structured data: {df_id} (rows={len(df)})")
             
             # 2. Get data sample and structure
             label_col = None
