@@ -3,7 +3,7 @@
 import os
 import logging
 from typing import List, Optional, Dict, Any, Union
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings
 from pathlib import Path
 import yaml
@@ -18,6 +18,15 @@ DEFAULT_LLM_PROVIDERS = [
     "openai",
     "fallback",
 ]
+
+
+def _first_env(*keys: str) -> Optional[str]:
+    """Return the first non-empty environment value from keys."""
+    for key in keys:
+        value = os.getenv(key)
+        if value not in (None, ""):
+            return value
+    return None
 
 # Base directories
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -81,29 +90,53 @@ class LLMSettings(BaseSettings):
 class VectorDBSettings(BaseSettings):
     """Vector database configuration."""
 
-    primary: str = Field(default="qdrant")
-    qdrant_url: str = Field(default="http://localhost:6333")
-    qdrant_collection: str = Field(default="ai_ca_docs")
+    primary: Optional[str] = Field(default=None)
+    qdrant_url: Optional[str] = Field(default=None)
+    qdrant_collection: Optional[str] = Field(default=None)
     chroma_persist_dir: str = Field(default=str(DATA_DIR / "chroma"))
     embedding_model: str = Field(default="all-MiniLM-L6-v2")
 
     model_config = {
         "env_prefix": "VECTORDB_",
         "extra": "ignore",
+        "validate_default": True,
     }
+
+    @field_validator("primary", mode="before")
+    @classmethod
+    def _primary_from_env(cls, v):
+        return v or _first_env("VECTOR_DB_TYPE")
+
+    @field_validator("qdrant_url", mode="before")
+    @classmethod
+    def _qdrant_url_from_env(cls, v):
+        return v or _first_env("VECTOR_DB_QDRANT_HOST")
+
+    @field_validator("qdrant_collection", mode="before")
+    @classmethod
+    def _qdrant_collection_from_env(cls, v):
+        return v or _first_env("QDRANT_COLLECTION")
 
 
 class CacheSettings(BaseSettings):
     """Redis cache configuration."""
 
-    redis_url: str = Field(default="redis://localhost:6379/0")
+    redis_url: Optional[str] = Field(default=None)
     redis_enabled: bool = Field(default=False)
     ttl_query: int = Field(default=1800)  # 30 min
     ttl_embedding: int = Field(default=86400)  # 24h
     lru_max_size: int = Field(default=10)
 
-    class Config:
-        env_prefix = "CACHE_"
+    model_config = {
+        "env_prefix": "CACHE_",
+        "extra": "ignore",
+        "validate_default": True,
+    }
+
+    @field_validator("redis_url", mode="before")
+    @classmethod
+    def _redis_url_from_env(cls, v):
+        return v or _first_env("REDIS_URL")
 
 
 class DeploymentSettings(BaseSettings):
@@ -169,8 +202,10 @@ class StorageSettings(BaseSettings):
         default=500, description="Max DataFrame size before chunking"
     )
 
-    class Config:
-        env_prefix = "STORAGE_"
+    model_config = {
+        "env_prefix": "STORAGE_",
+        "extra": "ignore",
+    }
 
 
 class DuckDBSettings(BaseSettings):
@@ -180,8 +215,10 @@ class DuckDBSettings(BaseSettings):
     threads: int = Field(default=4)
     enable_progress_bar: bool = Field(default=False)
 
-    class Config:
-        env_prefix = "DUCKDB_"
+    model_config = {
+        "env_prefix": "DUCKDB_",
+        "extra": "ignore",
+    }
 
 
 class SandboxSettings(BaseSettings):
@@ -191,8 +228,10 @@ class SandboxSettings(BaseSettings):
     max_memory_mb: int = Field(default=512)
     pool_size: int = Field(default=max(1, os.cpu_count() - 1) if os.cpu_count() else 2)
 
-    class Config:
-        env_prefix = "SANDBOX_"
+    model_config = {
+        "env_prefix": "SANDBOX_",
+        "extra": "ignore",
+    }
 
 
 class ZMQSettings(BaseSettings):
@@ -201,8 +240,10 @@ class ZMQSettings(BaseSettings):
     enabled: bool = Field(default=False)
     socket_path: str = Field(default="ipc:///tmp/ai_ca.sock")
 
-    class Config:
-        env_prefix = "ZMQ_"
+    model_config = {
+        "env_prefix": "ZMQ_",
+        "extra": "ignore",
+    }
 
 
 class LoggingSettings(BaseSettings):
@@ -219,17 +260,21 @@ class LoggingSettings(BaseSettings):
     low_value_retention_hours: int = Field(default=72)
     s3_batch_interval_hours: int = Field(default=24)
 
-    class Config:
-        env_prefix = "LOG_"
+    model_config = {
+        "env_prefix": "LOG_",
+        "extra": "ignore",
+    }
 
 
 class Settings(BaseSettings):
     """Main application settings."""
 
     app_name: str = Field(default="AI-CA")
-    debug: bool = Field(default=False)
-    host: str = Field(default="0.0.0.0")
-    port: int = Field(default=8000)
+    debug: Optional[bool] = Field(default=None)
+    host: Optional[str] = Field(default=None)
+    port: Optional[int] = Field(default=None)
+    env: Optional[str] = Field(default=None)
+    workers: Optional[int] = Field(default=None)
 
     # Sub-settings
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
@@ -243,10 +288,29 @@ class Settings(BaseSettings):
     zmq: ZMQSettings = Field(default_factory=ZMQSettings)
 
     model_config = {
-        "env_prefix": "AICA_",
+        "env_prefix": "FASTAPI_",
         "env_nested_delimiter": "__",
         "extra": "ignore",
     }
+
+    @model_validator(mode="after")
+    def hydrate_from_env(self):
+        """Ensure core runtime settings are sourced from env."""
+        if self.host is None:
+            self.host = _first_env("FASTAPI_HOST")
+        if self.port is None:
+            port_value = _first_env("FASTAPI_PORT")
+            self.port = int(port_value) if port_value else None
+        if self.debug is None:
+            debug_value = _first_env("FASTAPI_DEBUG")
+            if debug_value is not None:
+                self.debug = str(debug_value).strip().lower() in ("1", "true", "yes", "on")
+        if self.env is None:
+            self.env = _first_env("FASTAPI_ENV")
+        if self.workers is None:
+            workers_value = _first_env("FASTAPI_WORKERS")
+            self.workers = int(workers_value) if workers_value else None
+        return self
 
 
 def load_yaml_config(path: Optional[Path] = None) -> Dict[str, Any]:
@@ -289,5 +353,5 @@ if yaml_config:
         if hasattr(settings, key) and isinstance(value, dict):
             sub_settings = getattr(settings, key)
             for sub_key, sub_value in value.items():
-                if hasattr(sub_settings, sub_key):
+                if hasattr(sub_settings, sub_key) and sub_value is not None:
                     setattr(sub_settings, sub_key, sub_value)

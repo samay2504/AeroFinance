@@ -1,11 +1,24 @@
-# AI-CA Configuration
-# Environment-driven overrides available via AICA_* prefix
+# AI-CA Configuration Template
+# ============================================================================
+# IMPORTANT: This file is for REFERENCE ONLY. All runtime configuration
+# MUST come from .env file. Do NOT hardcode values here.
+# Environment variables (via .env) take precedence over this file.
+# 
+# To override any setting, add to .env with appropriate prefix:
+# - FASTAPI_* for server settings
+# - LLM_* for LLM settings
+# - VECTORDB_* for vector database
+# - CACHE_* for Redis/cache
+# - STORAGE_* for file storage
+# - DEPLOYMENT_* for deployment settings
+# ============================================================================
 
+# These are defaults only. Override via .env environment variables.
 app_name: AI-CA
-debug: false
-log_level: INFO
-host: 0.0.0.0
-port: 8000
+debug: ~
+host: ~
+port: ~
+env: ~
 
 llm:
   provider_preference:
@@ -19,25 +32,16 @@ llm:
   max_retries: 3
   retry_delay: 1.0
   provider_cooldown: 60
-  
-  # Ollama settings
-  ollama_enabled: false
-  ollama_model: llama3.2
-  ollama_auto_pull: false
-  
-  # OpenRouter settings
-  openrouter_enabled: false
-  openrouter_model: gpt-4o-mini
 
 vectordb:
   primary: qdrant
-  qdrant_url: http://localhost:6333
-  qdrant_collection: ai_ca_docs
+  qdrant_url: ~ 
+  qdrant_collection: ~  
   embedding_model: all-MiniLM-L6-v2
 
 cache:
+  redis_url: ~  
   redis_enabled: false
-  redis_url: redis://localhost:6379/0
   ttl_query: 1800
   ttl_embedding: 86400
   lru_max_size: 10

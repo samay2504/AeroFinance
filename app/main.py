@@ -133,15 +133,19 @@ if __name__ == "__main__":
     from app.config import settings
 
     logger.info(
-        "Binding to %s:%s (from AICA_PORT / .env)", settings.host, settings.port
+        "Starting AI-CA on %s:%s (from FASTAPI_HOST/FASTAPI_PORT in .env)",
+        settings.host,
+        settings.port,
     )
     uvicorn.run(
         "app.main:app",
         host=settings.host,
         port=settings.port,
         reload=settings.debug,
+        log_level=settings.logging.level.lower(),
     )
 else:
-    # When started as "uvicorn app.main:app", our port is ignored; uvicorn uses --port (default 8000).
-    # To use port from .env, run: python -m app.main
+    # When started as "uvicorn app.main:app", uvicorn CLI args override .env
+    # For .env-driven setup with settings, use: python -m app.main or python serve.py
+    # For uvicorn CLI: uvicorn app.main:app --host 0.0.0.0 --port 9999 --reload
     pass
