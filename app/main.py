@@ -131,9 +131,16 @@ app.include_router(stream_router, prefix=base_prefix)
 if __name__ == "__main__":
     from app.config import settings
 
+    logger.info(
+        "Binding to %s:%s (from AICA_PORT / .env)", settings.host, settings.port
+    )
     uvicorn.run(
         "app.main:app",
         host=settings.host,
         port=settings.port,
         reload=settings.debug,
     )
+else:
+    # When started as "uvicorn app.main:app", our port is ignored; uvicorn uses --port (default 8000).
+    # To use port from .env, run: python -m app.main
+    pass
