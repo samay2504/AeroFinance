@@ -6,6 +6,11 @@ from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings
 from pathlib import Path
 import yaml
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 logger = logging.getLogger(__name__)
 
@@ -184,7 +189,7 @@ class Settings(BaseSettings):
     app_name: str = Field(default="AI-CA")
     debug: bool = Field(default=False)
     host: str = Field(default="0.0.0.0")
-    port: int = Field(default=8000)
+    port: int = Field(default=int(os.getenv("FASTAPI_PORT", 9999)))
     
     # Sub-settings
     logging: LoggingSettings = Field(default_factory=LoggingSettings)

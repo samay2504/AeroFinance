@@ -30,6 +30,12 @@ import uvicorn
 from app.core.id_generator import generate_request_id, get_iso_timestamp, normalize_client_id
 from app.config import settings
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -1069,7 +1075,7 @@ def run_cli():
     # Serve command
     serve_parser = subparsers.add_parser("serve", help="Start API server")
     serve_parser.add_argument("--host", default="0.0.0.0", help="Host")
-    serve_parser.add_argument("--port", type=int, default=8000, help="Port")
+    serve_parser.add_argument("--port", type=int, default=int(os.getenv("FASTAPI_PORT", 9999)), help="Port")
     
     args = parser.parse_args()
     
