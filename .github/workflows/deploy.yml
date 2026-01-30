@@ -29,9 +29,7 @@ jobs:
 
       - name: Package the deployment files
         run: |
-          tar --exclude=".git" --exclude="venv" --exclude="__pycache__" \
-              --exclude="*.pyc" --exclude=".env" \
-              -czvf "$DEPLOYMENT_PACKAGE_NAME" .
+          git archive --format=tar.gz -o "$DEPLOYMENT_PACKAGE_NAME" HEAD
 
       - name: Configure SSH and transfer package
         run: |
