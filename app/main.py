@@ -107,7 +107,6 @@ from app.routes.datasets import router as datasets_router
 from app.routes.metrics import router as metrics_router
 from app.routes.rehydrate import router as rehydrate_router
 from app.routes.stream import router as stream_router
-from app.routes.ids import router as ids_router
 
 
 @app.get("/")
@@ -127,7 +126,6 @@ app.include_router(datasets_router, prefix=base_prefix)
 app.include_router(metrics_router, prefix=base_prefix)
 app.include_router(rehydrate_router, prefix=base_prefix)
 app.include_router(stream_router, prefix=base_prefix)
-app.include_router(ids_router)
 
 
 if __name__ == "__main__":

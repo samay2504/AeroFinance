@@ -1,0 +1,79 @@
+name: Valuenaire Backend CI/CD - AI-CA
+
+on:
+  push:
+    branches:
+      - dev
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  deploy-ai-ca:
+    name: Deploy AI-CA Server
+    environment: dev
+    runs-on: ubuntu-latest
+    env:
+      SSH_PRIVATE_KEY: ${{ secrets.PRIVATE_KEY }}
+      HOST: ${{ secrets.DEV_SERVER }}
+      USER: "ubuntu"
+      DEPLOYMENT_PACKAGE_NAME: "dev-deploy-ai-ca.tar.gz"
+      REMOTE_PATH: "/home/ubuntu/backend/dev"
+      EXTRACT_PATH: "/home/ubuntu/backend/dev/ai-ca-server"
+      PM2_SERVICE_NAME: "ai-ca"
+      ECOSYSTEM_FILE_PATH: "$REMOTE_PATH/ecosystem.config.json"
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Package the deployment files
+        run: |
+          tar --exclude=".git" --exclude="venv" --exclude="__pycache__" \
+              --exclude="*.pyc" --exclude=".env" \
+              -czvf "$DEPLOYMENT_PACKAGE_NAME" .
+
+      - name: Configure SSH and transfer package
+        run: |
+          mkdir -p ~/.ssh
+          echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H $HOST >> ~/.ssh/known_hosts
+          scp -i ~/.ssh/id_rsa "$DEPLOYMENT_PACKAGE_NAME" $USER@$HOST:$REMOTE_PATH
+
+      - name: Deploy on remote server
+        run: |
+          ssh -i ~/.ssh/id_rsa $USER@$HOST 'bash -s' <<EOF
+          set -e
+          REMOTE_PATH="$REMOTE_PATH"
+          EXTRACT_PATH="$EXTRACT_PATH"
+          DEPLOYMENT_PACKAGE_NAME="$DEPLOYMENT_PACKAGE_NAME"
+          PM2_SERVICE_NAME="$PM2_SERVICE_NAME"
+          ECOSYSTEM_FILE_PATH="$ECOSYSTEM_FILE_PATH"
+
+          cd "\$REMOTE_PATH"
+
+          if [ -f "\$DEPLOYMENT_PACKAGE_NAME" ]; then
+            mkdir -p "\$EXTRACT_PATH"
+            tar -xzf "\$DEPLOYMENT_PACKAGE_NAME" -C "\$EXTRACT_PATH"
+            rm "\$DEPLOYMENT_PACKAGE_NAME"
+          fi
+
+          cd "\$EXTRACT_PATH"
+          if [ ! -d "venv" ]; then
+            python3 -m venv venv
+          fi
+          ./venv/bin/pip install --upgrade pip
+          ./venv/bin/pip install -r requirements.txt
+
+          if pm2 list | grep -q "\$PM2_SERVICE_NAME"; then
+            pm2 restart "\$PM2_SERVICE_NAME"
+          else
+            pm2 start "\$ECOSYSTEM_FILE_PATH" --only "\$PM2_SERVICE_NAME"
+          fi
+
+          pm2 save
+          EOF
+
+      - name: Clean up local package
+        run: rm -rf "$DEPLOYMENT_PACKAGE_NAME"
