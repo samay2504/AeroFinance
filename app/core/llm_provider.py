@@ -273,6 +273,11 @@ class LLMProvider:
         if not HUGGINGFACE_AVAILABLE:
             raise ImportError("langchain_huggingface not available")
 
+        try:
+            from langchain_huggingface import HuggingFaceEndpoint
+        except ImportError:
+            raise ImportError("langchain_huggingface not available")
+
         api_key = os.getenv("HUGGINGFACEHUB_API_TOKEN")
         if not api_key:
             raise ValueError("HUGGINGFACEHUB_API_TOKEN not set")

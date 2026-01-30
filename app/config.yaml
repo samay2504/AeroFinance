@@ -21,13 +21,7 @@ port: ~
 env: ~
 
 llm:
-  provider_preference:
-    - groq
-    - google_genai
-    - ollama
-    - openrouter
-    - openai
-    - fallback
+  provider_preference: ~  # MUST be set via LLM_PROVIDER_PREFERENCE in .env
   temperature: 0.1
   max_retries: 3
   retry_delay: 1.0

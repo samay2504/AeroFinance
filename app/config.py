@@ -10,12 +10,15 @@ import yaml
 
 logger = logging.getLogger(__name__)
 
+# Default LLM provider order - ONLY used as last resort if LLM_PROVIDER_PREFERENCE env not set
+# Production: Always set LLM_PROVIDER_PREFERENCE in .env
 DEFAULT_LLM_PROVIDERS = [
-    "groq",
     "google_genai",
-    "ollama",
+    "groq",
     "openrouter",
+    "ollama",
     "openai",
+    "huggingface",
     "fallback",
 ]
 
