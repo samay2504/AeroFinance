@@ -86,6 +86,7 @@ app = FastAPI(
     title="AI-CA",
     description="Agentic AI Chartered Accountant RAG System",
     version="1.0.0",
+    root_path="/ai-ca",
     lifespan=lifespan,
     openapi_tags=openapi_tags,
 )
@@ -118,7 +119,7 @@ async def root():
     }
 
 
-base_prefix = "/v1/ai-ca"
+base_prefix = "/v1/api"
 app.include_router(health_router, prefix=base_prefix)
 app.include_router(ingest_router, prefix=base_prefix)
 app.include_router(query_router, prefix=base_prefix)
