@@ -28,6 +28,7 @@ from pathlib import Path
 
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from langchain_core.prompts import PromptTemplate
+from app.core.llm_provider import StreamMetadata, StreamCallbacks
 
 logger = logging.getLogger(__name__)
 
@@ -1714,9 +1715,10 @@ class LLMWrapper:
             base = str(current).split("_")[0]
             self._failed_providers.add(base)
 
+        # Read from config (which comes from .env LLM_PROVIDER_PREFERENCE)
         provider_preference = self.config.get(
             "provider_preference",
-            ["groq", "google_genai", "ollama", "openrouter", "openai", "fallback"]
+            ["google_genai", "groq", "openrouter", "ollama", "openai", "huggingface", "fallback"]
         )
 
         for provider_name in provider_preference:
@@ -1974,8 +1976,8 @@ class LLMWrapper:
         self,
         prompt: Union[str, PromptTemplate],
         on_token: Optional[Callable[[str, int], None]] = None,
-        on_start: Optional[Callable[["StreamMetadata"], None]] = None,
-        on_end: Optional[Callable[["StreamMetadata"], None]] = None,
+        on_start: Optional[Callable[[StreamMetadata], None]] = None,
+        on_end: Optional[Callable[[StreamMetadata], None]] = None,
         on_error: Optional[Callable[[Exception], None]] = None,
         metadata: Optional[Dict[str, Any]] = None,
         **kwargs
@@ -2008,7 +2010,6 @@ class LLMWrapper:
                 on_end=lambda m: print(f"Done: {m.first_token_latency_ms}ms to first token")
             )
         """
-        from .llm_provider import StreamCallbacks, StreamMetadata
         
         if not self._llm_provider:
             if on_error:
