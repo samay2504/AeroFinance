@@ -1675,6 +1675,30 @@ class LLMWrapper:
         except Exception as e:
             logger.warning(f"Redis unavailable, using in-memory cache: {e}")
 
+    def _should_trigger_fallback(self, error_str: str) -> bool:
+        """Return True if error indicates provider should be rotated."""
+        msg = (error_str or "").lower()
+        return any(
+            token in msg
+            for token in [
+                "429",
+                "quota",
+                "rate",
+                "exhausted",
+                "exceeded",
+                "payment required",
+                "insufficient credits",
+                "credit",
+                "402",
+                "401",
+                "403",
+                "unauthorized",
+                "forbidden",
+                "invalid api key",
+                "invalid_api_key",
+            ]
+        )
+
     def _cache_key(self, prefix: str, **kwargs) -> str:
         """Generate cache key from parameters."""
         key_data = json.dumps(kwargs, sort_keys=True, default=str)
@@ -1813,16 +1837,11 @@ class LLMWrapper:
 
         except Exception as e:
             error_str = str(e)
-            is_quota_error = any(
-                x in error_str.lower()
-                for x in ["429", "quota", "rate", "exhausted", "exceeded"]
-            )
-
-            if is_quota_error:
-                logger.warning(f"⚠️ Rate limit: {error_str[:100]}")
+            if self._should_trigger_fallback(error_str):
+                logger.warning(f"⚠️ Provider error, attempting fallback: {error_str[:120]}")
                 if self._attempt_provider_fallback():
                     return self.invoke(prompt, use_cache=use_cache, **kwargs)
-                return "Error: Rate limit exceeded, no fallback available"
+                return "Error: Provider unavailable, no fallback available"
 
             logger.error(f"LLM invoke failed: {e}")
             return f"Error: {str(e)}"
@@ -1942,15 +1961,10 @@ class LLMWrapper:
 
         except Exception as e:
             error_str = str(e)
-            is_quota_error = any(
-                x in error_str.lower()
-                for x in ["429", "quota", "rate", "exhausted", "exceeded"]
-            )
-
-            if is_quota_error:
+            if self._should_trigger_fallback(error_str):
                 if self._attempt_provider_fallback():
                     return self.invoke_with_structured_output(prompt, output_schema, **kwargs)
-                return {"error": "Rate limit exceeded", "fallback": True}
+                return {"error": "Provider unavailable", "fallback": True}
 
             logger.error(f"Structured invoke failed: {e}")
             return {"error": str(e), "fallback": True}

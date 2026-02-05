@@ -9,6 +9,7 @@ import json
 from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 import pandas as pd
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -2339,9 +2340,14 @@ Keep the summary concise but informative (3-5 paragraphs)."""
             # LocalLLM uses OpenAI-compatible API endpoints (works with Ollama, LiteLLM, etc.)
             llm = None
             
+            # Set dummy API key to bypass PandasAI credit check (we're using custom adapter)
+            import os
+            if 'PANDASAI_API_KEY' not in os.environ:
+                os.environ['PANDASAI_API_KEY'] = 'custom-adapter-bypass'
+            
             # Strategy 1: Try LocalLLM with our LLM provider's HTTP endpoint
             try:
-                from pandasai.llm.local_llm import LocalLLM
+                from pandasai.llm import LocalLLM
                 
                 # Determine API base URL based on current provider
                 api_base = None
@@ -2356,7 +2362,7 @@ Keep the summary concise but informative (3-5 paragraphs)."""
                         model_name = getattr(provider.llm, 'model', 'llama3.2')
                     elif current == 'openrouter':
                         api_base = "https://openrouter.ai/api/v1"
-                        model_name = "gpt-4o-mini"
+                        model_name = "gpt-5.2-codex"
                     elif current in ('groq', 'google_genai'):
                         # Groq and Gemini don't have OpenAI-compatible endpoints
                         # Fall through to use our adapter
