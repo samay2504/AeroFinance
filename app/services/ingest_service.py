@@ -41,12 +41,13 @@ def _ingest_file_content(
     filename: str,
     client_id: str,
     ingest_all: bool,
+    chat_id: Optional[str] = None,
 ) -> UploadResponse:
     from app.agents.data_analyst import get_data_analyst_agent
     from app.core.id_generator import generate_doc_id
 
     agent = get_data_analyst_agent()
-    doc_id = generate_doc_id(client_id, filename)
+    doc_id = generate_doc_id(client_id, filename, chat_id=chat_id)
     logger.info(f"Generated doc_id: {doc_id} for {filename}")
     register_cb = _register_callback(agent, client_id, doc_id)
 
@@ -151,13 +152,12 @@ def _ingest_file_path(
 
 
 async def upload_file(
-    file: UploadFile, client_id: str, ingest_all: bool
+    file: UploadFile, client_id: str, ingest_all: bool, chat_id: Optional[str] = None
 ) -> UploadResponse:
-    """Upload and ingest Excel/CSV/JSON file with unique document ID generation."""
-    try:
+    \"\"\"Upload and ingest Excel/CSV/JSON file with unique document ID generation.\"\"\"\n    try:
         content = await file.read()
         filename = file.filename or "uploaded_file"
-        return _ingest_file_content(content, filename, client_id, ingest_all)
+        return _ingest_file_content(content, filename, client_id, ingest_all, chat_id=chat_id)
     except HTTPException:
         raise
     except Exception as e:

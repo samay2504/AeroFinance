@@ -1574,10 +1574,15 @@ class HotPromptCache:
                 "l3_errors": self._metrics["l3_errors"],
                 "l2_healthy": self._redis_healthy,
                 "l3_enabled": self._embeddings_enabled,
+                "embeddings_enabled": self._embeddings_enabled,  # Alias for compatibility
                 "prefix_count": len(self._prefix_hashes),
                 "embedding_count": len(self._query_embeddings),
                 "total_size_chars": sum(self._l1_sizes.values())
             }
+    
+    def stats(self) -> Dict[str, Any]:
+        """Alias for get_metrics() for backward compatibility."""
+        return self.get_metrics()
 
 
 # =============================================================================
@@ -1706,28 +1711,43 @@ class LLMWrapper:
         return f"{prefix}:{hash_val}"
 
     def _get_cached(self, key: str) -> Optional[str]:
-        """Get from cache."""
+        """Get from cache using HotPromptCache with semantic matching."""
         if not self._cache_enabled:
             return None
-        if self._redis_client:
-            try:
-                val = self._redis_client.get(key)
-                return val.decode() if val else None
-            except Exception:
-                pass
-        return self._cache.get(key)
+        
+        try:
+            hot_cache = get_hot_prompt_cache()
+            # Use empty system prompt, full key as query for backward compatibility
+            # Semantic matching still works by comparing query embeddings
+            cached_response = hot_cache.get(
+                system_prompt="",
+                user_query=key,
+                check_semantic=True
+            )
+            return cached_response
+        except Exception as e:
+            logger.debug(f"HotPromptCache lookup failed, falling back: {e}")
+            # Graceful fallback to simple cache
+            return self._cache.get(key)
 
     def _set_cached(self, key: str, value: str, ttl: int = 1800):
-        """Set in cache."""
+        """Set in cache using HotPromptCache with embedding storage."""
         if not self._cache_enabled:
             return
-        if self._redis_client:
-            try:
-                self._redis_client.setex(key, ttl, value)
-                return
-            except Exception:
-                pass
-        self._cache[key] = value
+        
+        try:
+            hot_cache = get_hot_prompt_cache()
+            # Store with semantic embedding for future similarity matching
+            hot_cache.put(
+                system_prompt="",
+                user_query=key,
+                response=value,
+                ttl_override=ttl
+            )
+        except Exception as e:
+            logger.debug(f"HotPromptCache store failed, using fallback: {e}")
+            # Graceful fallback to simple cache
+            self._cache[key] = value
 
     def _attempt_provider_fallback(self) -> bool:
         """Attempt to switch to fallback provider."""
@@ -1797,20 +1817,31 @@ class LLMWrapper:
         retry=retry_if_exception_type(RETRYABLE_EXCEPTIONS),
     )
     def invoke(self, prompt: Union[str, PromptTemplate], use_cache: bool = True, **kwargs) -> str:
-        """Invoke LLM with prompt."""
+        """Invoke LLM with prompt using semantic caching."""
         if not self.llm:
             return "Error: LLM provider unavailable"
 
         try:
             formatted_prompt = self._format_prompt(prompt, **kwargs)
 
-            # Check cache
-            if use_cache:
-                cache_key = self._cache_key("llm", prompt=formatted_prompt, provider=self.provider_name)
-                cached = self._get_cached(cache_key)
-                if cached:
-                    self._cache_hits += 1
-                    return cached
+            # Check cache with semantic similarity matching
+            if use_cache and self._cache_enabled:
+                try:
+                    hot_cache = get_hot_prompt_cache()
+                    # Use provider as system context, formatted_prompt as query
+                    # This groups similar queries by provider while enabling semantic matching
+                    system_context = f"provider:{self.provider_name}"
+                    cached = hot_cache.get(
+                        system_prompt=system_context,
+                        user_query=formatted_prompt,
+                        check_semantic=True
+                    )
+                    if cached:
+                        self._cache_hits += 1
+                        logger.debug(f"Cache HIT (semantic): {formatted_prompt[:80]}...")
+                        return cached
+                except Exception as e:
+                    logger.debug(f"Semantic cache lookup failed: {e}")
 
             # Invoke LLM
             start_time = time.time()
@@ -1828,9 +1859,19 @@ class LLMWrapper:
             else:
                 result = str(response)
 
-            # Cache result
-            if use_cache:
-                self._set_cached(cache_key, result)
+            # Cache result with semantic embedding
+            if use_cache and self._cache_enabled:
+                try:
+                    hot_cache = get_hot_prompt_cache()
+                    system_context = f"provider:{self.provider_name}"
+                    hot_cache.put(
+                        system_prompt=system_context,
+                        user_query=formatted_prompt,
+                        response=result
+                    )
+                    logger.debug(f"Cached response with embedding: {formatted_prompt[:80]}...")
+                except Exception as e:
+                    logger.debug(f"Semantic cache store failed: {e}")
 
             logger.debug(f"LLM invoke: {elapsed_ms:.0f}ms ({self.provider_name})")
             return result
@@ -1854,7 +1895,7 @@ class LLMWrapper:
     def invoke_with_structured_output(
         self, prompt: Union[str, PromptTemplate], output_schema: Dict[str, Any], **kwargs
     ) -> Dict[str, Any]:
-        """Invoke LLM expecting structured JSON output."""
+        """Invoke LLM expecting structured JSON output with semantic caching."""
         if not self.llm:
             return {"error": "LLM provider unavailable"}
 
@@ -1879,6 +1920,25 @@ class LLMWrapper:
             if "json" not in formatted_prompt.lower():
                 formatted_prompt += json_instruction
 
+            # Check cache with semantic similarity
+            if self._cache_enabled:
+                try:
+                    hot_cache = get_hot_prompt_cache()
+                    system_context = f"provider:{self.provider_name}:structured"
+                    cached = hot_cache.get(
+                        system_prompt=system_context,
+                        user_query=formatted_prompt,
+                        check_semantic=True
+                    )
+                    if cached:
+                        self._cache_hits += 1
+                        logger.debug(f"Structured cache HIT (semantic): {formatted_prompt[:60]}...")
+                        # Parse cached JSON
+                        from app.core.llm_utils import RobustJSONParser
+                        return RobustJSONParser.parse(cached)
+                except Exception as e:
+                    logger.debug(f"Structured semantic cache lookup failed: {e}")
+
             # Invoke
             start_time = time.time()
             response = self.llm.invoke(formatted_prompt)
@@ -1892,6 +1952,20 @@ class LLMWrapper:
                 content = response.content
             else:
                 content = str(response)
+
+            # Cache the raw content (before parsing)
+            if self._cache_enabled:
+                try:
+                    hot_cache = get_hot_prompt_cache()
+                    system_context = f"provider:{self.provider_name}:structured"
+                    hot_cache.put(
+                        system_prompt=system_context,
+                        user_query=formatted_prompt,
+                        response=content
+                    )
+                    logger.debug(f"Cached structured response: {formatted_prompt[:60]}...")
+                except Exception as e:
+                    logger.debug(f"Structured semantic cache store failed: {e}")
 
             # Clean markdown code blocks
             content = content.strip()

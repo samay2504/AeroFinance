@@ -52,7 +52,7 @@ async def stream_query_events(request) -> AsyncGenerator[str, None]:
                     f"event: progress\ndata: {json.dumps({'sheet': sheet_name, 'index': i+1, 'total': min(len(datasets), 3)})}\n\n"
                 )
 
-                summary_result = agent.summarize_dataset(ds_id, client_id=safe_client)
+                summary_result = agent.summarize_dataset(ds_id, client_id=safe_client, user_query=request.query)
                 if summary_result.get("value"):
                     summary_text = f"**{sheet_name}:** {summary_result['value']}"
                     summaries.append(summary_text)
@@ -94,12 +94,24 @@ async def stream_query_events(request) -> AsyncGenerator[str, None]:
             yield f"event: progress\ndata: {json.dumps({'step': 'llm_generation'})}\n\n"
 
             try:
-                response = llm.invoke(f"Answer this query: {request.query}")
+                # Use native LangChain streaming for token-by-token delivery
+                token_queue = []
+                
+                def on_token(token: str, seq: int):
+                    token_queue.append(token)
+                
+                response = llm.stream_chat(
+                    f"Answer this query: {request.query}",
+                    on_token=on_token,
+                )
+                
+                # Yield tokens that were collected during streaming
+                for token in token_queue:
+                    yield f"event: token\ndata: {json.dumps({'token': token})}\n\n"
+                    await asyncio.sleep(0.005)
+                
                 result_text = response
                 method = "llm_direct"
-                for word in result_text.split():
-                    yield f"event: token\ndata: {json.dumps({'token': word + ' '})}\n\n"
-                    await asyncio.sleep(0.01)
             except Exception as e:
                 result_text = f"Error: {str(e)}"
                 method = "error"

@@ -81,7 +81,7 @@ async def handle_query(request: QueryRequest) -> QueryResponse:
             summaries = []
             for ds in datasets[:5]:  # Limit to 5
                 ds_id = ds.get("dataset_id", "")
-                result = agent.summarize_dataset(ds_id, client_id=request.client)
+                result = agent.summarize_dataset(ds_id, client_id=request.client, user_query=request.query)
                 if result.get("value"):
                     sheet_name = ds_id.split(":")[-1]
                     summaries.append(f"**{sheet_name}:** {result['value']}")
@@ -209,6 +209,7 @@ async def handle_query(request: QueryRequest) -> QueryResponse:
                         "route": track,
                         "raw_value": best_result.value,
                     },
+                    provenance=best_result.provenance,
                 )
 
             # FALLBACK: RAG Semantic Search

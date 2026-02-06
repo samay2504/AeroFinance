@@ -1,5 +1,6 @@
 """Ingestion routes."""
 
+from typing import Optional
 from fastapi import APIRouter, UploadFile, File, Form
 from app.controllers.ingest_controller import (
     upload_file,
@@ -16,9 +17,10 @@ async def upload_route(
     file: UploadFile = File(...),
     client_id: str = Form(...),
     ingest_all: bool = Form(True),
+    chat_id: Optional[str] = Form(None),
 ):
     """Upload and ingest Excel/CSV/JSON file with unique document ID generation."""
-    result = await upload_file(file=file, client_id=client_id, ingest_all=ingest_all)
+    result = await upload_file(file=file, client_id=client_id, ingest_all=ingest_all, chat_id=chat_id)
     return RootResponse(
         message="Upload completed",
         data=result,
