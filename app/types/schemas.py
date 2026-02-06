@@ -8,10 +8,11 @@ from app.types.health import HealthComponents
 class QueryRequest(BaseModel):
     """Query request with client and optional session tracking."""
 
-    client: str  # user_id or client_id
+    client: str
     query: str
     dataset_id: Optional[str] = None
-    session_id: Optional[str] = None  # For conversation tracking
+    session_id: Optional[str] = None
+    chat_id: Optional[str] = None
     use_cache: bool = True
 
 
@@ -21,6 +22,7 @@ class StreamQueryRequest(BaseModel):
     client: str
     query: str
     dataset_id: Optional[str] = None
+    chat_id: Optional[str] = None
 
 
 class QueryResponse(BaseModel):
@@ -31,7 +33,8 @@ class QueryResponse(BaseModel):
     method: str = "unknown"
     explanation: str = ""
     error: Optional[str] = None
-    query_id: str = ""  # Unique query ID for audit
+    query_id: str = ""
+    provenance: Dict[str, Any] = {}
     metadata: Dict[str, Any] = {}
 
 

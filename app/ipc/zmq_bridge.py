@@ -199,12 +199,18 @@ def _query_handler(payload: Dict) -> Dict:
     
     result = agent.execute_sql_query(query, df_id, client_id=safe_client_id)
     
+    # PRODUCTION FIX: Generate unique cache context for result formatting
+    import hashlib
+    query_hash = hashlib.md5(query.lower().encode()).hexdigest()[:8]
+    format_cache_context = f"{safe_client_id}:format:{query_hash}"
+    
     # Format as human-like response
     natural_response = _format_natural_response(
         query=query,
         raw_result=result.result,
         explanation=result.explanation,
-        llm=llm
+        llm_wrapper=llm,
+        cache_context=format_cache_context,
     )
     
     return {

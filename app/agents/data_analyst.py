@@ -9,6 +9,7 @@ import json
 from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 import pandas as pd
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +25,7 @@ class AnalysisResult:
     error: Optional[str] = None
     confidence: float = 1.0
     metadata: Dict[str, Any] = field(default_factory=dict)
+    provenance: Dict[str, Any] = field(default_factory=dict)
 
 
 class DataAnalystAgent:
@@ -243,6 +245,14 @@ class DataAnalystAgent:
         if self._data_registry:
             metadata = {"preprocessing": preprocessing_report} if preprocessing_report else {}
             self._data_registry.register(dataset_id, df, metadata, safe_client_id)
+
+        # PRE-PROCESSING: Compute schema metadata for faster query response
+        if self._schema_analyzer:
+            try:
+                schema = self._schema_analyzer.analyze(df, dataset_id, context=dataset_id)
+                logger.debug(f"Pre-computed schema for {dataset_id}: {schema.summary[:50] if schema.summary else 'N/A'}")
+            except Exception as e:
+                logger.debug(f"Schema pre-computation skipped: {e}")
 
         logger.info(f"Registered dataset: {dataset_id} ({len(df)} rows)")
         return True
@@ -602,7 +612,8 @@ class DataAnalystAgent:
         self, 
         dataset_id: str, 
         client_id: Optional[str] = None,
-        sample_n: int = 3
+        sample_n: int = 3,
+        user_query: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Generate a human-readable summary of a dataset.
@@ -614,6 +625,7 @@ class DataAnalystAgent:
             dataset_id: The dataset identifier
             client_id: Optional client ID for multi-tenant filtering
             sample_n: Number of sample rows to include (default: 3)
+            user_query: Optional user query to adapt summary length/format
             
         Returns:
             Dict with keys:
@@ -632,17 +644,32 @@ class DataAnalystAgent:
                 "provenance": []
             }
         
-        # Check cache first (use Redis if available, else in-memory)
+        # Parse user query for length/format preferences
+        length_hint = "comprehensive"  # default
+        format_hint = ""
+        if user_query:
+            q_lower = user_query.lower()
+            if any(kw in q_lower for kw in ["brief", "short", "quick", "1-line", "one line"]):
+                length_hint = "brief (1-2 sentences)"
+            elif any(kw in q_lower for kw in ["1 paragraph", "one paragraph", "paragraph"]):
+                length_hint = "one paragraph"
+            elif any(kw in q_lower for kw in ["detailed", "comprehensive", "full", "explain"]):
+                length_hint = "detailed"
+            if "bullet" in q_lower or "list" in q_lower:
+                format_hint = "Use bullet points."
+        
+        # Check cache only for default length (no custom query)
         cache_key = f"summary:{dataset_id}"
-        if hasattr(self, '_summary_cache'):
-            cached = self._summary_cache.get(cache_key)
-            if cached:
-                return {
-                    "value": cached,
-                    "method": "cache",
-                    "provenance": [{"dataset_id": dataset_id}]
-                }
-        else:
+        if not user_query or length_hint == "comprehensive":
+            if hasattr(self, '_summary_cache'):
+                cached = self._summary_cache.get(cache_key)
+                if cached:
+                    return {
+                        "value": cached,
+                        "method": "cache",
+                        "provenance": [{"dataset_id": dataset_id}]
+                    }
+        if not hasattr(self, '_summary_cache'):
             self._summary_cache = {}
         
         # Build metadata for prompt
@@ -656,9 +683,14 @@ class DataAnalystAgent:
             "sample_rows": df.head(sample_n).to_dict(orient="records")
         }
         
+        # Build adaptive summary query with length/format hints
+        summary_query = f"Provide a {length_hint} overview of this dataset."
+        if format_hint:
+            summary_query += f" {format_hint}"
+        
         # Try LLM summary first
         result = self._try_llm_summary(
-            query="Provide an overview of this dataset",
+            query=summary_query,
             df=df,
             df_id=dataset_id,
             client_id=client_id
@@ -737,16 +769,29 @@ class DataAnalystAgent:
         1. Try deterministic SQL templates
         2. Try LLM SQL generation
         3. Fall back to LLM SQL/Python
+        
+        PRODUCTION: Cache is dataset-scoped to prevent cross-dataset pollution.
+                    Provenance tracks which dataset/rows/columns were used.
         """
         df = self._get_dataframe(df_id, client_id)
         if df is None:
             return AnalysisResult(
                 success=False,
                 error=f"Dataset not found: {df_id}",
-                method="error"
+                method="error",
+                provenance={"dataset_id": df_id, "error": "dataset_not_found"}
             )
 
         schema = self._get_schema_info(df, df_id)
+        
+        # PRODUCTION FIX: Build unique cache context from dataset + query signature
+        # This ensures "project name" and "revenue" queries NEVER match
+        # even if their internal LLM prompts are similar
+        import hashlib
+        query_hash = hashlib.md5(query.lower().encode()).hexdigest()[:8]
+        cache_context = f"{df_id}:{query_hash}"
+        
+        logger.debug(f"Query cache context: {cache_context} for: {query[:50]}...")
 
         # Check for metadata queries first
         meta_result = self._handle_metadata_query(query, df, df_id, client_id)
@@ -794,6 +839,9 @@ class DataAnalystAgent:
             if heuristic_summary:
                 return heuristic_summary
 
+        # PRODUCTION: Pass cache_context to ALL analysis methods that use LLM
+        # This ensures each unique (dataset + query) combination gets fresh analysis
+        
         # Step 1: Try semantic Pandas (fast, deterministic, schema-based)
         # Always try this first as it's the fastest and most reliable for simple lookups
         heuristic_result = self._try_heuristic_pandas(query, df, df_id)
@@ -803,13 +851,13 @@ class DataAnalystAgent:
         # Step 2: Try PandasAI (natural language to DataFrame queries)
         # Prioritized per user request - excellent for complex analysis
         if self._llm:
-            pandasai_result = self._try_pandasai(query, df, df_id)
+            pandasai_result = self._try_pandasai(query, df, df_id, cache_context)
             if pandasai_result and pandasai_result.success:
                 return pandasai_result
 
         # Step 3: Try LLM Python code generation (Sandbox)
         if self._llm and self._sandbox:
-            python_result = self._try_llm_python(query, df, df_id, schema)
+            python_result = self._try_llm_python(query, df, df_id, schema, cache_context)
             if python_result and python_result.success:
                 # Filter out "Data not found" type results
                 result_str = str(python_result.result).lower()
@@ -823,7 +871,7 @@ class DataAnalystAgent:
 
         # Step 5: Try LLM SQL generation
         if self._llm:
-            llm_result = self._try_llm_sql(query, df, df_id, schema)
+            llm_result = self._try_llm_sql(query, df, df_id, schema, cache_context)
             if llm_result and llm_result.success:
                 # Filter out "Data not found" type results
                 result_str = str(llm_result.result).lower()
@@ -1117,7 +1165,15 @@ class DataAnalystAgent:
                     result=result_text,
                     value=numeric_value,
                     method="pandas:semantic_direct_lookup",
-                    explanation=explanation
+                    explanation=explanation,
+                    provenance={
+                        "dataset_id": df_id_match,
+                        "sheet_name": df_id_match.split(':')[-1] if ':' in df_id_match else df_id_match,
+                        "row_label": r_label,
+                        "row_index": int(r_idx),
+                        "column_name": str(c_name),
+                        "column_index": int(c_idx)
+                    }
                 )
 
             return None
@@ -1612,7 +1668,8 @@ Provide a clear, structured summary that includes:
 
 Keep the summary concise but informative (3-5 paragraphs)."""
 
-            response = self._llm.invoke(prompt)
+            # PRODUCTION FIX: Pass dataset ID as cache context to scope caching
+            response = self._llm.invoke(prompt, cache_context=df_id)
             summary = str(response.content) if hasattr(response, 'content') else str(response)
             
             # Post-processing: Semantic check for key term presence
@@ -1636,7 +1693,15 @@ Keep the summary concise but informative (3-5 paragraphs)."""
                 success=True,
                 result=summary,
                 method="llm:semantic_summary",
-                explanation=f"Generated {detected_type} summary using LLM with {'RAG context and ' if rag_context else ''}semantic analysis"
+                explanation=f"Generated {detected_type} summary using LLM with {'RAG context and ' if rag_context else ''}semantic analysis",
+                provenance={
+                    "dataset_id": df_id,
+                    "method": "llm_semantic_summary",
+                    "detected_type": detected_type,
+                    "rows_analyzed": len(df),
+                    "columns": list(df.columns[:10]),
+                    "used_rag": bool(rag_context)
+                }
             )
             
         except Exception as e:
@@ -1685,7 +1750,13 @@ Keep the summary concise but informative (3-5 paragraphs)."""
                     success=True,
                     result="\n".join(summary_parts),
                     method="pandas:heuristic_summary",
-                    explanation=f"Generated overview of {df_id}"
+                    explanation=f"Generated overview of {df_id}",
+                    provenance={
+                        "dataset_id": df_id,
+                        "method": "heuristic_summary",
+                        "rows": len(df),
+                        "columns": len(df.columns)
+                    }
                 )
         except Exception as e:
             logger.warning(f"Heuristic summary failed: {e}")
@@ -1719,7 +1790,12 @@ Keep the summary concise but informative (3-5 paragraphs)."""
                 result=f"There are {len(all_sheets)} sheets available in the loaded data.",
                 value=float(len(all_sheets)),
                 method="metadata_fast",
-                explanation="Counted registered datasets using fast path"
+                explanation="Counted registered datasets using fast path",
+                provenance={
+                    "dataset_id": df_id,
+                    "query_type": "metadata_count",
+                    "total_sheets": len(all_sheets)
+                }
             )
         
         if 'list' in query_lower and 'sheet' in query_lower:
@@ -1795,7 +1871,8 @@ Keep the summary concise but informative (3-5 paragraphs)."""
                 import json
                 
                 prompt = get_metadata_query_prompt(query, datasets_info, schema_info)
-                response = self._llm.invoke(prompt)
+                # PRODUCTION FIX: Pass dataset ID as cache context
+                response = self._llm.invoke(prompt, cache_context=df_id)
                 
                 # Try to parse JSON response
                 try:
@@ -1816,7 +1893,13 @@ Keep the summary concise but informative (3-5 paragraphs)."""
                                 result=answer,
                                 value=float(len(sheet_names)),
                                 method="metadata_llm",
-                                explanation=f"Answered {result.get('query_type', 'metadata')} query using semantic understanding"
+                                explanation=f"Answered {result.get('query_type', 'metadata')} query using semantic understanding",
+                                provenance={
+                                    "dataset_id": df_id,
+                                    "query_type": "metadata",
+                                    "identified_as": result.get('query_type', 'metadata'),
+                                    "total_sheets": len(sheet_names)
+                                }
                             )
                 except json.JSONDecodeError:
                     # Ignore parsing errors - fallback to manual checks below
@@ -2051,7 +2134,8 @@ Keep the summary concise but informative (3-5 paragraphs)."""
             for attempt in range(max_attempts):
                 response = self._llm.invoke_with_structured_output(
                     prompt,
-                    output_schema={"sql": str, "columns_used": list, "explanation": str}
+                    output_schema={"sql": str, "columns_used": list, "explanation": str},
+                    cache_context=cache_context
                 )
 
                 if "error" in response or "sql" not in response:
@@ -2059,6 +2143,9 @@ Keep the summary concise but informative (3-5 paragraphs)."""
                     continue
 
                 sql = response["sql"]
+                
+                # Log LLM-generated SQL for debugging/audit
+                logger.info(f"LLM SQL generated: {sql}")
                 
                 # Fix common LLM errors: wrong table name (missing double underscore)
                 # Replace single underscore variants with the correct sanitized name
@@ -2173,14 +2260,25 @@ Keep the summary concise but informative (3-5 paragraphs)."""
                             result=val if value is None else value,
                             value=value,
                             method="sql_duckdb:llm_semantic",
-                            explanation=response.get("explanation", f"SQL: {sql[:80]}")
+                            explanation=response.get("explanation", f"SQL: {sql[:80]}"),
+                            provenance={
+                                "dataset_id": df_id,
+                                "sql_query": sql,
+                                "columns_used": response.get("columns_used", [])
+                            }
                         )
                     else:
                         return AnalysisResult(
                             success=True,
                             result=result_df.to_dict(),
                             method="sql_duckdb:llm_semantic",
-                            explanation=response.get("explanation", f"Returned {len(result_df)} rows")
+                            explanation=response.get("explanation", f"Returned {len(result_df)} rows"),
+                            provenance={
+                                "dataset_id": df_id,
+                                "sql_query": sql,
+                                "columns_used": response.get("columns_used", []),
+                                "row_count": len(result_df)
+                            }
                         )
                         
                 except Exception as exec_error:
@@ -2202,9 +2300,15 @@ Keep the summary concise but informative (3-5 paragraphs)."""
         query: str,
         df: pd.DataFrame,
         df_id: str,
-        schema: Dict[str, Any]
+        schema: Dict[str, Any],
+        cache_context: Optional[str] = None
     ) -> Optional[AnalysisResult]:
-        """Try LLM-generated Python code in sandbox with enhanced context."""
+        """Try LLM-generated Python code with query-specific cache context.
+        
+        Args:
+            cache_context: Unique context (dataset:query_hash) to prevent
+                          cache collision between different queries
+        """
         if not self._llm or not self._sandbox:
             return None
 
@@ -2260,7 +2364,8 @@ Keep the summary concise but informative (3-5 paragraphs)."""
             for attempt in range(max_attempts):
                 response = self._llm.invoke_with_structured_output(
                     prompt,
-                    output_schema={"code": str, "explanation": str}
+                    output_schema={"code": str, "explanation": str},
+                    cache_context=cache_context
                 )
 
                 if "error" in response or "code" not in response:
@@ -2268,6 +2373,9 @@ Keep the summary concise but informative (3-5 paragraphs)."""
                     continue
 
                 code = response["code"]
+                
+                # Log LLM-generated Python code for debugging/audit
+                logger.info(f"LLM Python generated: {code}")
                 
                 # Execute in sandbox
                 result = self._sandbox.execute(code, df)
@@ -2287,14 +2395,16 @@ Keep the summary concise but informative (3-5 paragraphs)."""
                             result=value,
                             value=float(value),
                             method="pandas:llm_sandbox",
-                            explanation=response.get("explanation", "Python code executed")
+                            explanation=response.get("explanation", "Python code executed"),
+                            provenance={"dataset_id": df_id, "python_code": code}
                         )
                     else:
                         return AnalysisResult(
                             success=True,
                             result=value,
                             method="pandas:llm_sandbox",
-                            explanation=response.get("explanation", "Python code executed")
+                            explanation=response.get("explanation", "Python code executed"),
+                            provenance={"dataset_id": df_id, "python_code": code}
                         )
                 else:
                     # Execution failed - feed error back to LLM
@@ -2315,10 +2425,15 @@ Keep the summary concise but informative (3-5 paragraphs)."""
         self,
         query: str,
         df: pd.DataFrame,
-        df_id: str
+        df_id: str,
+        cache_context: Optional[str] = None
     ) -> Optional[AnalysisResult]:
         """
         Try PandasAI for natural language DataFrame queries.
+        
+        Args:
+            cache_context: Unique context (dataset:query_hash) to prevent
+                          cache collision between different queries (not used by PandasAI)
         
         PandasAI 3.0 FIX: Uses LocalLLM to bypass API credit check entirely.
         Falls back to our custom LLM adapter if LocalLLM is unavailable.
@@ -2339,9 +2454,14 @@ Keep the summary concise but informative (3-5 paragraphs)."""
             # LocalLLM uses OpenAI-compatible API endpoints (works with Ollama, LiteLLM, etc.)
             llm = None
             
+            # Set dummy API key to bypass PandasAI credit check (we're using custom adapter)
+            import os
+            if 'PANDASAI_API_KEY' not in os.environ:
+                os.environ['PANDASAI_API_KEY'] = 'custom-adapter-bypass'
+            
             # Strategy 1: Try LocalLLM with our LLM provider's HTTP endpoint
             try:
-                from pandasai.llm.local_llm import LocalLLM
+                from pandasai.llm import LocalLLM
                 
                 # Determine API base URL based on current provider
                 api_base = None
@@ -2356,7 +2476,7 @@ Keep the summary concise but informative (3-5 paragraphs)."""
                         model_name = getattr(provider.llm, 'model', 'llama3.2')
                     elif current == 'openrouter':
                         api_base = "https://openrouter.ai/api/v1"
-                        model_name = "gpt-4o-mini"
+                        model_name = "gpt-5.2-codex"
                     elif current in ('groq', 'google_genai'):
                         # Groq and Gemini don't have OpenAI-compatible endpoints
                         # Fall through to use our adapter

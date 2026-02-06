@@ -976,7 +976,7 @@ class DataRegistry:
                 client = None
 
         # 3. Try Standard Redis (TCP)
-        if url and not client:
+        if url and not client and not (url.startswith("http://") or url.startswith("https://")):
             try:
                 import redis
                 logger.info(f"Connecting to standard Redis: {url}")
@@ -987,6 +987,8 @@ class DataRegistry:
             except Exception as e:
                 logger.warning(f"Standard Redis failed: {e}")
                 client = None
+        elif url and (url.startswith("http://") or url.startswith("https://")) and not client:
+            logger.warning("HTTP(S) Redis URL detected but Upstash REST connection failed; skipping standard Redis client.")
 
         # 4. Fallback: Local Docker Redis
         if not client:

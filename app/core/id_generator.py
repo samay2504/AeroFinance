@@ -187,20 +187,23 @@ def generate_session_id(user_id: Optional[str] = None) -> str:
     return generate_short_id("ses")
 
 
-def generate_doc_id(user_id: str, filename: str) -> str:
+def generate_doc_id(user_id: str, filename: str, chat_id: Optional[str] = None) -> str:
     """
     Generate unique document ID.
     
     Args:
         user_id: User who uploaded the document
         filename: Original filename
+        chat_id: Optional chat session ID for multi-file chat support
     
     Returns:
         Unique document ID like 'doc_12345678_abc123'
     """
-    # Include hash of filename for deduplication awareness
     file_hash = hashlib.md5(filename.encode()).hexdigest()[:6]
     timestamp = int(time.time() * 1000) % 100000000
+    if chat_id:
+        chat_hash = hashlib.md5(chat_id.encode()).hexdigest()[:4]
+        return f"doc_{timestamp}_{file_hash}_{chat_hash}"
     return f"doc_{timestamp}_{file_hash}"
 
 

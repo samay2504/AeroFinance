@@ -1,5 +1,6 @@
 """Ingestion controller."""
 
+from typing import Optional
 from fastapi import UploadFile
 from app.types.schemas import UploadResponse, JSONIngestRequest, UploadUrlRequest
 from app.services.ingest_service import upload_file as upload_file_service
@@ -8,11 +9,11 @@ from app.services.ingest_service import ingest_file_url as ingest_file_url_servi
 
 
 async def upload_file(
-    file: UploadFile, client_id: str, ingest_all: bool
+    file: UploadFile, client_id: str, ingest_all: bool, chat_id: Optional[str] = None
 ) -> UploadResponse:
     """Controller for file upload ingestion."""
     return await upload_file_service(
-        file=file, client_id=client_id, ingest_all=ingest_all
+        file=file, client_id=client_id, ingest_all=ingest_all, chat_id=chat_id
     )
 
 

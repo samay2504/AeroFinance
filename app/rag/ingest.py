@@ -269,11 +269,12 @@ class DocumentIngestor:
         # Prioritize ENV var for collection to allow easy override (fixes dimension mismatch issues)
         self.collection_name = os.environ.get("QDRANT_COLLECTION") or collection_name or "AI-CA"
         
-        # Override vector DB type from env - fallback is CHROMA not FAISS
-        self.vector_db_type = os.environ.get("VECTOR_DB_TYPE", "chroma").lower()
+        # Override vector DB type from env - default is QDRANT for production
+        # Chroma is fallback only when Qdrant is unavailable
+        self.vector_db_type = os.environ.get("VECTOR_DB_TYPE", "qdrant").lower()
         if self.vector_db_type == "faiss":
-            logger.warning("FAISS configured but deprecated. Falling back to ChromaDB for consistency.")
-            self.vector_db_type = "chroma"
+            logger.warning("FAISS configured but deprecated. Falling back to Qdrant for consistency.")
+            self.vector_db_type = "qdrant"
 
         # Use stronger embedding model by default (all-mpnet-base-v2)
         default_model = "all-mpnet-base-v2"

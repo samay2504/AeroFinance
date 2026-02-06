@@ -81,7 +81,7 @@ async def handle_query(request: QueryRequest) -> QueryResponse:
             summaries = []
             for ds in datasets[:5]:  # Limit to 5
                 ds_id = ds.get("dataset_id", "")
-                result = agent.summarize_dataset(ds_id, client_id=request.client)
+                result = agent.summarize_dataset(ds_id, client_id=request.client, user_query=request.query)
                 if result.get("value"):
                     sheet_name = ds_id.split(":")[-1]
                     summaries.append(f"**{sheet_name}:** {result['value']}")
@@ -189,12 +189,20 @@ async def handle_query(request: QueryRequest) -> QueryResponse:
                                     break  # Found a good result
 
             if best_result and best_result.success:
+                # PRODUCTION FIX: Generate unique cache context for result formatting
+                # This prevents "project name" and "revenue" queries from getting same
+                # cached formatted response even if analysis data is different
+                import hashlib
+                query_hash = hashlib.md5(request.query.lower().encode()).hexdigest()[:8]
+                format_cache_context = f"{request.client}:format:{query_hash}"
+                
                 # Format as human-like response
                 natural_result = _format_natural_response(
                     query=request.query,
                     raw_result=best_result.result,
                     explanation=best_result.explanation,
                     llm_wrapper=llm,
+                    cache_context=format_cache_context,
                 )
 
                 return QueryResponse(
@@ -209,6 +217,7 @@ async def handle_query(request: QueryRequest) -> QueryResponse:
                         "route": track,
                         "raw_value": best_result.value,
                     },
+                    provenance=best_result.provenance,
                 )
 
             # FALLBACK: RAG Semantic Search
@@ -231,7 +240,8 @@ async def handle_query(request: QueryRequest) -> QueryResponse:
                             ]
                         )
                         prompt = f"Based on this data:\n\n{context}\n\nAnswer: {request.query}"
-                        response = llm.invoke(prompt)
+                        # PRODUCTION FIX: Pass client ID as cache context for RAG queries
+                        response = llm.invoke(prompt, cache_context=f"rag:{request.client}")
                         return QueryResponse(
                             success=True,
                             result=response,
@@ -239,18 +249,26 @@ async def handle_query(request: QueryRequest) -> QueryResponse:
                             explanation="Answer synthesized from indexed data",
                             query_id=query_id,
                             metadata={"route": track, "fallback": "rag"},
+                            provenance={
+                                "method": "rag_semantic",
+                                "sources_count": len(rag_results),
+                                "client_id": request.client
+                            }
                         )
             except Exception as e:
                 logger.debug(f"RAG fallback failed: {e}")
 
             # FALLBACK: Comprehensive LLM analysis
+            # PRODUCTION FIX: Pass dataset IDs as cache context, add provenance
             try:
                 # Collect data from all datasets
                 all_data_context = []
+                dataset_ids_used = []
                 for ds in datasets[:3]:
                     df = agent._get_dataframe(ds.get("dataset_id"))
                     if df is not None:
                         table_name = ds.get("dataset_id", "").split(":")[-1]
+                        dataset_ids_used.append(ds.get("dataset_id"))
                         context_parts = [f"\n--- TABLE: {table_name} ---"]
                         context_parts.append(f"Columns: {list(df.columns)}")
                         context_parts.append(f"Data:\n{df.to_string()}")
@@ -259,7 +277,9 @@ async def handle_query(request: QueryRequest) -> QueryResponse:
                 if all_data_context:
                     full_context = "\n".join(all_data_context)[:6000]
                     prompt = f"""Analyze this data and answer:\n{full_context}\n\nQuestion: {request.query}"""
-                    response = llm.invoke(prompt)
+                    # PRODUCTION FIX: Pass dataset context to prevent cross-dataset cache pollution
+                    cache_context = ":".join(dataset_ids_used[:2])  # Use first 2 datasets in cache key
+                    response = llm.invoke(prompt, cache_context=cache_context)
                     return QueryResponse(
                         success=True,
                         result=response,
@@ -267,6 +287,12 @@ async def handle_query(request: QueryRequest) -> QueryResponse:
                         explanation="Answer from comprehensive data analysis",
                         query_id=query_id,
                         metadata={"route": track, "fallback": "llm"},
+                        provenance={
+                            "method": "llm_comprehensive_fallback",
+                            "datasets_used": dataset_ids_used,
+                            "datasets_count": len(dataset_ids_used),
+                            "context_length": len(full_context)
+                        }
                     )
             except Exception as e:
                 logger.debug(f"LLM fallback failed: {e}")
@@ -297,7 +323,8 @@ async def handle_query(request: QueryRequest) -> QueryResponse:
             # Synthesize response
             context = "\n\n".join([d.get("content", "") for d in docs[:3]])
             prompt = get_document_rag_prompt(context, request.query)
-            response = llm.invoke(prompt)
+            # PRODUCTION FIX: Pass document track as cache context
+            response = llm.invoke(prompt, cache_context=f"doc:{request.client}")
 
             return QueryResponse(
                 success=True,
@@ -306,13 +333,18 @@ async def handle_query(request: QueryRequest) -> QueryResponse:
                 explanation=f"Found {len(docs)} relevant documents",
                 query_id=query_id,
                 metadata={"route": track, "docs": len(docs)},
+                provenance={
+                    "method": "rag_document",
+                    "documents_found": len(docs),
+                    "client_id": request.client
+                }
             )
 
         if track == TRACK_WEB:
             # Web search
             from app.tools.web_search import web_search
 
-            result = web_search(request.query, num_results=3)
+            result = web_search.invoke({"query": request.query, "num_results": 3})
 
             if result.get("result") == "success":
                 # Synthesize response
@@ -326,7 +358,8 @@ async def handle_query(request: QueryRequest) -> QueryResponse:
                 )
 
                 prompt = get_web_search_prompt(snippets, request.query)
-                response = llm.invoke(prompt)
+                # PRODUCTION FIX: Use web context for cache scoping
+                response = llm.invoke(prompt, cache_context="web:search")
 
                 return QueryResponse(
                     success=True,
@@ -335,6 +368,11 @@ async def handle_query(request: QueryRequest) -> QueryResponse:
                     explanation=f"Synthesized from {len(result.get('results', []))} web results",
                     query_id=query_id,
                     metadata={"route": track, "sources": result.get("results", [])},
+                    provenance={
+                        "method": "web_search",
+                        "sources_count": len(result.get("results", [])),
+                        "query": request.query
+                    }
                 )
             return QueryResponse(
                 success=False,

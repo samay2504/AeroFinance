@@ -61,6 +61,11 @@ pytest-asyncio>=0.21.0
 torch>=2.0.0
 torchvision>=0.15.0
 
+# Semantic Caching (L3 Embedding-based Similarity)
+# Enables "Revenue in FY23" ≈ "FY23 revenue" cache matching
+# Falls back to L1+L2 if not available
+sentence-transformers>=2.2.0
+
 # E2B Remote Sandbox (for secure remote code execution)
 # Falls back to local sandbox if E2B unavailable
 # Enable by setting ENABLE_E2B=true and E2B_API_KEY in environment
