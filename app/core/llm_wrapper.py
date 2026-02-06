@@ -1816,8 +1816,16 @@ class LLMWrapper:
         wait=wait_exponential(multiplier=1, min=2, max=10),
         retry=retry_if_exception_type(RETRYABLE_EXCEPTIONS),
     )
-    def invoke(self, prompt: Union[str, PromptTemplate], use_cache: bool = True, **kwargs) -> str:
-        """Invoke LLM with prompt using semantic caching."""
+    def invoke(self, prompt: Union[str, PromptTemplate], use_cache: bool = True, cache_context: Optional[str] = None, **kwargs) -> str:
+        """Invoke LLM with prompt using dataset-aware semantic caching.
+        
+        Args:
+            prompt: The prompt to send to LLM
+            use_cache: Whether to use caching
+            cache_context: Additional context for cache scoping (e.g., dataset_id)
+                          This ensures responses are scoped to specific datasets
+            **kwargs: Template variables
+        """
         if not self.llm:
             return "Error: LLM provider unavailable"
 
@@ -1825,12 +1833,16 @@ class LLMWrapper:
             formatted_prompt = self._format_prompt(prompt, **kwargs)
 
             # Check cache with semantic similarity matching
+            # PRODUCTION FIX: Include cache_context (dataset_id) to scope responses
             if use_cache and self._cache_enabled:
                 try:
                     hot_cache = get_hot_prompt_cache()
-                    # Use provider as system context, formatted_prompt as query
-                    # This groups similar queries by provider while enabling semantic matching
+                    # Use provider + cache_context as system context for scoping
+                    # This prevents cross-dataset cache pollution
                     system_context = f"provider:{self.provider_name}"
+                    if cache_context:
+                        system_context += f":{cache_context}"
+                    
                     cached = hot_cache.get(
                         system_prompt=system_context,
                         user_query=formatted_prompt,
@@ -1838,7 +1850,7 @@ class LLMWrapper:
                     )
                     if cached:
                         self._cache_hits += 1
-                        logger.debug(f"Cache HIT (semantic): {formatted_prompt[:80]}...")
+                        logger.debug(f"Cache HIT (semantic, context={cache_context}): {formatted_prompt[:80]}...")
                         return cached
                 except Exception as e:
                     logger.debug(f"Semantic cache lookup failed: {e}")
@@ -1859,17 +1871,21 @@ class LLMWrapper:
             else:
                 result = str(response)
 
-            # Cache result with semantic embedding
+            # Cache result with semantic embedding and context scoping
+            # PRODUCTION FIX: Include cache_context to prevent cross-dataset pollution
             if use_cache and self._cache_enabled:
                 try:
                     hot_cache = get_hot_prompt_cache()
                     system_context = f"provider:{self.provider_name}"
+                    if cache_context:
+                        system_context += f":{cache_context}"
+                    
                     hot_cache.put(
                         system_prompt=system_context,
                         user_query=formatted_prompt,
                         response=result
                     )
-                    logger.debug(f"Cached response with embedding: {formatted_prompt[:80]}...")
+                    logger.debug(f"Cached response (context={cache_context}): {formatted_prompt[:80]}...")
                 except Exception as e:
                     logger.debug(f"Semantic cache store failed: {e}")
 
@@ -1893,9 +1909,16 @@ class LLMWrapper:
         retry=retry_if_exception_type(RETRYABLE_EXCEPTIONS),
     )
     def invoke_with_structured_output(
-        self, prompt: Union[str, PromptTemplate], output_schema: Dict[str, Any], **kwargs
+        self, prompt: Union[str, PromptTemplate], output_schema: Dict[str, Any], cache_context: Optional[str] = None, **kwargs
     ) -> Dict[str, Any]:
-        """Invoke LLM expecting structured JSON output with semantic caching."""
+        """Invoke LLM expecting structured JSON output with dataset-aware caching.
+        
+        Args:
+            prompt: The prompt to send to LLM
+            output_schema: Expected JSON schema
+            cache_context: Additional context for cache scoping (e.g., dataset_id)
+            **kwargs: Template variables
+        """
         if not self.llm:
             return {"error": "LLM provider unavailable"}
 

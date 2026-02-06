@@ -154,7 +154,8 @@ def _ingest_file_path(
 async def upload_file(
     file: UploadFile, client_id: str, ingest_all: bool, chat_id: Optional[str] = None
 ) -> UploadResponse:
-    \"\"\"Upload and ingest Excel/CSV/JSON file with unique document ID generation.\"\"\"\n    try:
+    """Ingest uploaded file content."""
+    try:
         content = await file.read()
         filename = file.filename or "uploaded_file"
         return _ingest_file_content(content, filename, client_id, ingest_all, chat_id=chat_id)

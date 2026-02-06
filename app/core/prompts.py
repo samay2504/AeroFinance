@@ -1874,7 +1874,8 @@ def format_natural_response(
     query: str,
     raw_result: Any,
     explanation: str,
-    llm_wrapper
+    llm_wrapper,
+    cache_context: Optional[str] = None
 ) -> str:
     """
     Format a raw analysis result into human-like natural language.
@@ -1890,6 +1891,7 @@ def format_natural_response(
         raw_result: Raw data/value from analysis
         explanation: Explanation from the analysis method
         llm_wrapper: LLM wrapper instance for generating response
+        cache_context: Unique context (client:query_hash) to prevent cache collision
         
     Returns:
         Human-like natural language response string
@@ -1906,7 +1908,7 @@ def format_natural_response(
     # TIER 2: Try LLM-based natural formatting
     try:
         prompt = get_response_finalizer_prompt(query, raw_result, explanation)
-        natural_response = llm_wrapper.invoke(prompt)
+        natural_response = llm_wrapper.invoke(prompt, cache_context=cache_context)
         
         if natural_response:
             cleaned = _clean_llm_response(natural_response)
