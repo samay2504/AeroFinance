@@ -2027,12 +2027,14 @@ Keep the summary concise but informative (3-5 paragraphs)."""
         query: str,
         df: pd.DataFrame,
         df_id: str,
-        schema: Dict[str, Any]
+        schema: Dict[str, Any],
+        cache_context: Optional[str] = None
     ) -> Optional[AnalysisResult]:
-        """
-        Try LLM-generated SQL with semantic understanding.
-        Uses schema analyzer to understand data structure and provides
-        actual data samples to the LLM for context.
+        """Try LLM-generated SQL with query-specific cache context.
+        
+        Args:
+            cache_context: Unique context (dataset:query_hash) to prevent
+                          cache collision between different queries
         """
         if not self._llm or not self._sql_engine:
             return None
