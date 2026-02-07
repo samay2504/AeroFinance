@@ -14,6 +14,7 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 
+
 @dataclass
 class AnalysisResult:
     """Result of data analysis."""
