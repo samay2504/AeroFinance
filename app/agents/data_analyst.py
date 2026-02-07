@@ -1160,6 +1160,10 @@ class DataAnalystAgent:
                     
                 explanation = f"Found '{r_label}' in sheet '{df_id_match.split(':')[-1]}' (column '{c_name}'): {result_text}"
                 
+                # Extract doc_id from dataset_id for consistency
+                doc_id_match = re.search(r'(doc_\d+_[a-f0-9]+)', df_id_match)
+                doc_id = doc_id_match.group(1) if doc_id_match else ""
+                
                 return AnalysisResult(
                     success=True,
                     result=result_text,
@@ -1168,6 +1172,7 @@ class DataAnalystAgent:
                     explanation=explanation,
                     provenance={
                         "dataset_id": df_id_match,
+                        "doc_id": doc_id,
                         "sheet_name": df_id_match.split(':')[-1] if ':' in df_id_match else df_id_match,
                         "row_label": r_label,
                         "row_index": int(r_idx),
@@ -1689,6 +1694,10 @@ Keep the summary concise but informative (3-5 paragraphs)."""
                             summary += f"\n\n**Key Financial Figure:** {metric}"
                             break
             
+            # Extract doc_id from dataset_id for consistency
+            doc_id_match = re.search(r'(doc_\d+_[a-f0-9]+)', df_id)
+            doc_id = doc_id_match.group(1) if doc_id_match else ""
+            
             return AnalysisResult(
                 success=True,
                 result=summary,
@@ -1696,6 +1705,7 @@ Keep the summary concise but informative (3-5 paragraphs)."""
                 explanation=f"Generated {detected_type} summary using LLM with {'RAG context and ' if rag_context else ''}semantic analysis",
                 provenance={
                     "dataset_id": df_id,
+                    "doc_id": doc_id,
                     "method": "llm_semantic_summary",
                     "detected_type": detected_type,
                     "rows_analyzed": len(df),
@@ -1746,6 +1756,10 @@ Keep the summary concise but informative (3-5 paragraphs)."""
                             break
             
             if len(summary_parts) > 2:
+                # Extract doc_id from dataset_id for consistency
+                doc_id_match = re.search(r'(doc_\\d+_[a-f0-9]+)', df_id)
+                doc_id = doc_id_match.group(1) if doc_id_match else ""
+                
                 return AnalysisResult(
                     success=True,
                     result="\n".join(summary_parts),
@@ -1753,6 +1767,7 @@ Keep the summary concise but informative (3-5 paragraphs)."""
                     explanation=f"Generated overview of {df_id}",
                     provenance={
                         "dataset_id": df_id,
+                        "doc_id": doc_id,
                         "method": "heuristic_summary",
                         "rows": len(df),
                         "columns": len(df.columns)
@@ -1785,6 +1800,10 @@ Keep the summary concise but informative (3-5 paragraphs)."""
         
         # FAST PATH: Handle common metadata queries FIRST before any exclusion logic
         if 'how many' in query_lower and 'sheet' in query_lower:
+            # Extract doc_id from dataset_id for consistency
+            doc_id_match = re.search(r'(doc_\d+_[a-f0-9]+)', df_id)
+            doc_id = doc_id_match.group(1) if doc_id_match else ""
+            
             return AnalysisResult(
                 success=True,
                 result=f"There are {len(all_sheets)} sheets available in the loaded data.",
@@ -1793,6 +1812,7 @@ Keep the summary concise but informative (3-5 paragraphs)."""
                 explanation="Counted registered datasets using fast path",
                 provenance={
                     "dataset_id": df_id,
+                    "doc_id": doc_id,
                     "query_type": "metadata_count",
                     "total_sheets": len(all_sheets)
                 }
@@ -1888,6 +1908,10 @@ Keep the summary concise but informative (3-5 paragraphs)."""
                     if result.get("is_metadata_query"):
                         answer = result.get("answer", "")
                         if answer:
+                            # Extract doc_id from dataset_id for consistency
+                            doc_id_match = re.search(r'(doc_\d+_[a-f0-9]+)', df_id)
+                            doc_id = doc_id_match.group(1) if doc_id_match else ""
+                            
                             return AnalysisResult(
                                 success=True,
                                 result=answer,
@@ -1896,6 +1920,7 @@ Keep the summary concise but informative (3-5 paragraphs)."""
                                 explanation=f"Answered {result.get('query_type', 'metadata')} query using semantic understanding",
                                 provenance={
                                     "dataset_id": df_id,
+                                    "doc_id": doc_id,
                                     "query_type": "metadata",
                                     "identified_as": result.get('query_type', 'metadata'),
                                     "total_sheets": len(sheet_names)
@@ -2168,7 +2193,6 @@ Keep the summary concise but informative (3-5 paragraphs)."""
                 # 3. "label" -> actual label column name
                 # 4. Missing quotes around column names
                 # ================================================================
-                import re
                 actual_columns = [str(c) for c in schema["columns"]]
                 actual_columns_lower = {c.lower(): c for c in actual_columns}
                 
@@ -2256,6 +2280,10 @@ Keep the summary concise but informative (3-5 paragraphs)."""
                             value = float(val) if pd.notna(val) else None
                         except (ValueError, TypeError):
                             value = None
+                        
+                        # Extract doc_id from dataset_id for consistency
+                        doc_id_match = re.search(r'(doc_\d+_[a-f0-9]+)', df_id)
+                        doc_id = doc_id_match.group(1) if doc_id_match else ""
                             
                         return AnalysisResult(
                             success=True,
@@ -2265,11 +2293,16 @@ Keep the summary concise but informative (3-5 paragraphs)."""
                             explanation=response.get("explanation", f"SQL: {sql[:80]}"),
                             provenance={
                                 "dataset_id": df_id,
+                                "doc_id": doc_id,
                                 "sql_query": sql,
                                 "columns_used": response.get("columns_used", [])
                             }
                         )
                     else:
+                        # Extract doc_id from dataset_id for consistency
+                        doc_id_match = re.search(r'(doc_\d+_[a-f0-9]+)', df_id)
+                        doc_id = doc_id_match.group(1) if doc_id_match else ""
+                        
                         return AnalysisResult(
                             success=True,
                             result=result_df.to_dict(),
@@ -2277,6 +2310,7 @@ Keep the summary concise but informative (3-5 paragraphs)."""
                             explanation=response.get("explanation", f"Returned {len(result_df)} rows"),
                             provenance={
                                 "dataset_id": df_id,
+                                "doc_id": doc_id,
                                 "sql_query": sql,
                                 "columns_used": response.get("columns_used", []),
                                 "row_count": len(result_df)
@@ -2392,21 +2426,29 @@ Keep the summary concise but informative (3-5 paragraphs)."""
                         continue
 
                     if isinstance(value, (int, float)):
+                        # Extract doc_id from dataset_id for consistency
+                        doc_id_match = re.search(r'(doc_\d+_[a-f0-9]+)', df_id)
+                        doc_id = doc_id_match.group(1) if doc_id_match else ""
+                        
                         return AnalysisResult(
                             success=True,
                             result=value,
                             value=float(value),
                             method="pandas:llm_sandbox",
                             explanation=response.get("explanation", "Python code executed"),
-                            provenance={"dataset_id": df_id, "python_code": code}
+                            provenance={"dataset_id": df_id, "doc_id": doc_id, "python_code": code}
                         )
                     else:
+                        # Extract doc_id from dataset_id for consistency
+                        doc_id_match = re.search(r'(doc_\d+_[a-f0-9]+)', df_id)
+                        doc_id = doc_id_match.group(1) if doc_id_match else ""
+                        
                         return AnalysisResult(
                             success=True,
                             result=value,
                             method="pandas:llm_sandbox",
                             explanation=response.get("explanation", "Python code executed"),
-                            provenance={"dataset_id": df_id, "python_code": code}
+                            provenance={"dataset_id": df_id, "doc_id": doc_id, "python_code": code}
                         )
                 else:
                     # Execution failed - feed error back to LLM

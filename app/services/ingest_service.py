@@ -91,6 +91,11 @@ def _ingest_file_content(
             detail=f"Unsupported file type: .{ext}. Supported: .xlsx, .xls, .csv, .json",
         )
 
+    # Add doc_id to each dataset for consistency
+    for dataset in results:
+        if dataset.get("success"):
+            dataset["doc_id"] = doc_id
+
     return UploadResponse(success=success, doc_id=doc_id, datasets=results)
 
 
@@ -147,6 +152,11 @@ def _ingest_file_path(
             status_code=400,
             detail=f"Unsupported file type: .{ext}. Supported: .xlsx, .xls, .csv, .json",
         )
+
+    # Add doc_id to each dataset for consistency
+    for dataset in results:
+        if dataset.get("success"):
+            dataset["doc_id"] = doc_id
 
     return UploadResponse(success=success, doc_id=doc_id, datasets=results)
 
@@ -209,9 +219,14 @@ async def ingest_json_text(request: JSONIngestRequest) -> UploadResponse:
         from app.ingest.json_ingest import JSONIngestor
         from app.agents.data_analyst import get_data_analyst_agent
         from app.rag.ingest import get_rag_pipeline
+        from app.core.id_generator import generate_doc_id
 
         agent = get_data_analyst_agent()
         ingestor = JSONIngestor()
+        
+        # Generate doc_id for consistency
+        doc_id = generate_doc_id(request.client_id, request.source_name)
+        logger.info(f"Generated doc_id: {doc_id} for JSON ingest")
 
         # Get RAG pipeline (may be None if unavailable)
         rag_pipeline = None
@@ -232,7 +247,7 @@ async def ingest_json_text(request: JSONIngestRequest) -> UploadResponse:
         # Parse JSON first
         data, parse_error = ingestor.parse_json_text(request.json_text)
         if parse_error:
-            return UploadResponse(success=False, error=parse_error)
+            return UploadResponse(success=False, doc_id="", error=parse_error)
 
         # Use RAG ingestion if available
         if rag_pipeline and rag_pipeline.is_available:
@@ -251,9 +266,17 @@ async def ingest_json_text(request: JSONIngestRequest) -> UploadResponse:
             client_id=request.client_id,
             register_callback=register_cb,
         )
+        
+        # Add doc_id to each dataset for consistency
+        datasets = result.get("datasets", [])
+        for dataset in datasets:
+            if dataset.get("success"):
+                dataset["doc_id"] = doc_id
 
         return UploadResponse(
-            success=result.get("success", False), datasets=result.get("datasets", [])
+            success=result.get("success", False),
+            doc_id=doc_id,
+            datasets=datasets
         )
 
     except Exception as e:
