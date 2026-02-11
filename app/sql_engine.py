@@ -1,14 +1,24 @@
 """
 SQL Engine - DuckDB helper for analytical queries with Pandas fallback.
-Handles DataFrame registration, safe parameterized queries, and type coercion.
+Handles DataFrame registration, safe parameterized queries, type coercion,
+and production-grade security validation (SQL injection, path traversal,
+code sandbox, client ID normalization).
 """
 import logging
+import os
 import re
 from typing import Any, Dict, List, Optional, Tuple, Union
 import pandas as pd
 import numpy as np
 
 logger = logging.getLogger(__name__)
+
+# ═══ DLL Fix: Must run before loading native C extensions (DuckDB) ═══
+try:
+    from app.core.dll_fix import apply_dll_fix
+    apply_dll_fix()
+except ImportError:
+    pass
 
 try:
     import duckdb
@@ -24,6 +34,57 @@ except ImportError:
     SQLPARSE_AVAILABLE = False
 
 
+# ═══════════════════════════════════════════════════════════════════
+# SECURITY: Compiled patterns for production-grade input validation
+# ═══════════════════════════════════════════════════════════════════
+
+# Dangerous SQL patterns that should never appear in generated queries
+_SQL_DANGEROUS_PATTERNS = [
+    re.compile(r'\b(DROP|ALTER|TRUNCATE|DELETE|INSERT|UPDATE|CREATE|REPLACE|GRANT|REVOKE)\b\s', re.IGNORECASE),
+    re.compile(r';\s*(DROP|ALTER|TRUNCATE|DELETE|INSERT|UPDATE|CREATE)', re.IGNORECASE),
+    re.compile(r'--\s*.*$', re.MULTILINE),   # SQL comments (injection vector)
+    re.compile(r'/\*.*?\*/', re.DOTALL),      # Block comments
+    re.compile(r'\bEXEC(UTE)?\b', re.IGNORECASE),
+    re.compile(r'\bxp_\w+', re.IGNORECASE),   # SQL Server extended procs
+    re.compile(r'\bSYSTEM\b\s*\(', re.IGNORECASE),
+    re.compile(r'\bLOAD_FILE\b', re.IGNORECASE),
+    re.compile(r'\bINTO\s+OUTFILE\b', re.IGNORECASE),
+    re.compile(r'\bINTO\s+DUMPFILE\b', re.IGNORECASE),
+    re.compile(r'\bUNION\b.*\bSELECT\b.*\bFROM\b.*\binformation_schema\b', re.IGNORECASE | re.DOTALL),
+]
+
+# Whitelist: only these statement types are allowed
+_SQL_ALLOWED_STATEMENTS = re.compile(
+    r'^\s*(SELECT|WITH|EXPLAIN)\b',
+    re.IGNORECASE
+)
+
+# Path traversal attack patterns
+_PATH_TRAVERSAL_PATTERNS = [
+    re.compile(r'\.\.[\\//]'),           # ../
+    re.compile(r'[\\//]\.\.'),           # /..
+    re.compile(r'^~'),                    # Home directory expansion
+    re.compile(r'[\x00-\x1f]'),           # Control characters
+    re.compile(r'[<>"|?*]'),              # Windows special chars
+]
+
+# Dangerous Python patterns for sandbox code validation
+_PYTHON_DANGEROUS_PATTERNS = [
+    re.compile(r'\b(os\.(system|exec|popen|remove|rmdir|unlink|rename))\b'),
+    re.compile(r'\b(subprocess|shutil)\.\w+'),
+    re.compile(r'\b(eval|exec|compile)\s*\('),
+    re.compile(r'\b(__import__|importlib)\b'),
+    re.compile(r'\bopen\s*\(.*["\']w["\']'),  # open(..., 'w')
+    re.compile(r'\b(requests|urllib|socket|http)\.\w+'),
+    re.compile(r'\b(pickle|marshal|shelve)\.(load|loads)\b'),
+    re.compile(r'\bglobals\s*\(\s*\)'),
+    re.compile(r'\b__builtins__\b'),
+]
+
+# Client ID format enforcement
+_CLIENT_ID_PATTERN = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9_\-\.]{0,127}$')
+
+
 class SQLEngine:
     """
     DuckDB SQL engine with:
@@ -31,27 +92,233 @@ class SQLEngine:
     - Safe parameterized queries
     - Automatic type coercion and cleaning
     - Pandas fallback when DuckDB fails
+    - S3 Parquet integration via httpfs extension
+    - Performance tuning (object cache, parallel CSV)
     """
 
-    def __init__(self, memory_limit: str = "2GB", threads: int = 4):
+    def __init__(
+        self,
+        memory_limit: str = "2GB",
+        threads: int = 4,
+        s3_config: Optional[Dict[str, Any]] = None,
+        perf_config: Optional[Dict[str, Any]] = None,
+    ):
         self._connection: Optional["duckdb.DuckDBPyConnection"] = None
         self._registered_tables: Dict[str, pd.DataFrame] = {}
         self.memory_limit = memory_limit
         self.threads = threads
+        self._s3_config = s3_config or {}
+        self._perf_config = perf_config or {}
+        self._s3_initialized = False
+        self._s3_views: Dict[str, str] = {}  # view_name → S3 URI
 
         if DUCKDB_AVAILABLE:
             self._init_duckdb()
 
     def _init_duckdb(self):
-        """Initialize DuckDB connection with configuration."""
+        """Initialize DuckDB connection with performance tuning and optional S3."""
         try:
             self._connection = duckdb.connect(":memory:")
             self._connection.execute(f"SET memory_limit='{self.memory_limit}'")
             self._connection.execute(f"SET threads={self.threads}")
-            logger.info(f"DuckDB initialized (memory={self.memory_limit}, threads={self.threads})")
+
+            # ═══ Performance Tuning PRAGMAs ═══
+            perf = self._perf_config
+
+            # Object cache: keeps Parquet metadata in memory for faster repeated scans
+            if perf.get("enable_object_cache", True):
+                self._connection.execute("SET enable_object_cache=true")
+                cache_size = perf.get("object_cache_size", "256MB")
+                try:
+                    self._connection.execute(f"SET object_cache_max_size='{cache_size}'")
+                except Exception:
+                    pass  # Older DuckDB versions may not support this pragma
+            else:
+                self._connection.execute("SET enable_object_cache=false")
+
+            # Insertion order: disabling gives ~15% speedup on wide table scans
+            preserve_order = perf.get("preserve_insertion_order", False)
+            self._connection.execute(
+                f"SET preserve_insertion_order={'true' if preserve_order else 'false'}"
+            )
+
+            logger.info(
+                f"DuckDB initialized (memory={self.memory_limit}, "
+                f"threads={self.threads}, "
+                f"object_cache={'on' if perf.get('enable_object_cache', True) else 'off'}, "
+                f"preserve_order={'on' if preserve_order else 'off'})"
+            )
+
+            # ═══ S3 Integration (lazy — only if enabled) ═══
+            if self._s3_config.get("enable_s3", False):
+                self._configure_s3()
+
         except Exception as e:
             logger.error(f"DuckDB initialization failed: {e}")
             self._connection = None
+
+    # ═══════════════════════════════════════════════════════════════
+    # S3 INTEGRATION — httpfs extension + credential management
+    # ═══════════════════════════════════════════════════════════════
+
+    def _configure_s3(self) -> None:
+        """
+        Install and configure DuckDB's httpfs extension for S3 access.
+
+        Supports:
+        - Standard AWS S3 (auto-detects credentials from env/IAM role)
+        - Custom S3-compatible endpoints (MinIO, LocalStack)
+        - Region override
+
+        Environment Variables Used:
+        - AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY (explicit)
+        - AWS_DEFAULT_REGION (region fallback)
+        """
+        if not self._connection or self._s3_initialized:
+            return
+
+        try:
+            # Install httpfs extension (downloads once, cached afterwards)
+            self._connection.execute("INSTALL httpfs")
+            self._connection.execute("LOAD httpfs")
+
+            # Region: explicit config → env → deployment region → default
+            region = (
+                self._s3_config.get("s3_region")
+                or os.environ.get("AWS_DEFAULT_REGION")
+                or "us-east-1"
+            )
+            self._connection.execute(f"SET s3_region='{region}'")
+
+            # Credentials: from env (standard AWS SDK convention)
+            access_key = os.environ.get("AWS_ACCESS_KEY_ID", "")
+            secret_key = os.environ.get("AWS_SECRET_ACCESS_KEY", "")
+            if access_key and secret_key:
+                self._connection.execute(f"SET s3_access_key_id='{access_key}'")
+                self._connection.execute(f"SET s3_secret_access_key='{secret_key}'")
+                logger.info("DuckDB S3: Configured with explicit AWS credentials")
+            else:
+                # Fall back to IAM role / instance metadata (EC2/ECS/Lambda)
+                logger.info("DuckDB S3: No explicit credentials — using IAM role/instance metadata")
+
+            # Session token (STS temporary credentials)
+            session_token = os.environ.get("AWS_SESSION_TOKEN", "")
+            if session_token:
+                self._connection.execute(f"SET s3_session_token='{session_token}'")
+
+            # Custom S3 endpoint (MinIO, LocalStack, etc.)
+            endpoint = self._s3_config.get("s3_endpoint")
+            if endpoint:
+                self._connection.execute(f"SET s3_endpoint='{endpoint}'")
+                self._connection.execute("SET s3_url_style='path'")
+                self._connection.execute("SET s3_use_ssl=false")
+                logger.info(f"DuckDB S3: Custom endpoint configured — {endpoint}")
+
+            self._s3_initialized = True
+            logger.info(f"DuckDB S3: httpfs loaded (region={region})")
+
+        except Exception as e:
+            logger.warning(f"DuckDB S3 configuration failed (non-fatal): {e}")
+            self._s3_initialized = False
+
+    def ensure_s3(self) -> bool:
+        """
+        Ensure S3 is configured. Lazily initializes if not already done.
+        Returns True if S3 is available.
+        """
+        if self._s3_initialized:
+            return True
+        if not self._connection:
+            return False
+        # Only configure S3 if explicitly enabled via config
+        if not self._s3_config.get("enable_s3", False):
+            return False
+        self._configure_s3()
+        return self._s3_initialized
+
+    def create_s3_view(
+        self,
+        view_name: str,
+        s3_uri: str,
+        format: str = "parquet",
+    ) -> bool:
+        """
+        Create a DuckDB VIEW backed by an S3 Parquet file.
+
+        This enables zero-copy SQL queries against cloud data:
+            SELECT * FROM my_view WHERE revenue > 1000
+
+        Args:
+            view_name: SQL-safe name for the view
+            s3_uri: Full S3 URI (s3://bucket/path/file.parquet)
+            format: File format ('parquet' or 'csv')
+
+        Returns:
+            True if view created successfully
+        """
+        if not self.ensure_s3():
+            logger.warning(f"Cannot create S3 view '{view_name}': S3 not configured")
+            return False
+
+        safe_name = self._sanitize_column_name(view_name)
+
+        try:
+            if format.lower() == "csv":
+                reader = f"read_csv_auto('{s3_uri}')"
+            else:
+                reader = f"read_parquet('{s3_uri}')"
+
+            self._connection.execute(
+                f"CREATE OR REPLACE VIEW \"{safe_name}\" AS SELECT * FROM {reader}"
+            )
+            self._s3_views[safe_name] = s3_uri
+            logger.info(f"Created S3 view '{safe_name}' → {s3_uri}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to create S3 view '{safe_name}': {e}")
+            return False
+
+    def query_s3_parquet(
+        self,
+        s3_uri: str,
+        sql_template: Optional[str] = None,
+    ) -> pd.DataFrame:
+        """
+        Execute an ad-hoc SQL query directly against an S3 Parquet file.
+
+        Args:
+            s3_uri: Full S3 URI (s3://bucket/path/file.parquet)
+            sql_template: Optional SQL with {table} placeholder.
+                          Defaults to "SELECT * FROM {table}"
+
+        Returns:
+            Result DataFrame
+
+        Example:
+            df = engine.query_s3_parquet(
+                "s3://my-bucket/data/sales.parquet",
+                "SELECT product, SUM(revenue) FROM {table} GROUP BY product"
+            )
+        """
+        if not self.ensure_s3():
+            raise RuntimeError(
+                "S3 not configured. Set DUCKDB_ENABLE_S3=true and provide AWS credentials."
+            )
+
+        reader = f"read_parquet('{s3_uri}')"
+        sql = (sql_template or "SELECT * FROM {table}").replace("{table}", reader)
+
+        # Validate the generated SQL
+        is_valid, error = self.validate_sql(sql)
+        if not is_valid:
+            raise ValueError(f"Invalid SQL for S3 query: {error}")
+
+        return self._connection.execute(sql).fetchdf()
+
+    def list_s3_views(self) -> Dict[str, str]:
+        """List all S3-backed views and their URIs."""
+        return dict(self._s3_views)
 
     def _sanitize_column_name(self, name: str) -> str:
         """Sanitize column name for SQL compatibility."""
@@ -198,56 +465,70 @@ class SQLEngine:
 
     def validate_sql(self, sql: str) -> Tuple[bool, str]:
         """
-        Validate SQL query for safety.
-        
+        Validate SQL query for safety using production-grade pattern matching.
+
+        Checks:
+        1. Whitelist: only SELECT / WITH / EXPLAIN allowed
+        2. Blacklist: compiled dangerous-pattern regex scan
+        3. Anti-hallucination: referenced tables must exist
+        4. Optional sqlparse structural validation
+
         Returns:
             Tuple of (is_valid, error_message)
         """
         if not sql or not sql.strip():
             return False, "Empty SQL query"
 
-        sql_upper = sql.strip().upper()
+        sql_stripped = sql.strip()
 
-        # Only allow SELECT statements
-        if not sql_upper.startswith("SELECT"):
-            return False, "Only SELECT statements allowed"
+        # ── Whitelist: only SELECT / WITH / EXPLAIN ──
+        if not _SQL_ALLOWED_STATEMENTS.match(sql_stripped):
+            first_word = sql_stripped.split()[0] if sql_stripped.split() else "EMPTY"
+            logger.warning(f"SQL blocked: non-SELECT statement: {first_word}")
+            return False, f"Only SELECT queries allowed, got: {first_word}"
 
-        # Block dangerous keywords
-        dangerous = ["DROP", "DELETE", "INSERT", "UPDATE", "ALTER", "CREATE", "TRUNCATE", "EXEC"]
-        for keyword in dangerous:
-            if re.search(rf"\b{keyword}\b", sql_upper):
-                return False, f"Dangerous keyword not allowed: {keyword}"
+        # ── Blacklist: compiled dangerous patterns ──
+        for pattern in _SQL_DANGEROUS_PATTERNS:
+            match = pattern.search(sql_stripped)
+            if match:
+                logger.warning(f"SQL injection attempt blocked: {match.group()}")
+                return False, f"Dangerous SQL pattern detected: {match.group()}"
 
-        # ANTI-HALLUCINATION: Check that referenced tables exist
-        # Extract table names from FROM and JOIN clauses
+        # ── Anti-hallucination: verify referenced tables exist ──
         from_pattern = r'\bFROM\s+([a-zA-Z_][a-zA-Z0-9_]*)'
         join_pattern = r'\bJOIN\s+([a-zA-Z_][a-zA-Z0-9_]*)'
-        
+
         referenced_tables = set()
-        for match in re.finditer(from_pattern, sql, re.IGNORECASE):
+        sql_keywords = ('select', 'where', 'group', 'order', 'having', 'limit',
+                        'as', 'on', 'and', 'or', 'not', 'in', 'is', 'null',
+                        'case', 'when', 'then', 'else', 'end')
+        # DuckDB table-function calls (read_parquet, read_csv_auto, etc.) are not real tables
+        duckdb_table_functions = (
+            'read_parquet', 'read_csv', 'read_csv_auto', 'read_json',
+            'read_json_auto', 'read_ndjson', 'generate_series', 'range',
+            'glob', 'parquet_scan', 'csv_scan',
+        )
+        for match in re.finditer(from_pattern, sql_stripped, re.IGNORECASE):
             table_name = match.group(1).lower()
-            # Skip common SQL keywords that might be matched
-            if table_name not in ('select', 'where', 'group', 'order', 'having', 'limit'):
+            if table_name not in sql_keywords and table_name not in duckdb_table_functions:
                 referenced_tables.add(table_name)
-        
-        for match in re.finditer(join_pattern, sql, re.IGNORECASE):
+
+        for match in re.finditer(join_pattern, sql_stripped, re.IGNORECASE):
             table_name = match.group(1).lower()
-            referenced_tables.add(table_name)
-        
-        # Check if all referenced tables exist
+            if table_name not in sql_keywords and table_name not in duckdb_table_functions:
+                referenced_tables.add(table_name)
+
         if referenced_tables:
             existing_tables = set(t.lower() for t in self._registered_tables.keys())
             missing_tables = referenced_tables - existing_tables
-            
             if missing_tables:
-                # Provide helpful error message with available tables
                 available = ', '.join(sorted(existing_tables)[:5])
                 return False, f"Table not found: {', '.join(missing_tables)}. Available: {available}"
 
-        # Parse with sqlparse if available
+        # ── Optional sqlparse structural validation ──
         if SQLPARSE_AVAILABLE:
             try:
-                parsed = sqlparse.parse(sql)
+                parsed = sqlparse.parse(sql_stripped)
                 if not parsed:
                     return False, "Failed to parse SQL"
                 stmt = parsed[0]
@@ -424,28 +705,183 @@ _sql_engine: Optional[SQLEngine] = None
 
 
 def get_sql_engine() -> SQLEngine:
-    """Get or create singleton SQL engine."""
+    """Get or create singleton SQL engine with full config."""
     global _sql_engine
     
     if _sql_engine is None:
         # Use sensible defaults - don't depend on settings to avoid parsing errors
         memory_limit = "2GB"
         threads = 4
+        s3_config: Dict[str, Any] = {}
+        perf_config: Dict[str, Any] = {}
         
         try:
             from app.config import settings
-            memory_limit = settings.duckdb.memory_limit
-            threads = settings.duckdb.threads
+            duck = settings.duckdb
+            memory_limit = duck.memory_limit
+            threads = duck.threads
+            
+            # S3 config from settings
+            s3_config = {
+                "enable_s3": duck.enable_s3,
+                "s3_region": duck.s3_region,
+                "s3_endpoint": duck.s3_endpoint,
+            }
+            
+            # Performance config from settings
+            perf_config = {
+                "enable_object_cache": duck.enable_object_cache,
+                "object_cache_size": duck.object_cache_size,
+                "preserve_insertion_order": duck.preserve_insertion_order,
+                "enable_parallel_csv": duck.enable_parallel_csv,
+            }
         except Exception:
             # Use defaults if settings fail
             pass
         
         _sql_engine = SQLEngine(
             memory_limit=memory_limit,
-            threads=threads
+            threads=threads,
+            s3_config=s3_config,
+            perf_config=perf_config,
         )
     
     return _sql_engine
 
 
-__all__ = ["SQLEngine", "get_sql_engine"]
+# ═══════════════════════════════════════════════════════════════════
+# STANDALONE SECURITY UTILITIES
+# Callable without an SQLEngine instance.
+# ═══════════════════════════════════════════════════════════════════
+
+def sanitize_sql(sql: str) -> Tuple[bool, str, Optional[str]]:
+    """
+    Validate and sanitize LLM-generated SQL (standalone, no engine needed).
+
+    Args:
+        sql: Raw SQL string from LLM
+
+    Returns:
+        Tuple of (is_safe, sanitized_sql, error_message)
+    """
+    if not sql or not sql.strip():
+        return False, "", "Empty SQL"
+
+    sql = sql.strip()
+
+    # Whitelist check
+    if not _SQL_ALLOWED_STATEMENTS.match(sql):
+        first_word = sql.split()[0] if sql.split() else "EMPTY"
+        logger.warning(f"SQL blocked: non-SELECT statement: {first_word}")
+        return False, "", f"Only SELECT queries allowed, got: {first_word}"
+
+    # Blacklist check
+    for pattern in _SQL_DANGEROUS_PATTERNS:
+        match = pattern.search(sql)
+        if match:
+            logger.warning(f"SQL injection attempt blocked: {match.group()}")
+            return False, "", f"Dangerous SQL pattern detected: {match.group()}"
+
+    # Strip trailing semicolons (prevent multi-statement injection)
+    sql = sql.rstrip(";").strip()
+
+    # Remove SQL comments
+    sql = re.sub(r'--.*$', '', sql, flags=re.MULTILINE)
+    sql = re.sub(r'/\*.*?\*/', '', sql, flags=re.DOTALL)
+    sql = sql.strip()
+
+    return True, sql, None
+
+
+def validate_file_path(
+    path: str,
+    allowed_base_dirs: Optional[List[str]] = None,
+) -> Tuple[bool, str, Optional[str]]:
+    """
+    Validate a file path against traversal attacks.
+
+    Args:
+        path: File path to validate
+        allowed_base_dirs: Optional whitelist of base directories
+
+    Returns:
+        Tuple of (is_safe, resolved_path, error_message)
+    """
+    if not path or not path.strip():
+        return False, "", "Empty path"
+
+    for pattern in _PATH_TRAVERSAL_PATTERNS:
+        if pattern.search(path):
+            logger.warning(f"Path traversal attempt: {path}")
+            return False, "", f"Path traversal detected: {path}"
+
+    try:
+        resolved = os.path.realpath(os.path.abspath(path))
+    except Exception as e:
+        return False, "", f"Path resolution failed: {e}"
+
+    if allowed_base_dirs:
+        in_allowed = False
+        for base_dir in allowed_base_dirs:
+            base_resolved = os.path.realpath(os.path.abspath(base_dir))
+            if resolved.startswith(base_resolved):
+                in_allowed = True
+                break
+        if not in_allowed:
+            logger.warning(f"Path outside allowed dirs: {resolved}")
+            return False, "", "Path outside allowed directories"
+
+    return True, resolved, None
+
+
+def validate_python_code(code: str) -> Tuple[bool, Optional[str]]:
+    """
+    Validate LLM-generated Python code for sandbox execution.
+
+    Args:
+        code: Python code string
+
+    Returns:
+        Tuple of (is_safe, error_message)
+    """
+    if not code or not code.strip():
+        return False, "Empty code"
+
+    for pattern in _PYTHON_DANGEROUS_PATTERNS:
+        match = pattern.search(code)
+        if match:
+            logger.warning(f"Dangerous Python pattern blocked: {match.group()}")
+            return False, f"Unsafe code pattern: {match.group()}"
+
+    return True, None
+
+
+def validate_client_id(client_id: str) -> Tuple[bool, str, Optional[str]]:
+    """
+    Validate and normalize a client ID.
+
+    Args:
+        client_id: Raw client ID
+
+    Returns:
+        Tuple of (is_valid, normalized_id, error_message)
+    """
+    if not client_id or not client_id.strip():
+        return False, "", "Empty client ID"
+
+    normalized = client_id.strip().lower()
+
+    if not _CLIENT_ID_PATTERN.match(normalized):
+        return False, "", f"Invalid client ID format: {client_id}"
+
+    return True, normalized, None
+
+
+__all__ = [
+    "SQLEngine",
+    "get_sql_engine",
+    "sanitize_sql",
+    "validate_file_path",
+    "validate_python_code",
+    "validate_client_id",
+]

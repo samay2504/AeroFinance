@@ -23,6 +23,13 @@ except ImportError:
 os.environ['TRANSFORMERS_OFFLINE'] = '1'
 os.environ['HF_HUB_DISABLE_TELEMETRY'] = '1'
 
+# ═══ DLL Fix: Must run before loading native extensions (torch, sentence-transformers) ═══
+try:
+    from app.core.dll_fix import apply_dll_fix
+    apply_dll_fix()
+except ImportError:
+    pass
+
 logger = logging.getLogger(__name__)
 
 try:

@@ -23,6 +23,7 @@ import os
 import io
 import re
 import threading
+import math
 from abc import ABC, abstractmethod
 from typing import Dict, Any, Optional, List, Tuple
 from pathlib import Path
@@ -31,6 +32,116 @@ from datetime import datetime
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# BLOOM FILTER — Zero-Latency Probabilistic Existence Checks
+# =============================================================================
+
+class BloomFilter:
+    """
+    Probabilistic set for O(1) "definitely not in set" checks.
+
+    Used to skip expensive I/O (S3 or disk) when a dataset definitely
+    does not exist. False positives are possible (proceed to I/O check),
+    but false negatives are impossible.
+
+    Implementation:
+      - Uses Python `int` as a bit vector (no external deps)
+      - k=7 hash functions via double-hashing (SHA256 + MD5)
+      - Default capacity=10000, fp_rate ≈ 1%
+
+    Thread Safety:
+      All mutations are protected by threading.Lock.
+
+    Reference:
+      Kirsch & Mitzenmacher (2006) - "Less Hashing, Same Performance"
+    """
+
+    def __init__(self, capacity: int = 10_000, fp_rate: float = 0.01):
+        """
+        Args:
+            capacity: Expected max number of items
+            fp_rate:  Target false-positive rate (0.01 = 1%)
+        """
+        # Optimal bit array size: m = -(n * ln(p)) / (ln(2)^2)
+        self._m = max(64, int(-capacity * math.log(fp_rate) / (math.log(2) ** 2)))
+        # Optimal hash count: k = (m/n) * ln(2)
+        self._k = max(1, int((self._m / max(capacity, 1)) * math.log(2)))
+        # Bit vector stored as Python int (arbitrary precision — no size limit)
+        self._bits: int = 0
+        self._count: int = 0
+        self._lock = threading.Lock()
+
+        logger.debug(
+            f"BloomFilter initialized: m={self._m} bits, k={self._k} hashes, "
+            f"capacity={capacity}, target_fp={fp_rate}"
+        )
+
+    def _hashes(self, key: str) -> List[int]:
+        """
+        Generate k hash positions using double-hashing.
+
+        h_i(key) = (h1(key) + i * h2(key)) % m
+        This avoids computing k independent hash functions.
+        """
+        h1 = int(hashlib.sha256(key.encode()).hexdigest(), 16)
+        h2 = int(hashlib.md5(key.encode()).hexdigest(), 16)
+        return [(h1 + i * h2) % self._m for i in range(self._k)]
+
+    def add(self, key: str) -> None:
+        """Add a key to the filter."""
+        positions = self._hashes(key)
+        with self._lock:
+            for pos in positions:
+                self._bits |= (1 << pos)
+            self._count += 1
+
+    def might_contain(self, key: str) -> bool:
+        """
+        Test if a key MIGHT be in the set.
+
+        Returns:
+            False → Definitely not in set (skip I/O, save 200-500ms)
+            True  → Possibly in set (proceed to actual check)
+        """
+        positions = self._hashes(key)
+        # Read without lock (int reads are atomic in CPython; benign races)
+        bits = self._bits
+        return all((bits >> pos) & 1 for pos in positions)
+
+    def clear(self) -> None:
+        """Reset the filter."""
+        with self._lock:
+            self._bits = 0
+            self._count = 0
+
+    def rebuild(self, keys: List[str]) -> None:
+        """
+        Rebuild the filter from a list of keys.
+        Used after deletions (Bloom filters don't support delete).
+        """
+        with self._lock:
+            self._bits = 0
+            self._count = 0
+        for key in keys:
+            self.add(key)
+        logger.debug(f"BloomFilter rebuilt with {len(keys)} keys")
+
+    def stats(self) -> Dict[str, Any]:
+        """Return filter statistics."""
+        set_bits = bin(self._bits).count('1')
+        fill_ratio = set_bits / self._m if self._m > 0 else 0
+        # Estimated false-positive rate: (set_bits / m) ^ k
+        estimated_fp = fill_ratio ** self._k if fill_ratio < 1 else 1.0
+        return {
+            "capacity_bits": self._m,
+            "hash_functions": self._k,
+            "items_added": self._count,
+            "bits_set": set_bits,
+            "fill_ratio": round(fill_ratio, 4),
+            "estimated_fp_rate": round(estimated_fp, 6),
+        }
 
 
 # =============================================================================
@@ -923,6 +1034,7 @@ class DataRegistry:
     - LRU cache for in-memory DataFrames (capped size)
     - Parquet persistence to disk
     - Redis metadata storage (optional)
+    - Bloom filter for zero-latency existence checks
     - Multi-tenant isolation via client_id
     """
 
@@ -943,10 +1055,17 @@ class DataRegistry:
         self._dataframes: OrderedDict[str, pd.DataFrame] = OrderedDict()
         self._metadata: Dict[str, Dict[str, Any]] = {}
         
+        # Bloom filter: zero-latency "definitely not here" check
+        self._bloom = BloomFilter(
+            capacity=settings.storage.bloom_capacity,
+            fp_rate=settings.storage.bloom_fp_rate
+        )
+        self._bloom_check_saves: int = 0  # observability counter
+        
         # Redis client (optional)
         self._redis = self._initialize_redis(redis_url)
         
-        # Load existing metadata from disk
+        # Load existing metadata from disk (also populates bloom filter)
         self._load_disk_metadata()
 
     def _initialize_redis(self, redis_url: Optional[str]):
@@ -1047,13 +1166,19 @@ class DataRegistry:
             return None
 
     def _load_disk_metadata(self):
-        """Load metadata from disk cache."""
+        """Load metadata from disk cache and populate bloom filter."""
         meta_file = self.cache_dir / "_metadata.json"
         if meta_file.exists():
             try:
                 with open(meta_file) as f:
                     self._metadata = json.load(f)
-                logger.info(f"Loaded {len(self._metadata)} dataset metadata entries")
+                # Populate bloom filter with all known dataset IDs
+                for dataset_id in self._metadata:
+                    self._bloom.add(dataset_id)
+                logger.info(
+                    f"Loaded {len(self._metadata)} dataset metadata entries "
+                    f"(bloom filter populated)"
+                )
             except Exception as e:
                 logger.warning(f"Failed to load metadata: {e}")
 
@@ -1230,11 +1355,19 @@ class DataRegistry:
                 logger.warning(f"Redis set failed: {e}")
 
         logger.info(f"Registered dataset: {dataset_id} ({len(df)} rows)")
+
+        # Update bloom filter
+        self._bloom.add(dataset_id)
+
         return True
 
     def get(self, dataset_id: str, client_id: Optional[str] = None) -> Optional[pd.DataFrame]:
         """
         Get DataFrame by ID with optional client ownership check.
+        
+        Uses Bloom filter for zero-latency negative lookups:
+        - If bloom says "no" → skip I/O entirely (200-500ms saved)
+        - If bloom says "maybe" → proceed to LRU / disk check
         
         Args:
             dataset_id: Dataset identifier
@@ -1243,6 +1376,15 @@ class DataRegistry:
         Returns:
             DataFrame or None if not found/unauthorized
         """
+        # ═══ Bloom Filter Fast-Reject ═══
+        if not self._bloom.might_contain(dataset_id):
+            self._bloom_check_saves += 1
+            logger.debug(
+                f"Bloom filter: '{dataset_id}' definitely not in registry "
+                f"(saved I/O #{self._bloom_check_saves})"
+            )
+            return None
+
         # Normalize client_id and check ownership
         if client_id:
             safe_client_id = self._normalize_client_id(client_id)
@@ -1323,6 +1465,10 @@ class DataRegistry:
             parquet_path.unlink()
 
         logger.info(f"Deleted dataset: {dataset_id}")
+
+        # Rebuild bloom filter (Bloom filters don't support deletion)
+        self._bloom.rebuild(list(self._metadata.keys()))
+
         return True
 
     def get_schema_info(self, dataset_id: str) -> str:
@@ -1340,6 +1486,18 @@ class DataRegistry:
             schema_lines.append(f"  - {col}: {dtype}")
         
         return "\n".join(schema_lines)
+
+
+    def bloom_stats(self) -> Dict[str, Any]:
+        """
+        Get Bloom filter statistics for observability.
+        
+        Returns:
+            Dict with filter stats and I/O savings count
+        """
+        stats = self._bloom.stats()
+        stats["io_checks_saved"] = self._bloom_check_saves
+        return stats
 
 
 # Singleton instance
@@ -1377,6 +1535,8 @@ __all__ = [
     "LocalStorageBackend", 
     "S3StorageBackend",
     "get_storage_backend",
+    # Bloom Filter
+    "BloomFilter",
     # Data Registry
     "DataRegistry", 
     "get_data_registry",

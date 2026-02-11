@@ -11,6 +11,10 @@
 # - CACHE_* for Redis/cache
 # - STORAGE_* for file storage
 # - DEPLOYMENT_* for deployment settings
+# - ROUTER_* for routing feature flags
+# - SCHEMA_* for schema filtering
+# - HEALING_* for self-healing execution
+# - DUCKDB_* for DuckDB performance
 # ============================================================================
 
 # These are defaults only. Override via .env environment variables.
@@ -19,6 +23,7 @@ debug: ~
 host: ~
 port: ~
 env: ~
+single_flight_timeout: 120.0
 
 llm:
   provider_preference: ~  # MUST be set via LLM_PROVIDER_PREFERENCE in .env
@@ -42,11 +47,80 @@ cache:
 
 storage:
   max_lru_dataframes: 10
+  bloom_capacity: 10000
+  bloom_fp_rate: 0.01
+
+# ═══════════════════════════════════════════════════════════════════
+# FEATURE FLAGS — PRD Enhancement Toggles
+# ═══════════════════════════════════════════════════════════════════
+# These flags allow enabling/disabling new features without code
+# changes. Useful for staged rollouts, A/B testing, and rollback.
+# Override via .env: ROUTER_ENABLE_FAST_PASS=false, etc.
+# ═══════════════════════════════════════════════════════════════════
+
+# Enhancement 1: Semantic Router Feature Flags
+router:
+  enable_fast_pass: true          # L0 regex fast-pass (0.01s latency)
+  enable_semantic_routing: true   # L1 spaCy vector similarity (0.05s)
+  enable_llm_fallback: true       # L2 LLM classification fallback (1.5s)
+  regex_confidence: 0.95          # Min confidence for L0 to accept
+  semantic_confidence: 0.70       # Min confidence for L1 to accept
+  cache_enabled: true             # Cache repeated routing decisions
+  cache_max_size: 1000            # Max cached routing decisions
+
+# Enhancement 2: Self-Healing Execution Feature Flags
+healing:
+  enabled: true                   # Master switch for self-healing loop
+  max_retries: 2                  # Max retry attempts before failing
+  enable_error_hints: true        # Include type-specific debugging hints
+  enable_fuzzy_column_fix: true   # Auto-correct typos in column names
+  log_healing_prompts: false      # Log full healing prompts (verbose)
+  backoff_base_ms: 100            # Exponential backoff base (ms)
+
+# Enhancement 3: Intelligent Schema Filtering Feature Flags
+schema_filter:
+  enable_filtering: true          # Master switch for column filtering
+  max_columns: 20                 # Max columns to send to LLM
+  fuzzy_match_cutoff: 0.70        # Fuzzy matching threshold (0.0-1.0)
+  enable_semantic_expansion: true # Expand related columns (revenue→cost)
+  enable_key_column_detection: true  # Always include date/ID columns
+  min_fallback_columns: 5         # Minimum columns when nothing matches
+
+# Enhancement 5: Hot Cache (L1/L2) Feature Flags
+hot_cache:
+  enabled: true                   # Master switch for caching
+  max_entries: 1000               # L1 Cache max entries
+  ttl_seconds: 1800               # Default TTL in seconds
+  semantic: true                  # Enable L3 semantic similarity
+  similarity: 0.92                # Cosine similarity threshold
+  embedding_provider: auto        # method for semantic matching
+  hot_key_threshold: 10           # Hits to promote to L1
+  l1_ttl: 60                      # TTL for L1 entries
+
+# Enhancement 6: Token Compression Feature Flags
+compression:
+  enabled: true                   # Master switch for DataFrame compression
+  max_sample_rows: 5              # Sample rows in compressed output
+  include_statistics: true        # Include column statistics
+  include_patterns: true          # Include detected data patterns
+
+# ═══════════════════════════════════════════════════════════════════
+# DuckDB Performance & S3 Integration
+# ═══════════════════════════════════════════════════════════════════
 
 duckdb:
   memory_limit: 2GB
   threads: 4
   enable_progress_bar: false
+  # S3 / Cloud Integration
+  enable_s3: false                # Load httpfs extension for S3 queries
+  s3_region: ~                    # Override: defaults to DEPLOYMENT region
+  s3_endpoint: ~                  # Custom S3-compatible endpoint (MinIO)
+  # Performance Tuning
+  enable_object_cache: true       # Cache Parquet metadata in memory
+  object_cache_size: 256MB        # Parquet metadata cache size
+  preserve_insertion_order: false  # Disable for ~15% scan speedup
+  enable_parallel_csv: true       # Parallel CSV reader
 
 sandbox:
   timeout_seconds: 30

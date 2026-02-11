@@ -6,12 +6,26 @@ Uses LLM and NLP techniques to understand data structure rather than hardcoded p
 import logging
 import re
 import json
+import time
 from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 import pandas as pd
 import numpy as np
 
 logger = logging.getLogger(__name__)
+
+# Lazy import to avoid circular imports
+_metrics = None
+
+def _get_metrics():
+    global _metrics
+    if _metrics is None:
+        try:
+            from app.core.metrics import get_metrics
+            _metrics = get_metrics()
+        except ImportError:
+            pass
+    return _metrics
 
 
 
@@ -754,6 +768,208 @@ class DataAnalystAgent:
                 sheets.append(sheet_name)
         
         return sheets if sheets else [parts[-1]]
+
+    # ═══════════════════════════════════════════════════════════════════
+    # SELF-HEALING EXECUTION LOOP (PRD: Enhancement 2)
+    # Wraps any execution strategy with retry-analyze-reprompt logic.
+    # ═══════════════════════════════════════════════════════════════════
+
+    MAX_HEAL_RETRIES = 2
+    _HEALING_STATS = {
+        "total_attempts": 0,
+        "first_try_success": 0,
+        "healed_success": 0,
+        "total_failures": 0,
+    }
+
+    def execute_logic(
+        self,
+        query: str,
+        df: pd.DataFrame,
+        df_id: str,
+        strategy: str = "auto",
+        cache_context: Optional[str] = None,
+        retry_count: int = 0,
+    ) -> Optional[AnalysisResult]:
+        """
+        Self-healing execution loop for LLM-generated code.
+
+        Implements try-execute-analyze-re-prompt-retry pattern:
+        1. Generate code/SQL via LLM
+        2. Execute in sandbox/engine
+        3. On failure: analyze error → build healing prompt → retry
+        4. Max 2 retries with error context accumulation
+
+        Args:
+            query: User's question
+            df: DataFrame to analyze
+            df_id: Dataset identifier
+            strategy: 'sql', 'python', or 'auto' (tries both)
+            cache_context: Unique cache context for LLM calls
+            retry_count: Current retry number (for recursion)
+
+        Returns:
+            AnalysisResult on success, None on total failure
+        """
+        t0 = time.perf_counter()
+        self._HEALING_STATS["total_attempts"] += 1
+        metrics = _get_metrics()
+
+        schema = self._get_schema_context(df, df_id)
+
+        result = None
+        last_error = None
+
+        # Strategy selection
+        strategies = []
+        if strategy == "sql" or strategy == "auto":
+            strategies.append(("llm_sql", self._try_llm_sql))
+        if strategy == "python" or strategy == "auto":
+            strategies.append(("llm_python", self._try_llm_python))
+
+        for method_name, method_fn in strategies:
+            try:
+                result = method_fn(
+                    query=query,
+                    df=df,
+                    df_id=df_id,
+                    schema=schema,
+                    cache_context=cache_context,
+                )
+                if result and result.success:
+                    latency_ms = (time.perf_counter() - t0) * 1000
+                    if retry_count == 0:
+                        self._HEALING_STATS["first_try_success"] += 1
+                    else:
+                        self._HEALING_STATS["healed_success"] += 1
+                    if metrics:
+                        metrics.record_self_healing_attempt(
+                            method=method_name,
+                            attempt=retry_count,
+                            success=True,
+                            latency_ms=latency_ms,
+                        )
+                    logger.info(
+                        f"Self-healing: {method_name} succeeded "
+                        f"(attempt {retry_count + 1}, {latency_ms:.0f}ms)"
+                    )
+                    return result
+            except Exception as e:
+                last_error = str(e)
+                logger.warning(f"Self-healing: {method_name} failed: {last_error}")
+
+        # All strategies failed – attempt self-healing if retries remain
+        if retry_count < self.MAX_HEAL_RETRIES and last_error:
+            healing_prompt = self._build_healing_prompt(query, last_error, schema)
+            logger.info(
+                f"Self-healing: retry {retry_count + 1}/{self.MAX_HEAL_RETRIES} "
+                f"for error: {last_error[:120]}"
+            )
+            if metrics:
+                metrics.record_self_healing_attempt(
+                    method="retry",
+                    attempt=retry_count,
+                    success=False,
+                    error_type=self._classify_error(last_error),
+                    latency_ms=(time.perf_counter() - t0) * 1000,
+                )
+            # Recursive call with incremented retry
+            return self.execute_logic(
+                query=healing_prompt,
+                df=df,
+                df_id=df_id,
+                strategy=strategy,
+                cache_context=f"{cache_context}_retry{retry_count + 1}" if cache_context else None,
+                retry_count=retry_count + 1,
+            )
+
+        # Total failure
+        self._HEALING_STATS["total_failures"] += 1
+        if metrics:
+            metrics.record_self_healing_attempt(
+                method="exhausted",
+                attempt=retry_count,
+                success=False,
+                error_type=self._classify_error(last_error or "unknown"),
+                latency_ms=(time.perf_counter() - t0) * 1000,
+            )
+        logger.warning(
+            f"Self-healing exhausted all {self.MAX_HEAL_RETRIES + 1} attempts"
+        )
+        return None
+
+    def _build_healing_prompt(self, original_query: str, error: str, schema: Any) -> str:
+        """Build a re-prompt that includes error context for self-healing."""
+        hints = self._get_error_hints(error)
+        return (
+            f"{original_query}\n\n"
+            f"⚠️ PREVIOUS ATTEMPT FAILED with error:\n{error}\n\n"
+            f"HINTS TO FIX:\n{hints}\n\n"
+            f"Please correct your approach. Use EXACT column names from the schema."
+        )
+
+    @staticmethod
+    def _get_error_hints(error: str) -> str:
+        """Generate targeted hints based on error type."""
+        error_lower = error.lower()
+        hints = []
+        if "column" in error_lower or "not found" in error_lower:
+            hints.append("• Check column names – use EXACT names from the schema.")
+        if "type" in error_lower or "cast" in error_lower:
+            hints.append("• Cast numeric columns explicitly: CAST(col AS DOUBLE).")
+        if "syntax" in error_lower:
+            hints.append("• Check SQL/Python syntax – missing quotes, parentheses?")
+        if "table" in error_lower:
+            hints.append("• Use the correct table name from DuckDB registration.")
+        if "division" in error_lower or "zero" in error_lower:
+            hints.append("• Guard against division by zero with NULLIF or CASE WHEN.")
+        if "index" in error_lower:
+            hints.append("• Check DataFrame index – iloc vs loc, bounds checking.")
+        if not hints:
+            hints.append("• Review the full error message and adjust your approach.")
+        return "\n".join(hints)
+
+    @staticmethod
+    def _classify_error(error: str) -> str:
+        """Classify error type for metrics tracking."""
+        error_lower = error.lower()
+        if "column" in error_lower or "not found" in error_lower:
+            return "column_error"
+        if "syntax" in error_lower:
+            return "syntax_error"
+        if "type" in error_lower or "cast" in error_lower:
+            return "type_error"
+        if "timeout" in error_lower:
+            return "timeout"
+        if "memory" in error_lower:
+            return "memory_error"
+        return "unknown_error"
+
+    def get_healing_stats(self) -> Dict[str, Any]:
+        """Return self-healing execution statistics."""
+        total = self._HEALING_STATS["total_attempts"]
+        if total == 0:
+            return self._HEALING_STATS.copy()
+        return {
+            **self._HEALING_STATS,
+            "first_try_rate": round(self._HEALING_STATS["first_try_success"] / total, 3),
+            "heal_rate": round(self._HEALING_STATS["healed_success"] / total, 3),
+            "failure_rate": round(self._HEALING_STATS["total_failures"] / total, 3),
+        }
+
+    def _get_schema_context(self, df: pd.DataFrame, df_id: str) -> Dict[str, Any]:
+        """Get or compute schema context for a DataFrame."""
+        if df_id in self._schema_cache:
+            return self._schema_cache[df_id]
+        
+        schema = {
+            "df_id": df_id,
+            "shape": df.shape,
+            "columns": {str(c): str(df[c].dtype) for c in df.columns},
+            "sample": df.head(3).to_dict(),
+        }
+        self._schema_cache[df_id] = schema
+        return schema
 
     def execute_sql_query(
         self,

@@ -2,20 +2,24 @@
 Production-grade LLM utilities with retry logic, caching, and fallback mechanisms.
 Implements best practices for LLM API resilience:
 - Exponential backoff with jitter (tenacity)
-- Semantic result caching
+- Semantic result caching with L1/L2 hot-key promotion
 - Provider fallback chains
 - Rate limit header awareness
+- SingleFlight (request coalescing) to prevent thundering herds
 """
 import logging
 import time
 import random
 import hashlib
 import json
-from typing import Any, Callable, Dict, List, Optional, Tuple, Type
+from typing import Any, Callable, Dict, List, Optional, Tuple, Type, TypeVar
 from dataclasses import dataclass, field
 from functools import wraps
 from datetime import datetime, timedelta
 import threading
+from app.config import settings
+
+T = TypeVar("T")
 
 try:
     from app.core.dll_fix import apply_dll_fix
@@ -41,38 +45,116 @@ class CacheEntry:
 
 class SemanticCache:
     """
-    Semantic caching for LLM responses.
-    Uses prompt hashing with optional semantic similarity.
-    Thread-safe implementation.
+    Two-tier semantic cache for LLM responses with Hot Key promotion.
+
+    Architecture:
+      L1 (Local RAM)  — Ultra-hot keys promoted here for 0ms reads.
+                        Short TTL (default 60s), bypasses all locks.
+      L2 (In-process)  — Standard hash-based cache with hit tracking.
+                         When hit_count exceeds threshold, key is
+                         promoted to L1.
+
+    This solves the "Hot Key" problem where a single popular query
+    (e.g. "Summary of Apple Inc") overwhelms any shared backend.
+
+    Thread-safe implementation using RLock for L2 and a separate Lock for L1.
     """
 
-    def __init__(self, max_size: int = 500, default_ttl: int = 3600):
+    # A key with > HOT_KEY_THRESHOLD hits gets promoted to L1
+    HOT_KEY_THRESHOLD: int = 10
+    # L1 entries live for 60s (short burst protection)
+    L1_TTL_SECONDS: int = 60
+    # Cleanup L1 every N operations to avoid unbounded growth
+    _L1_CLEANUP_INTERVAL: int = 50
+
+    def __init__(self, max_size: int = None, default_ttl: int = None):
+        # Configurable constants from settings
+        self.HOT_KEY_THRESHOLD = settings.hot_cache.hot_key_threshold
+        self.L1_TTL_SECONDS = settings.hot_cache.l1_ttl
+        
+        # L2 cache (main)
         self._cache: Dict[str, CacheEntry] = {}
-        self._max_size = max_size
-        self._default_ttl = default_ttl
+        self._max_size = max_size or settings.hot_cache.max_entries
+        self._default_ttl = default_ttl or settings.hot_cache.ttl_seconds
         self._lock = threading.RLock()
-        self._stats = {"hits": 0, "misses": 0}
+        self._stats = {"hits": 0, "misses": 0, "l1_hits": 0, "promotions": 0}
+
+        # L1 cache (hot keys)  — {key: (response, expires_at)}
+        self._l1: Dict[str, Tuple[Any, float]] = {}
+        self._l1_lock = threading.Lock()
+        self._op_counter = 0
 
     def _hash_prompt(self, prompt: str, context: Optional[str] = None) -> str:
         """Create deterministic hash of prompt + context."""
         combined = f"{prompt}::{context or ''}"
         return hashlib.sha256(combined.encode()).hexdigest()[:16]
 
+    # ─── L1 (Local RAM) Hot-Key Layer ───────────────────────────────
+
+    def _l1_get(self, key: str) -> Optional[Any]:
+        """Check L1 for a hot-cached response. Returns None on miss/expiry."""
+        with self._l1_lock:
+            item = self._l1.get(key)
+            if item is None:
+                return None
+            response, expires_at = item
+            if time.time() > expires_at:
+                del self._l1[key]
+                return None
+            self._stats["l1_hits"] += 1
+            return response
+
+    def _maybe_promote_to_l1(self, key: str, entry: CacheEntry) -> None:
+        """
+        Promote a key to L1 if it exceeds the hot-key threshold.
+        Called under self._lock (L2 lock), acquires self._l1_lock briefly.
+        """
+        if entry.hit_count >= self.HOT_KEY_THRESHOLD and key not in self._l1:
+            with self._l1_lock:
+                self._l1[key] = (entry.response, time.time() + self.L1_TTL_SECONDS)
+            self._stats["promotions"] += 1
+            logger.info(
+                f"Hot-key promoted to L1: {key[:8]}... "
+                f"(hits={entry.hit_count}, l1_ttl={self.L1_TTL_SECONDS}s)"
+            )
+
+    def _l1_cleanup(self) -> None:
+        """Periodically purge expired L1 entries."""
+        self._op_counter += 1
+        if self._op_counter % self._L1_CLEANUP_INTERVAL != 0:
+            return
+        now = time.time()
+        with self._l1_lock:
+            expired = [k for k, (_, exp) in self._l1.items() if now > exp]
+            for k in expired:
+                del self._l1[k]
+
+    # ─── Public API ─────────────────────────────────────────────────
+
     def get(self, prompt: str, context: Optional[str] = None) -> Optional[Any]:
-        """Get cached response if available."""
+        """Get cached response — checks L1 first, then L2."""
         key = self._hash_prompt(prompt, context)
-        
+
+        # L1: zero-lock fast path for ultra-hot keys
+        l1_result = self._l1_get(key)
+        if l1_result is not None:
+            return l1_result
+
+        # L2: standard cache lookup
         with self._lock:
+            self._l1_cleanup()
             entry = self._cache.get(key)
             if entry and entry.is_valid():
                 entry.hit_count += 1
                 self._stats["hits"] += 1
-                logger.debug(f"Cache HIT for key {key[:8]}...")
+                # Promote to L1 if hot
+                self._maybe_promote_to_l1(key, entry)
+                logger.debug(f"Cache L2 HIT for key {key[:8]}... (hits={entry.hit_count})")
                 return entry.response
             elif entry:
-                # Expired - remove it
+                # Expired — remove
                 del self._cache[key]
-            
+
             self._stats["misses"] += 1
             return None
 
@@ -83,52 +165,59 @@ class SemanticCache:
         context: Optional[str] = None,
         ttl: Optional[int] = None
     ) -> None:
-        """Cache a response."""
+        """Cache a response in L2."""
         key = self._hash_prompt(prompt, context)
-        
+
         with self._lock:
-            # Evict oldest entries if at capacity
             if len(self._cache) >= self._max_size:
                 self._evict_lru()
-            
+
             self._cache[key] = CacheEntry(
                 response=response,
                 created_at=datetime.now(),
                 ttl_seconds=ttl or self._default_ttl
             )
-            logger.debug(f"Cache SET for key {key[:8]}...")
+            logger.debug(f"Cache L2 SET for key {key[:8]}...")
 
     def _evict_lru(self) -> None:
         """Evict least recently used entries."""
         if not self._cache:
             return
-        
-        # Remove entries with lowest hit count and oldest
+
         sorted_entries = sorted(
             self._cache.items(),
             key=lambda x: (x[1].hit_count, x[1].created_at)
         )
-        
-        # Remove bottom 10%
+
         remove_count = max(1, len(sorted_entries) // 10)
         for key, _ in sorted_entries[:remove_count]:
             del self._cache[key]
+            # Also evict from L1 if present
+            with self._l1_lock:
+                self._l1.pop(key, None)
 
     def clear(self) -> None:
-        """Clear all cached entries."""
+        """Clear all cached entries in both L1 and L2."""
         with self._lock:
             self._cache.clear()
+        with self._l1_lock:
+            self._l1.clear()
 
     def stats(self) -> Dict[str, Any]:
-        """Get cache statistics."""
+        """Get cache statistics including L1/L2 breakdown."""
         with self._lock:
-            total = self._stats["hits"] + self._stats["misses"]
-            hit_rate = self._stats["hits"] / total if total > 0 else 0
+            total = self._stats["hits"] + self._stats["misses"] + self._stats["l1_hits"]
+            hit_rate = (
+                (self._stats["hits"] + self._stats["l1_hits"]) / total
+            ) if total > 0 else 0
             return {
                 "hits": self._stats["hits"],
+                "l1_hits": self._stats["l1_hits"],
                 "misses": self._stats["misses"],
+                "promotions": self._stats["promotions"],
                 "hit_rate": round(hit_rate, 3),
-                "size": len(self._cache),
+                "l2_size": len(self._cache),
+                "l1_size": len(self._l1),
                 "max_size": self._max_size
             }
 
@@ -1150,9 +1239,189 @@ def find_column(query_name: str, df, threshold: float = 0.6) -> Tuple[Optional[s
     )
 
 
+# =============================================================================
+# SINGLEFLIGHT — Thundering Herd Protection via Request Coalescing
+# =============================================================================
+
+@dataclass
+class _FlightEntry:
+    """Tracks a single in-flight computation."""
+    event: threading.Event
+    result: Any = None
+    error: Optional[Exception] = None
+    waiter_count: int = 0  # how many threads are waiting (observability)
+
+
+class SingleFlight:
+    """
+    Request coalescing (SingleFlight pattern) for deduplicating concurrent calls.
+
+    Problem:
+      50 users ask "What is FY22 Revenue?" at the same moment → 50 LLM calls.
+
+    Solution:
+      Hash the input, check if it's already in-flight. If yes — wait on the
+      existing result instead of spawning a duplicate. Only 1 call fires,
+      all 50 threads share the answer.
+
+    Thread Safety:
+      Uses a lock-protected flight_map of threading.Event objects.
+      The first caller executes; subsequent callers block on Event.wait().
+
+    Usage:
+        sf = SingleFlight()
+        result = sf.do("cache_key", expensive_function, arg1, arg2)
+
+    Or as a decorator:
+        @coalesce()
+        def call_llm(prompt: str) -> str:
+            ...
+    """
+
+    def __init__(self, timeout: float = None):
+        """
+        Args:
+            timeout: Max seconds to wait for an in-flight result before giving up.
+        """
+        self._lock = threading.Lock()
+        self._flights: Dict[str, _FlightEntry] = {}
+        self._timeout = timeout or settings.single_flight_timeout
+        self._stats = {"coalesced": 0, "unique": 0, "timeouts": 0}
+
+    @staticmethod
+    def _make_key(*args: Any, **kwargs: Any) -> str:
+        """Create deterministic hash from function arguments."""
+        raw = json.dumps(
+            {"args": [str(a) for a in args], "kwargs": {str(k): str(v) for k, v in sorted(kwargs.items())}},
+            sort_keys=True
+        )
+        return hashlib.sha256(raw.encode()).hexdigest()[:24]
+
+    def do(self, key: str, fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
+        """
+        Execute fn(*args, **kwargs) with coalescing on `key`.
+
+        If the same key is already in-flight, waits for that result.
+        If not, executes fn and shares the result with all waiters.
+
+        Args:
+            key: Deduplication key (e.g. hashed prompt)
+            fn:  The callable to execute
+            *args, **kwargs: Arguments to fn
+
+        Returns:
+            Result from fn
+
+        Raises:
+            Original exception from fn if execution failed
+            TimeoutError if waiting longer than self._timeout
+        """
+        with self._lock:
+            flight = self._flights.get(key)
+            if flight is not None:
+                # Another thread is already computing this — wait on it
+                flight.waiter_count += 1
+                self._stats["coalesced"] += 1
+                logger.info(
+                    f"SingleFlight: coalescing request for key {key[:12]}... "
+                    f"({flight.waiter_count} waiters)"
+                )
+
+        # If we found an in-flight entry, wait for it
+        if flight is not None:
+            resolved = flight.event.wait(timeout=self._timeout)
+            if not resolved:
+                self._stats["timeouts"] += 1
+                raise TimeoutError(
+                    f"SingleFlight: timed out waiting for key {key[:12]}... "
+                    f"after {self._timeout}s"
+                )
+            if flight.error is not None:
+                raise flight.error
+            return flight.result
+
+        # We are the leader — create a flight entry and execute
+        entry = _FlightEntry(event=threading.Event())
+        with self._lock:
+            self._flights[key] = entry
+            self._stats["unique"] += 1
+
+        try:
+            result = fn(*args, **kwargs)
+            entry.result = result
+            return result
+        except Exception as e:
+            entry.error = e
+            raise
+        finally:
+            # Signal all waiters and clean up
+            entry.event.set()
+            waiter_count = entry.waiter_count
+            with self._lock:
+                self._flights.pop(key, None)
+            if waiter_count > 0:
+                logger.info(
+                    f"SingleFlight: resolved key {key[:12]}... "
+                    f"(served {waiter_count + 1} threads with 1 call)"
+                )
+
+    def stats(self) -> Dict[str, Any]:
+        """Get coalescing statistics."""
+        with self._lock:
+            total = self._stats["unique"] + self._stats["coalesced"]
+            coalesce_rate = (
+                self._stats["coalesced"] / total if total > 0 else 0
+            )
+            return {
+                "unique_executions": self._stats["unique"],
+                "coalesced_requests": self._stats["coalesced"],
+                "timeouts": self._stats["timeouts"],
+                "coalesce_rate": round(coalesce_rate, 3),
+                "in_flight": len(self._flights),
+            }
+
+
+def coalesce(sf: Optional[SingleFlight] = None, key_fn: Optional[Callable] = None):
+    """
+    Decorator that applies SingleFlight coalescing to any function.
+
+    Identical concurrent calls (same args hash) are coalesced into one execution.
+
+    Args:
+        sf: Optional SingleFlight instance (uses global if None).
+        key_fn: Optional callable(args, kwargs) -> str for custom key generation.
+                Defaults to hashing all arguments.
+
+    Usage:
+        @coalesce()
+        def call_llm(prompt: str) -> str:
+            return openai.chat.completions.create(...)
+
+        # 50 concurrent calls with the same prompt → 1 LLM call
+    """
+    def decorator(fn: Callable[..., T]) -> Callable[..., T]:
+        _sf = sf  # capture outer
+
+        @wraps(fn)
+        def wrapper(*args: Any, **kwargs: Any) -> T:
+            nonlocal _sf
+            if _sf is None:
+                _sf = get_single_flight()
+            if key_fn is not None:
+                key = key_fn(args, kwargs)
+            else:
+                key = SingleFlight._make_key(*args, **kwargs)
+            return _sf.do(key, fn, *args, **kwargs)
+
+        wrapper._single_flight = True  # marker for introspection
+        return wrapper
+    return decorator
+
+
 # Global instances
 _cache = SemanticCache()
 _rate_limiter = AdaptiveRateLimiter()
+_single_flight = SingleFlight()
 
 
 def get_semantic_cache() -> SemanticCache:
@@ -1165,6 +1434,11 @@ def get_rate_limiter() -> AdaptiveRateLimiter:
     return _rate_limiter
 
 
+def get_single_flight() -> SingleFlight:
+    """Get the global SingleFlight instance for request coalescing."""
+    return _single_flight
+
+
 __all__ = [
     "SemanticCache",
     "RetryConfig",
@@ -1172,13 +1446,16 @@ __all__ = [
     "AdaptiveRateLimiter",
     "ProviderFallback",
     "RobustJSONParser",
-    "SmartTypeInference", 
-    "DataFrameTypeFixer", # Alias
+    "SmartTypeInference",
+    "DataFrameTypeFixer",  # Alias
     "SemanticColumnMatcher",
-    "FuzzyColumnMatcher", # Alias
+    "FuzzyColumnMatcher",  # Alias
+    "SingleFlight",
+    "coalesce",
     "parse_llm_json",
     "fix_dataframe_types",
     "find_column",
     "get_semantic_cache",
     "get_rate_limiter",
+    "get_single_flight",
 ]

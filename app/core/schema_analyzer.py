@@ -42,12 +42,35 @@ class DataSchema:
 class SchemaAnalyzer:
     """
     LLM-driven schema analyzer for understanding complex Excel/DataFrame structures.
-    Uses semantic reasoning rather than pattern matching.
+    Delegates semantic matching to SemanticMatcher and period detection to FinancialNER
+    from semantic_understanding.py to avoid logic duplication.
     """
 
     def __init__(self, llm_wrapper=None):
         self._llm = llm_wrapper
         self._cache: Dict[str, DataSchema] = {}
+        self._semantic_matcher = None  # Lazy-loaded
+        self._financial_ner = None     # Lazy-loaded
+
+    def _get_matcher(self):
+        """Lazy-load SemanticMatcher to avoid circular imports."""
+        if self._semantic_matcher is None:
+            try:
+                from app.core.semantic_understanding import get_semantic_matcher
+                self._semantic_matcher = get_semantic_matcher()
+            except ImportError:
+                logger.warning("SemanticMatcher unavailable, using basic matching")
+        return self._semantic_matcher
+
+    def _get_ner(self):
+        """Lazy-load FinancialNER to avoid circular imports."""
+        if self._financial_ner is None:
+            try:
+                from app.core.semantic_understanding import get_financial_ner
+                self._financial_ner = get_financial_ner()
+            except ImportError:
+                logger.warning("FinancialNER unavailable, using basic period detection")
+        return self._financial_ner
 
     def analyze(
         self,
@@ -123,63 +146,51 @@ class SchemaAnalyzer:
             return False
 
     def _heuristic_analysis(self, df: pd.DataFrame, schema: DataSchema) -> DataSchema:
-        """Fallback heuristic analysis when LLM is unavailable."""
+        """Fallback heuristic analysis when LLM is unavailable.
+        Delegates period detection to FinancialNER from semantic_understanding."""
         # First column is usually the label column
         if len(df.columns) > 0:
             schema.label_column = df.columns[0]
             schema.columns[0].semantic_type = "metric_label"
 
-        # Scan first few rows for period patterns and date strings
-        period_patterns = [
-            r'^fy\d{2}$',
-            r'^\d{1,2}mfy\d{2}$',
-            r'^q\d\s*fy\d{2}$',
-            r'^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)',
-        ]
-        
-        # Date patterns to detect
-        date_pattern = r'^(\d{4})-(\d{2})-(\d{2})'  # YYYY-MM-DD
-        month_names = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec']
+        ner = self._get_ner()
+        month_names = ['jan', 'feb', 'mar', 'apr', 'may', 'jun',
+                       'jul', 'aug', 'sep', 'oct', 'nov', 'dec']
 
         for row_idx in range(min(5, len(df))):
             for col_idx, val in enumerate(df.iloc[row_idx]):
-                val_str = str(val).lower().strip()
+                val_str = str(val).strip()
                 col_name = df.columns[col_idx]
-                
-                # Check period patterns
-                matched = False
-                for pattern in period_patterns:
-                    if re.match(pattern, val_str):
-                        schema.period_columns[val_str] = col_name
+
+                # Delegate period/date detection to FinancialNER
+                if ner:
+                    entities = ner.extract_entities(val_str)
+                    period_entities = [e for e in entities if e.entity_type == 'period']
+                    if period_entities:
+                        normalized = period_entities[0].normalized
+                        schema.period_columns[normalized] = col_name
+                        ptype = period_entities[0].metadata.get('period_type', 'period')
                         if col_idx < len(schema.columns):
-                            schema.columns[col_idx].semantic_type = "period"
-                            schema.columns[col_idx].period_value = val_str
-                        matched = True
-                        break
-                
-                if matched:
-                    continue
-                
-                # Check for date strings (YYYY-MM-DD format)
-                date_match = re.match(date_pattern, val_str)
+                            schema.columns[col_idx].semantic_type = ptype
+                            schema.columns[col_idx].period_value = normalized
+                        if ptype == 'date':
+                            schema.date_columns.append(col_name)
+                        continue
+
+                # Basic fallback if NER unavailable
+                val_lower = val_str.lower()
+                date_match = re.match(r'^(\d{4})-(\d{2})-(\d{2})', val_lower)
                 if date_match:
                     year = date_match.group(1)
                     month = int(date_match.group(2))
-                    
-                    # Create normalized date key (e.g., "december 2020", "dec_2020")
                     month_name = month_names[month - 1]
                     date_key = f"{month_name}_{year}"
-                    full_key = f"{month_name} {year}"
-                    
                     schema.period_columns[date_key] = col_name
-                    schema.period_columns[full_key] = col_name
-                    # Also store with just month name for flexible matching
+                    schema.period_columns[f"{month_name} {year}"] = col_name
                     schema.date_columns.append(col_name)
-                    
                     if col_idx < len(schema.columns):
                         schema.columns[col_idx].semantic_type = "date"
                         schema.columns[col_idx].period_value = date_key
-                        schema.columns[col_idx].description = f"Date: {year}-{month:02d}"
 
         return schema
 
@@ -286,7 +297,8 @@ OUTPUT (JSON only, no explanation):
         metric_query: str
     ) -> Optional[int]:
         """
-        Find the row index containing a specific metric using semantic matching.
+        Find the row index containing a specific metric.
+        Delegates similarity scoring to SemanticMatcher from semantic_understanding.
         
         Args:
             df: DataFrame
@@ -299,33 +311,32 @@ OUTPUT (JSON only, no explanation):
         if not schema.label_column:
             return None
 
-        metric_query_lower = metric_query.lower()
-        
-        # Try exact/fuzzy matching first
+        matcher = self._get_matcher()
         best_match = None
-        best_score = 0
+        best_score = 0.0
 
         for idx, row in df.iterrows():
-            label = str(row[schema.label_column]).lower()
-            
-            # Score based on word overlap
-            query_words = set(metric_query_lower.split())
-            label_words = set(label.split())
-            overlap = len(query_words & label_words)
-            
-            # Bonus for key terms
-            if all(word in label for word in metric_query_lower.split() if len(word) > 3):
-                overlap += 5
-            
-            if overlap > best_score:
-                best_score = overlap
+            label = str(row[schema.label_column])
+            if label.lower() in ('nan', 'none', ''):
+                continue
+
+            if matcher:
+                score = matcher.calculate_similarity(metric_query, label)
+            else:
+                # Basic fallback: word overlap
+                q_words = set(metric_query.lower().split())
+                l_words = set(label.lower().split())
+                score = len(q_words & l_words) / max(len(q_words | l_words), 1)
+
+            if score > best_score:
+                best_score = score
                 best_match = idx
 
         # If low confidence and LLM available, ask LLM
-        if best_score < 2 and self._llm:
+        if best_score < 0.3 and self._llm:
             return self._llm_find_row(df, schema, metric_query)
 
-        return best_match if best_score > 0 else None
+        return best_match if best_score > 0.1 else None
 
     def _llm_find_row(
         self,
@@ -407,6 +418,167 @@ Return ONLY the numeric index, nothing else. If no match, return -1."""
         except Exception as e:
             logger.warning(f"Failed to get value at [{row_idx}, {col}]: {e}")
             return None
+
+    # ═══════════════════════════════════════════════════════════════════
+    # INTELLIGENT SCHEMA FILTERING (PRD: Enhancement 3)
+    # Reduces token usage by 70-96% for large DataFrames (100+ columns)
+    # Delegates similarity scoring to SemanticMatcher (semantic_understanding)
+    # to avoid duplicating synonym/fuzzy-matching logic.
+    # ═══════════════════════════════════════════════════════════════════
+
+    # Key column patterns: always include temporal, ID, and label columns
+    _KEY_COLUMN_PATTERNS = [
+        "date", "time", "period",   # Temporal
+        "id", "key", "code",        # Identifiers
+        "name", "description",      # Labels
+        "fy", "quarter", "year",    # Financial periods
+    ]
+
+    def get_relevant_schema(
+        self,
+        df: pd.DataFrame,
+        user_query: str,
+        max_columns: int = 20,
+        include_all_if_small: bool = True,
+        similarity_threshold: float = 0.3,
+    ) -> Dict[str, Any]:
+        """
+        Extract only columns relevant to the user's query.
+        Reduces token usage by 70-96% on large DataFrames.
+
+        Delegates similarity scoring to SemanticMatcher from
+        semantic_understanding.py (synonym expansion, fuzzy matching,
+        spaCy vectors, financial acronym expansion).
+
+        Args:
+            df: Source DataFrame
+            user_query: User's question
+            max_columns: Maximum columns to return
+            include_all_if_small: If df has <=30 columns, include all
+            similarity_threshold: Min similarity score to include a column (0-1)
+
+        Returns:
+            {
+                "relevant_columns": List[str],
+                "column_types": Dict[str, str],
+                "sample_values": Dict[str, List],
+                "schema_string": str,  # LLM-ready description
+                "compression_ratio": float,
+                "total_columns": int,
+                "filtered_columns": int,
+            }
+        """
+        all_columns = list(df.columns)
+        total_columns = len(all_columns)
+
+        # Small DataFrames: include everything
+        if include_all_if_small and total_columns <= 30:
+            logger.info(f"DataFrame has {total_columns} columns - including all")
+            return self._build_full_filtered_schema(df)
+
+        # Large DataFrames: intelligent filtering
+        logger.info(f"DataFrame has {total_columns} columns - applying smart filtering")
+
+        matcher = self._get_matcher()
+        scored_columns: List[Tuple[str, float]] = []
+
+        # ══════ Strategy 1: Semantic similarity scoring (via SemanticMatcher) ══════
+        # SemanticMatcher handles: exact match, substring, acronym expansion,
+        # spaCy vectors, synonym Jaccard — all in one call.
+        for col in all_columns:
+            if matcher:
+                # Convert underscored col names to readable form for matching
+                col_readable = col.replace('_', ' ')
+                score = matcher.calculate_similarity(user_query, col_readable)
+            else:
+                # Basic fallback: keyword overlap
+                query_words = set(user_query.lower().split())
+                col_words = set(col.lower().replace('_', ' ').split())
+                overlap = query_words & col_words
+                score = len(overlap) / max(len(query_words | col_words), 1)
+
+            scored_columns.append((col, score))
+
+        # ══════ Strategy 2: Key Columns (always include temporal/ID cols) ══════
+        key_columns: set = set()
+        for col in all_columns:
+            col_lower = col.lower()
+            for pattern in self._KEY_COLUMN_PATTERNS:
+                if pattern in col_lower:
+                    key_columns.add(col)
+                    break
+
+        # ══════ Combine: scored columns above threshold + key columns ══════
+        relevant_columns: set = key_columns.copy()
+        # Sort by score descending
+        scored_columns.sort(key=lambda x: x[1], reverse=True)
+        for col, score in scored_columns:
+            if score >= similarity_threshold:
+                relevant_columns.add(col)
+
+        # ══════ Limit & Fallback ══════
+        relevant_list = list(relevant_columns)
+
+        if len(relevant_list) > max_columns:
+            # Keep key columns + top scoring non-key columns
+            non_key_scored = [(c, s) for c, s in scored_columns if c not in key_columns]
+            non_key_scored.sort(key=lambda x: x[1], reverse=True)
+            relevant_list = list(key_columns) + [c for c, _ in non_key_scored[:max_columns - len(key_columns)]]
+            logger.warning(f"Truncated to {len(relevant_list)} columns")
+
+        if len(relevant_list) < 5:
+            logger.warning(
+                f"Only {len(relevant_list)} relevant columns found - adding first 10 as fallback"
+            )
+            fallback = [c for c in all_columns if c not in relevant_columns]
+            relevant_list.extend(fallback[:10])
+
+        # Build filtered schema
+        schema_result = {
+            "relevant_columns": relevant_list,
+            "column_types": {col: str(df[col].dtype) for col in relevant_list},
+            "sample_values": {
+                col: df[col].dropna().head(3).tolist() for col in relevant_list
+            },
+            "schema_string": self._format_filtered_schema_string(df, relevant_list),
+            "compression_ratio": round(len(relevant_list) / total_columns, 3),
+            "total_columns": total_columns,
+            "filtered_columns": len(relevant_list),
+        }
+
+        logger.info(
+            f"Schema compression: {total_columns} → {len(relevant_list)} columns "
+            f"({schema_result['compression_ratio']:.1%} retained)"
+        )
+        return schema_result
+
+    def _format_filtered_schema_string(self, df: pd.DataFrame, columns: List[str]) -> str:
+        """Format filtered schema for LLM consumption."""
+        schema_lines = ["**Available Columns:**\n"]
+        for col in columns:
+            dtype = df[col].dtype
+            sample_vals = df[col].dropna().head(2).tolist()
+            if sample_vals:
+                sample_str = ", ".join(str(v) for v in sample_vals)
+                schema_lines.append(f"- `{col}` ({dtype}): Examples: [{sample_str}]")
+            else:
+                schema_lines.append(f"- `{col}` ({dtype})")
+        return "\n".join(schema_lines)
+
+    def _build_full_filtered_schema(self, df: pd.DataFrame) -> Dict[str, Any]:
+        """Return complete schema for small DataFrames."""
+        all_columns = list(df.columns)
+        return {
+            "relevant_columns": all_columns,
+            "column_types": {col: str(df[col].dtype) for col in all_columns},
+            "sample_values": {
+                col: df[col].dropna().head(3).tolist() for col in all_columns
+            },
+            "schema_string": self._format_filtered_schema_string(df, all_columns),
+            "compression_ratio": 1.0,
+            "total_columns": len(all_columns),
+            "filtered_columns": len(all_columns),
+        }
 
 
 # Singleton

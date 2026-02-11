@@ -10,8 +10,10 @@ Routes to: TRACK_DATA (SQL/Pandas), TRACK_DOC (RAG), TRACK_WEB (Web Search),
            TRACK_DOC_SUMMARY (Dataset Overview), TRACK_OUT_OF_DOMAIN (Unrelated)
 """
 import logging
+import re as _re
+import time
 from typing import Dict, Any, Optional, List
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 import hashlib
 import json
@@ -273,15 +275,56 @@ INTENT_KEYWORDS = {
 }
 
 
+# ============================================================================
+# REGEX FAST-PASS PATTERNS (L0 - resolves 70-80% of queries in <10ms)
+# ============================================================================
+_REGEX_FAST_PASS = {
+    TRACK_DATA: [
+        _re.compile(r'\b(calculate|compute|sum|total|average|mean|count|aggregate)\b.*\b(revenue|profit|cost|margin|expense|growth|ebitda|sales|income|debt|equity|wacc|fcf|roi|irr|npv)\b', _re.IGNORECASE),
+        _re.compile(r'\b(revenue|profit|cost|margin|expense|growth|ebitda|sales|income|debt|equity)\b.*\b(for|in|of|during)\b.*\b(fy|q[1-4]|\d{4}|year|quarter|month|period)\b', _re.IGNORECASE),
+        _re.compile(r'\b(compare|difference|change|variance|delta)\b.*\b(q[1-4]|fy\d{2,4}|\d{4})\b', _re.IGNORECASE),
+        _re.compile(r'\b(what|how much|how many|show|get|find|give)\b.*\b(total|revenue|profit|cost|margin|expense|growth|value|amount|number|count|percentage|ratio)\b', _re.IGNORECASE),
+        _re.compile(r'\b(yoy|qoq|year.over.year|quarter.over.quarter|ytd|mtd)\b.*\b(growth|change|increase|decrease|trend)\b', _re.IGNORECASE),
+        _re.compile(r'\b(highest|lowest|maximum|minimum|top|bottom|rank|sort)\b.*\b(revenue|profit|cost|margin|expense|sales|income|value)\b', _re.IGNORECASE),
+        _re.compile(r'\b(filter|where|when|which)\b.*\b(greater|less|more|above|below|between|equal)\b', _re.IGNORECASE),
+        _re.compile(r'\b(how many|count|number of)\b.*\b(sheets?|columns?|rows?|records?|entries|items)\b', _re.IGNORECASE),
+        _re.compile(r'\b(what|list|show)\b.*\b(columns?|fields?|sheet\s*names?|headers?)\b', _re.IGNORECASE),
+        _re.compile(r'\b(is there|does it|find|search|look for|any mention)\b.*\b(company|name|entity|mention|reference)\b', _re.IGNORECASE),
+    ],
+    TRACK_DOC_SUMMARY: [
+        _re.compile(r'^(give|show|provide|tell)\s+(me\s+)?(a\s+|the\s+)?(summary|overview|description)\b', _re.IGNORECASE),
+        _re.compile(r'^(summarize|describe|explain)\s+(this|the|our|my)?\s*(data|file|dataset|spreadsheet|excel|report)\b', _re.IGNORECASE),
+        _re.compile(r'^what\s+(is|does)\s+(this|the)\s+(data|file|dataset|spreadsheet)\s+(about|contain)\b', _re.IGNORECASE),
+        _re.compile(r'^tell\s+me\s+about\s+(this|the|our|my)\s+(data|file|dataset|spreadsheet|report)\b', _re.IGNORECASE),
+    ],
+    TRACK_DOC: [
+        _re.compile(r'\b(clause|section|article|paragraph|provision|subsection)\s+\d+', _re.IGNORECASE),
+        _re.compile(r'\b(contract|agreement|policy|regulation|compliance|terms|conditions|audit|legal|governance)\b.*\b(says?|states?|requires?|specifies?|defines?)\b', _re.IGNORECASE),
+        _re.compile(r'\b(accounting|disclosure|regulatory|risk|governance)\s+(policy|policies|standard|requirement|guideline)\b', _re.IGNORECASE),
+    ],
+    TRACK_WEB: [
+        _re.compile(r'\b(current|today|live|real.time|latest|breaking|this week)\s*(repo rate|gst|tax rate|market|stock|price|news|inflation|gdp|forex|gold|oil|currency|cryptocurrency)\b', _re.IGNORECASE),
+        _re.compile(r"\btoday'?s\s+(market|stock|gold|oil|forex|commodity|news|price)\b", _re.IGNORECASE),
+        _re.compile(r'\b(rbi|sebi|budget)\s+(circular|regulation|announcement|update|notification)\s*\d{4}\b', _re.IGNORECASE),
+    ],
+    TRACK_OUT_OF_DOMAIN: [
+        _re.compile(r'^(tell me a joke|write (a )?poem|recipe for|how to (play|cook|make)|write (a )?story)\b', _re.IGNORECASE),
+    ],
+}
+
+# Confidence thresholds for each routing tier
+_REGEX_CONFIDENCE = 0.95
+_VECTOR_CONFIDENCE_THRESHOLD = 0.75
+
+
 class RouterAgent:
     """
     Intelligent query router with multi-tier classification.
     
-    Routing Strategy:
-    1. Cache lookup (O(1)) - for repeated queries
-    2. Keyword-based fast path - for obvious intents
-    3. Semantic similarity (spaCy) - for nuanced classification
-    4. LLM fallback - for truly ambiguous cases with structured output
+    Routing Strategy (L0/L1/L2 Tiers):
+    L0: Regex fast-pass (<10ms) - resolves 70-80% of queries
+    L1: Semantic similarity (spaCy) - vectorized intent matching
+    L2: LLM fallback - for truly ambiguous cases
     
     All tracks are scored uniformly and the highest score wins.
     """
@@ -292,6 +335,18 @@ class RouterAgent:
         self._cache_max_size = 1000
         self._has_loaded_data = False
         self._loaded_datasets_info = ""
+        
+        # ═══ ROUTING PERFORMANCE STATS (PRD: Enhancement 1) ═══
+        self._routing_stats = {
+            "total_queries": 0,
+            "l0_regex_hits": 0,
+            "l1_semantic_hits": 0,
+            "l2_llm_hits": 0,
+            "cache_hits": 0,
+            "latency_ms_sum": 0.0,
+            "latency_ms_max": 0.0,
+            "track_distribution": {t: 0 for t in [TRACK_DATA, TRACK_DOC, TRACK_WEB, TRACK_DOC_SUMMARY, TRACK_OUT_OF_DOMAIN]},
+        }
         
         # Semantic similarity vectors (pre-computed for performance)
         self._data_docs = []
@@ -413,14 +468,86 @@ class RouterAgent:
             "content_search": max((query_doc.similarity(doc) for doc in self._content_search_docs), default=0.0) if self._content_search_docs else 0.0
         }
 
+    def _regex_fast_pass(self, query: str, data_loaded: bool) -> Optional[Dict[str, Any]]:
+        """
+        L0 Regex Fast-Pass Router.
+        Resolves obvious queries in <10ms using compiled regex patterns.
+        Returns routing result dict or None if no pattern matched.
+        """
+        for track, patterns in _REGEX_FAST_PASS.items():
+            # Skip data-requiring tracks when no data is loaded
+            config = TRACK_CONFIGS.get(track)
+            if config and config.requires_data and not data_loaded:
+                continue
+            
+            for pattern in patterns:
+                if pattern.search(query):
+                    logger.debug(f"L0 regex match: '{query[:50]}...' → {track}")
+                    return {
+                        "track": track,
+                        "confidence": _REGEX_CONFIDENCE,
+                        "method": "regex_fastpass",
+                        "latency_ms": 0,  # Filled by caller
+                        "similarities": {},
+                        "is_analytical": track == TRACK_DATA,
+                        "is_summary": track == TRACK_DOC_SUMMARY,
+                        "is_real_time": track == TRACK_WEB,
+                        "is_content_search": False,
+                    }
+        return None
+
+    def get_routing_stats(self) -> Dict[str, Any]:
+        """Return routing performance statistics for monitoring."""
+        total = self._routing_stats["total_queries"]
+        if total == 0:
+            return self._routing_stats.copy()
+        
+        return {
+            **self._routing_stats,
+            "l0_hit_rate": round(self._routing_stats["l0_regex_hits"] / total, 3),
+            "l1_hit_rate": round(self._routing_stats["l1_semantic_hits"] / total, 3),
+            "l2_hit_rate": round(self._routing_stats["l2_llm_hits"] / total, 3),
+            "cache_hit_rate": round(self._routing_stats["cache_hits"] / total, 3),
+            "avg_latency_ms": round(self._routing_stats["latency_ms_sum"] / total, 2),
+        }
+
     def route(self, query: str, client_context: Optional[str] = None, has_loaded_data: bool = None) -> Dict[str, Any]:
+        _t0 = time.perf_counter()
+        self._routing_stats["total_queries"] += 1
+        
         data_loaded = has_loaded_data if has_loaded_data is not None else self._has_loaded_data
         query_lower = query.lower().strip()
         
         cache_key = self._get_cache_key(query, data_loaded)
         if cache_key in self._route_cache:
-            return self._route_cache[cache_key].copy()
+            self._routing_stats["cache_hits"] += 1
+            cached = self._route_cache[cache_key].copy()
+            cached["latency_ms"] = round((time.perf_counter() - _t0) * 1000, 2)
+            return cached
         
+        # ═══════════════════════════════════════════════════════
+        # L0: REGEX FAST-PASS (<10ms target)
+        # ═══════════════════════════════════════════════════════
+        regex_result = self._regex_fast_pass(query, data_loaded)
+        if regex_result:
+            latency_ms = round((time.perf_counter() - _t0) * 1000, 2)
+            regex_result["latency_ms"] = latency_ms
+            self._routing_stats["l0_regex_hits"] += 1
+            self._routing_stats["latency_ms_sum"] += latency_ms
+            self._routing_stats["latency_ms_max"] = max(self._routing_stats["latency_ms_max"], latency_ms)
+            self._routing_stats["track_distribution"][regex_result["track"]] += 1
+            # Cache it
+            if len(self._route_cache) >= self._cache_max_size:
+                keys_to_remove = list(self._route_cache.keys())[:100]
+                for k in keys_to_remove:
+                    del self._route_cache[k]
+            self._route_cache[cache_key] = regex_result
+            logger.info(f"L0 regex fast-pass: '{query[:50]}...' → {regex_result['track']} ({latency_ms}ms)")
+            return regex_result
+        
+        # ═══════════════════════════════════════════════════════
+        # L1: SEMANTIC SIMILARITY (spaCy vectorized matching)
+        # ═══════════════════════════════════════════════════════
         similarities = self._compute_semantic_similarity(query)
         is_real_time = self._is_real_time_query(query)
         
@@ -616,10 +743,16 @@ class RouterAgent:
                 # Use the new intelligent LLM intent classifier
                 llm_result = self._route_with_llm(query, context, has_data=data_loaded)
                 if llm_result.get("confidence", 0) > confidence:
+                    self._routing_stats["l2_llm_hits"] += 1
+                    latency_ms = round((time.perf_counter() - _t0) * 1000, 2)
+                    llm_result["latency_ms"] = latency_ms
                     llm_result["is_analytical"] = is_analytical
                     llm_result["is_summary"] = is_summary_eligible
                     llm_result["is_real_time"] = is_real_time
                     llm_result["is_content_search"] = is_content_search
+                    self._routing_stats["latency_ms_sum"] += latency_ms
+                    self._routing_stats["latency_ms_max"] = max(self._routing_stats["latency_ms_max"], latency_ms)
+                    self._routing_stats["track_distribution"][llm_result["track"]] += 1
                     if len(self._route_cache) >= self._cache_max_size:
                         keys_to_remove = list(self._route_cache.keys())[:100]
                         for k in keys_to_remove:
@@ -631,16 +764,25 @@ class RouterAgent:
                 track = TRACK_WEB if is_real_time else (TRACK_DATA if data_loaded else TRACK_DOC)
                 method = "semantic_fallback"
         
+        # Record L1 semantic hit
+        self._routing_stats["l1_semantic_hits"] += 1
+        
+        latency_ms = round((time.perf_counter() - _t0) * 1000, 2)
         result = {
             "track": track,
             "confidence": round(confidence, 2),
             "method": method,
+            "latency_ms": latency_ms,
             "similarities": {k: round(v, 3) for k, v in similarities.items()},
             "is_analytical": is_analytical,
             "is_summary": is_summary_eligible,
             "is_real_time": is_real_time,
             "is_content_search": is_content_search
         }
+        
+        self._routing_stats["latency_ms_sum"] += latency_ms
+        self._routing_stats["latency_ms_max"] = max(self._routing_stats["latency_ms_max"], latency_ms)
+        self._routing_stats["track_distribution"][track] += 1
         
         if len(self._route_cache) >= self._cache_max_size:
             keys_to_remove = list(self._route_cache.keys())[:100]

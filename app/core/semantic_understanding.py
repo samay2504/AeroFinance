@@ -278,6 +278,12 @@ class SemanticMatcher:
     def _load_spacy(cls):
         """Load spaCy model for semantic vectors and NER."""
         try:
+            # DLL fix must run before spaCy loads native extensions
+            from app.core.dll_fix import apply_dll_fix
+            apply_dll_fix()
+        except ImportError:
+            pass
+        try:
             import spacy
             try:
                 cls._nlp = spacy.load("en_core_web_md")
@@ -627,6 +633,24 @@ class SemanticMatcher:
         # 2. Substring match (use normalized versions)
         if query_normalized in target_normalized or target_normalized in query_normalized:
             return 0.95
+        
+        # 2b. Fuzzy/edit-distance matching (catches typos like "revnue" → "revenue")
+        from difflib import SequenceMatcher
+        # Whole-string fuzzy similarity
+        fuzzy_score = SequenceMatcher(None, query_normalized, target_normalized).ratio()
+        if fuzzy_score >= 0.85:
+            return fuzzy_score
+        # Per-word fuzzy: check if any query word fuzzy-matches any target word
+        query_words_raw = query_normalized.split()
+        target_words_raw = target_normalized.split()
+        for qw in query_words_raw:
+            for tw in target_words_raw:
+                if len(qw) >= 4 and len(tw) >= 4:  # Only for non-trivial words
+                    word_sim = SequenceMatcher(None, qw, tw).ratio()
+                    if word_sim >= 0.80:
+                        fuzzy_score = max(fuzzy_score, 0.75 * word_sim)
+        if fuzzy_score >= 0.55:
+            return fuzzy_score
         
         # 3. FINANCIAL ACRONYM EXPANSION
         # If either side is a known acronym, expand it for better matching

@@ -1,6 +1,7 @@
 """
 SQL Templates - Deterministic SQL templates for common CA calculations.
 Template-first approach to reduce LLM calls and ensure consistency.
+Includes security validation for all generated SQL.
 """
 import logging
 import re
@@ -344,6 +345,7 @@ class SQLTemplateEngine:
     ) -> Optional[Tuple[str, str]]:
         """
         Attempt deterministic SQL generation without LLM.
+        All generated SQL is validated for safety before returning.
         
         Returns:
             Tuple of (sql, method_description) or None
@@ -353,9 +355,37 @@ class SQLTemplateEngine:
         result = self.match_template(query, columns, table_name)
         if result:
             sql, params = result
+            # Security: validate generated SQL before returning
+            is_safe, error = self.validate_template_sql(sql)
+            if not is_safe:
+                logger.warning(f"Template SQL failed security check: {error}")
+                return None
             return sql, f"template:{params.get('template', 'unknown')}"
         
         return None
+
+    @staticmethod
+    def validate_template_sql(sql: str) -> Tuple[bool, Optional[str]]:
+        """
+        Validate template-generated SQL using the engine's security patterns.
+        
+        Returns:
+            Tuple of (is_valid, error_message)
+        """
+        try:
+            from app.sql_engine import sanitize_sql
+            is_safe, _, error = sanitize_sql(sql)
+            if not is_safe:
+                return False, error
+            return True, None
+        except ImportError:
+            # Fallback: basic keyword check if sql_engine not available
+            sql_upper = sql.upper()
+            dangerous = ["DROP", "DELETE", "INSERT", "UPDATE", "ALTER", "CREATE", "TRUNCATE"]
+            for kw in dangerous:
+                if kw in sql_upper:
+                    return False, f"Dangerous keyword: {kw}"
+            return True, None
 
 
 # Singleton instance

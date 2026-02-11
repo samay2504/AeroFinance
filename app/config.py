@@ -205,6 +205,14 @@ class StorageSettings(BaseSettings):
         default=500, description="Max DataFrame size before chunking"
     )
 
+    # Bloom Filter Settings
+    bloom_capacity: int = Field(
+        default=10000, description="Estimated number of datasets"
+    )
+    bloom_fp_rate: float = Field(
+        default=0.01, description="Target false positive rate (0.01 = 1%)"
+    )
+
     model_config = {
         "env_prefix": "STORAGE_",
         "extra": "ignore",
@@ -212,11 +220,49 @@ class StorageSettings(BaseSettings):
 
 
 class DuckDBSettings(BaseSettings):
-    """DuckDB SQL engine configuration."""
+    """DuckDB SQL engine configuration with S3 integration and performance tuning."""
 
     memory_limit: str = Field(default="2GB")
     threads: int = Field(default=4)
     enable_progress_bar: bool = Field(default=False)
+
+    # S3 / Cloud Integration
+    enable_s3: bool = Field(
+        default=False,
+        description="Load httpfs extension for direct S3 Parquet queries"
+    )
+    s3_region: Optional[str] = Field(
+        default=None,
+        description="Override AWS region for DuckDB S3 access (defaults to DEPLOYMENT region)"
+    )
+    s3_access_key: Optional[str] = Field(
+        default=None, description="Explicit S3 access key (optional)"
+    )
+    s3_secret_key: Optional[str] = Field(
+        default=None, description="Explicit S3 secret key (optional)"
+    )
+    s3_endpoint: Optional[str] = Field(
+        default=None,
+        description="Custom S3-compatible endpoint (e.g. MinIO, LocalStack)"
+    )
+
+    # Performance Tuning
+    enable_object_cache: bool = Field(
+        default=True,
+        description="Cache Parquet metadata in memory for faster repeated scans"
+    )
+    object_cache_size: str = Field(
+        default="256MB",
+        description="Parquet metadata cache size"
+    )
+    preserve_insertion_order: bool = Field(
+        default=False,
+        description="Disable for ~15% scan speedup on wide tables"
+    )
+    enable_parallel_csv: bool = Field(
+        default=True,
+        description="Parallel CSV reader for faster ingestion"
+    )
 
     model_config = {
         "env_prefix": "DUCKDB_",
@@ -245,6 +291,191 @@ class ZMQSettings(BaseSettings):
 
     model_config = {
         "env_prefix": "ZMQ_",
+        "extra": "ignore",
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════
+# FEATURE FLAG SETTINGS — PRD Enhancement Toggles
+# ═══════════════════════════════════════════════════════════════════
+
+class RouterSettings(BaseSettings):
+    """Enhancement 1: Semantic Router feature flags."""
+
+    enable_fast_pass: bool = Field(
+        default=True,
+        description="L0 regex fast-pass routing (0.01s latency)"
+    )
+    enable_semantic_routing: bool = Field(
+        default=True,
+        description="L1 spaCy vector similarity routing (0.05s)"
+    )
+    enable_llm_fallback: bool = Field(
+        default=True,
+        description="L2 LLM classification fallback (1.5s)"
+    )
+    regex_confidence: float = Field(
+        default=0.95,
+        description="Minimum confidence for L0 regex to accept"
+    )
+    semantic_confidence: float = Field(
+        default=0.70,
+        description="Minimum confidence for L1 semantic to accept"
+    )
+    cache_enabled: bool = Field(
+        default=True,
+        description="Cache repeated routing decisions"
+    )
+    cache_max_size: int = Field(
+        default=1000,
+        description="Max cached routing decisions"
+    )
+
+    model_config = {
+        "env_prefix": "ROUTER_",
+        "extra": "ignore",
+    }
+
+
+class HealingSettings(BaseSettings):
+    """Enhancement 2: Self-Healing Execution feature flags."""
+
+    enabled: bool = Field(
+        default=True,
+        description="Master switch for self-healing execution loop"
+    )
+    max_retries: int = Field(
+        default=2,
+        description="Max retry attempts before failing"
+    )
+    enable_error_hints: bool = Field(
+        default=True,
+        description="Include type-specific debugging hints in healing prompts"
+    )
+    enable_fuzzy_column_fix: bool = Field(
+        default=True,
+        description="Auto-correct typos in column names via fuzzy matching"
+    )
+    log_healing_prompts: bool = Field(
+        default=False,
+        description="Log full healing prompts (verbose, for debugging)"
+    )
+    backoff_base_ms: int = Field(
+        default=100,
+        description="Exponential backoff base delay in ms"
+    )
+
+    model_config = {
+        "env_prefix": "HEALING_",
+        "extra": "ignore",
+    }
+
+
+class SchemaSettings(BaseSettings):
+    """Enhancement 3: Intelligent Schema Filtering feature flags."""
+
+    enable_filtering: bool = Field(
+        default=True,
+        description="Master switch for intelligent column filtering"
+    )
+    max_columns: int = Field(
+        default=20,
+        description="Max columns to send to LLM context"
+    )
+    fuzzy_match_cutoff: float = Field(
+        default=0.70,
+        description="Fuzzy matching threshold (0.0-1.0)"
+    )
+    enable_semantic_expansion: bool = Field(
+        default=True,
+        description="Expand related columns (e.g. revenue→cost, margin)"
+    )
+    enable_key_column_detection: bool = Field(
+        default=True,
+        description="Always include date/ID/name columns"
+    )
+    min_fallback_columns: int = Field(
+        default=5,
+        description="Minimum columns when nothing matches query"
+    )
+
+    model_config = {
+        "env_prefix": "SCHEMA_",
+        "extra": "ignore",
+    }
+
+
+class HotCacheSettings(BaseSettings):
+    """
+    Enhancement 5: Hot Cache (L1/L2/L3) configuration.
+    
+    Tiers:
+    - L1: Local RAM (fastest, per-worker)
+    - L2: Redis (shared, persistent) 
+    - L3: Semantic (embedding-based)
+    """
+
+    enabled: bool = Field(
+        default=True,
+        description="Master switch for caching"
+    )
+    max_entries: int = Field(
+        default=1000,
+        description="L1 Cache max entries"
+    )
+    ttl_seconds: int = Field(
+        default=1800,
+        description="Default TTL in seconds"
+    )
+    semantic: bool = Field(
+        default=True,
+        description="Enable semantic similarity matching"
+    )
+    similarity: float = Field(
+        default=0.92,
+        description="Cosine similarity threshold (0.0-1.0)"
+    )
+    embedding_provider: str = Field(
+        default="auto",
+        description="Provider for semantic embeddings"
+    )
+    
+    # Advanced L1 settings
+    hot_key_threshold: int = Field(
+        default=10, description="Hits required to promote to L1"
+    )
+    l1_ttl: int = Field(
+        default=60, description="TTL for L1 (local) entries in seconds"
+    )
+    
+    model_config = {
+        "env_prefix": "HOT_CACHE_",
+        "extra": "ignore",
+    }
+
+
+class CompressionSettings(BaseSettings):
+    """Enhancement 6: DataFrame Token Compression feature flags."""
+
+    enabled: bool = Field(
+        default=True,
+        description="Master switch for DataFrame token compression"
+    )
+    max_sample_rows: int = Field(
+        default=5,
+        description="Sample rows in compressed LLM output"
+    )
+    include_statistics: bool = Field(
+        default=True,
+        description="Include column statistics in compressed output"
+    )
+    include_patterns: bool = Field(
+        default=True,
+        description="Include detected data patterns"
+    )
+
+    model_config = {
+        "env_prefix": "COMPRESSION_",
         "extra": "ignore",
     }
 
@@ -290,6 +521,19 @@ class Settings(BaseSettings):
     sandbox: SandboxSettings = Field(default_factory=SandboxSettings)
     zmq: ZMQSettings = Field(default_factory=ZMQSettings)
 
+    # Feature flags (PRD Enhancement toggles)
+    router: RouterSettings = Field(default_factory=RouterSettings)
+    healing: HealingSettings = Field(default_factory=HealingSettings)
+    schema_filter: SchemaSettings = Field(default_factory=SchemaSettings)
+    hot_cache: HotCacheSettings = Field(default_factory=HotCacheSettings)
+    compression: CompressionSettings = Field(default_factory=CompressionSettings)
+    
+    # Concurrency / Performance
+    single_flight_timeout: float = Field(
+        default=120.0, 
+        description="SingleFlight timeout seconds"
+    )
+
     model_config = {
         "env_prefix": "FASTAPI_",
         "env_nested_delimiter": "__",
@@ -322,7 +566,7 @@ def load_yaml_config(path: Optional[Path] = None) -> Dict[str, Any]:
         path = PROJECT_ROOT / "app" / "config.yaml"
     if path.exists():
         try:
-            with open(path) as f:
+            with open(path, encoding='utf-8') as f:
                 return yaml.safe_load(f) or {}
         except Exception as e:
             logger.warning(f"Failed to load config.yaml: {e}")
@@ -347,14 +591,24 @@ except Exception as e:
         duckdb=DuckDBSettings.model_construct(),
         sandbox=SandboxSettings.model_construct(),
         zmq=ZMQSettings.model_construct(),
+        router=RouterSettings.model_construct(),
+        healing=HealingSettings.model_construct(),
+        schema_filter=SchemaSettings.model_construct(),
+        hot_cache=HotCacheSettings.model_construct(),
+        compression=CompressionSettings.model_construct(),
     )
 
 # Apply YAML overlay if present
 yaml_config = load_yaml_config()
 if yaml_config:
     for key, value in yaml_config.items():
-        if hasattr(settings, key) and isinstance(value, dict):
-            sub_settings = getattr(settings, key)
-            for sub_key, sub_value in value.items():
-                if hasattr(sub_settings, sub_key) and sub_value is not None:
-                    setattr(sub_settings, sub_key, sub_value)
+        if hasattr(settings, key):
+            # Handle nested settings (dicts)
+            if isinstance(value, dict) and hasattr(getattr(settings, key), "model_dump"):
+                sub_settings = getattr(settings, key)
+                for sub_key, sub_value in value.items():
+                    if hasattr(sub_settings, sub_key) and sub_value is not None:
+                        setattr(sub_settings, sub_key, sub_value)
+            # Handle scalar values (e.g. debug, port, single_flight_timeout)
+            elif value is not None:
+                setattr(settings, key, value)
