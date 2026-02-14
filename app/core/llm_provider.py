@@ -661,6 +661,10 @@ class LLMProvider:
         full_response = []
         token_seq = 0
         
+        # 10-word buffering for "teleprompter" style streaming
+        word_buffer = []
+        buffer_text = ""
+        
         try:
             # Try native streaming if supported
             if hasattr(self.llm, 'stream'):
@@ -683,13 +687,35 @@ class LLMProvider:
                         
                         if token:
                             full_response.append(token)
-                            token_seq += 1
                             
-                            if callbacks.on_token:
-                                try:
-                                    callbacks.on_token(token, token_seq)
-                                except Exception as e:
-                                    logger.debug(f"on_token callback error: {e}")
+                            # Accumulate in buffer for 10-word chunking
+                            buffer_text += token
+                            words = buffer_text.split(' ')
+                            
+                            # Yield when we have 10+ words
+                            while len(words) >= 10:
+                                # Join first 10 words
+                                yield_chunk = ' '.join(words[:10]) + ' '
+                                token_seq += 1
+                                
+                                if callbacks.on_token:
+                                    try:
+                                        callbacks.on_token(yield_chunk, token_seq)
+                                    except Exception as e:
+                                        logger.debug(f"on_token callback error: {e}")
+                                
+                                # Reset buffer to remaining words
+                                words = words[10:]
+                                buffer_text = ' '.join(words)
+                    
+                    # Yield any remaining buffered words
+                    if buffer_text.strip():
+                        token_seq += 1
+                        if callbacks.on_token:
+                            try:
+                                callbacks.on_token(buffer_text, token_seq)
+                            except Exception as e:
+                                logger.debug(f"on_token callback error: {e}")
                     
                     metadata.total_tokens = token_seq
                     

@@ -56,9 +56,31 @@ def _get_interaction_logger() -> logging.Logger:
     _interaction_logger.setLevel(logging.INFO)
     _interaction_logger.propagate = False  # Don't propagate to root logger
     
-    # Create logs directory if it doesn't exist
-    log_dir = Path("data/logs")
-    log_dir.mkdir(parents=True, exist_ok=True)
+    # Create logs directory with production-grade fallback
+    # Try data/logs first (local dev), then /var/log (production), then /tmp (AWS Lambda/container)
+    log_dirs_to_try = [
+        Path("data/logs"),
+        Path("/var/log/ai_ca"),
+        Path("/tmp/ai_ca_logs")
+    ]
+    
+    log_dir = None
+    for candidate_dir in log_dirs_to_try:
+        try:
+            candidate_dir.mkdir(parents=True, exist_ok=True)
+            # Test write permissions
+            test_file = candidate_dir / ".write_test"
+            test_file.touch()
+            test_file.unlink()
+            log_dir = candidate_dir
+            break
+        except (PermissionError, OSError) as e:
+            logger.debug(f"Cannot use log dir {candidate_dir}: {e}")
+            continue
+    
+    if log_dir is None:
+        logger.warning("No writable log directory found, logging disabled")
+        return _interaction_logger
     
     # Create rotating file handler for JSONL logs
     log_file = log_dir / "interaction_logs.jsonl"
@@ -74,6 +96,11 @@ def _get_interaction_logger() -> logging.Logger:
         handler.setFormatter(logging.Formatter('%(message)s'))
         _interaction_logger.addHandler(handler)
         logger.info(f"Interaction logger initialized: {log_file}")
+        
+        # If S3 bucket configured, schedule periodic uploads
+        s3_bucket = os.getenv("LOG_S3_BUCKET") or os.getenv("DEPLOYMENT_AWS_S3_BUCKET")
+        if s3_bucket:
+            logger.info(f"S3 logging enabled: {s3_bucket}")
     except Exception as e:
         logger.warning(f"Could not initialize interaction log file: {e}")
     

@@ -94,25 +94,66 @@ async def stream_query_events(request) -> AsyncGenerator[str, None]:
             yield f"event: progress\ndata: {json.dumps({'step': 'llm_generation'})}\n\n"
 
             try:
-                # Use native LangChain streaming for token-by-token delivery
-                token_queue = []
+                # Use new StreamCallbacks with 10-word buffering
+                from app.core.llm_provider import StreamCallbacks, StreamMetadata
                 
-                def on_token(token: str, seq: int):
-                    token_queue.append(token)
-                
-                response = llm.stream_chat(
-                    f"Answer this query: {request.query}",
-                    on_token=on_token,
+                metadata = StreamMetadata(
+                    request_id=query_id,
+                    client_id=safe_client,
+                    stream_channel="sse"
                 )
                 
-                # Yield tokens that were collected during streaming
-                for token in token_queue:
-                    yield f"event: token\ndata: {json.dumps({'token': token})}\n\n"
-                    await asyncio.sleep(0.005)
+                # Async token buffer for SSE delivery
+                token_buffer = []
                 
-                result_text = response
-                method = "llm_direct"
+                async def yield_token_async(token: str, seq: int):
+                    """Async callback to yield tokens via SSE."""
+                    token_buffer.append(token)
+                
+                callbacks = StreamCallbacks(
+                    on_token=lambda t, s: token_buffer.append(t),
+                    on_start=lambda m: logger.debug(f"Stream started: {m.provider}"),
+                    on_end=lambda m: logger.info(f"Stream completed: {m.total_tokens} tokens"),
+                    on_error=lambda e: logger.error(f"Stream error: {e}")
+                )
+                
+                # Get LLM provider for proper streaming
+                from app.core.llm_provider import create_llm_provider
+                from app.config import settings
+                
+                llm_config = {
+                    "provider_preference": settings.llm.provider_preference,
+                    "temperature": settings.llm.temperature,
+                }
+                provider = create_llm_provider(llm_config)
+                
+                # Stream with 10-word buffering (background task)
+                async def stream_to_buffer():
+                    await asyncio.to_thread(
+                        provider.stream_invoke,
+                        f"Answer this query: {request.query}",
+                        callbacks,
+                        metadata
+                    )
+                
+                # Start streaming in background
+                stream_task = asyncio.create_task(stream_to_buffer())
+                
+                # Yield buffered tokens as they arrive (10-word chunks)
+                while not stream_task.done() or token_buffer:
+                    if token_buffer:
+                        chunk = token_buffer.pop(0)
+                        yield f"event: token\ndata: {json.dumps({'token': chunk})}\n\n"
+                    else:
+                        await asyncio.sleep(0.01)  # Small delay to avoid CPU spin
+                
+                # Wait for completion
+                await stream_task
+                
+                result_text = ''.join(token_buffer)  # Should be empty, but collect any stragglers
+                method = "llm_stream_buffered"
             except Exception as e:
+                logger.error(f"Streaming LLM error: {e}", exc_info=True)
                 result_text = f"Error: {str(e)}"
                 method = "error"
 
