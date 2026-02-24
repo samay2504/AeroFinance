@@ -480,6 +480,86 @@ class CompressionSettings(BaseSettings):
     }
 
 
+class PDFSettings(BaseSettings):
+    """PDF Ingestion & Vision Pipeline configuration."""
+
+    enable_vision: bool = Field(
+        default=True, description="Enable vision cascade for scanned/image PDFs"
+    )
+    vision_threshold: float = Field(
+        default=0.05, description="Text density below this triggers vision extraction"
+    )
+    max_chunk_tokens: int = Field(
+        default=1024, description="Max tokens per semantic chunk"
+    )
+    parallel_workers: int = Field(
+        default=4, description="ProcessPoolExecutor worker count for page extraction"
+    )
+    cache_dir: str = Field(
+        default="./data/pdf_cache", description="Disk cache for fingerprints, chunks, vision cache"
+    )
+
+    # dots.ocr (self-hosted 1.7B VLM) — L2 of vision cascade
+    dots_ocr_enabled: bool = Field(
+        default=False, description="Enable dots.ocr as L2 vision fallback"
+    )
+    dots_ocr_endpoint: Optional[str] = Field(
+        default=None,
+        description="dots.ocr inference endpoint (scheme://host:port). "
+                    "Required when dots_ocr_enabled=true. Set via PDF_DOTS_OCR_ENDPOINT.",
+    )
+    dots_ocr_timeout: int = Field(
+        default=30, description="dots.ocr HTTP request timeout in seconds"
+    )
+    dots_ocr_min_confidence: float = Field(
+        default=0.6, description="Minimum confidence to accept dots.ocr results"
+    )
+
+    # Google Vision + Gemini (L1 of vision cascade)
+    vision_model: str = Field(
+        default="gemini-2.0-flash",
+        description="Gemini model for vision OCR reasoning. "
+                    "Free tier: gemini-2.0-flash (15 RPM, 1M ctx). "
+                    "Set via PDF_VISION_MODEL.",
+    )
+    vision_embedding_model: str = Field(
+        default="models/text-embedding-004",
+        description="Google embedding model for vision provider. "
+                    "Set via PDF_VISION_EMBEDDING_MODEL.",
+    )
+    google_credentials_path: Optional[str] = Field(
+        default=None,
+        description="Path to Google Cloud service-account JSON. "
+                    "Only needed for Cloud Vision OCR (L1). "
+                    "Falls back to GOOGLE_APPLICATION_CREDENTIALS env var or ADC. "
+                    "Set via PDF_GOOGLE_CREDENTIALS_PATH.",
+    )
+
+    # Lazy embedding
+    embedding_batch_size: int = Field(
+        default=16, description="Batch size for lazy embed on retrieval"
+    )
+
+    # Retrieval
+    bm25_prefilter_k: int = Field(
+        default=500, description="BM25 pre-filter candidate count"
+    )
+    vector_cap: int = Field(
+        default=50, description="Max candidates passed to vector similarity stage"
+    )
+    enable_rerank: bool = Field(
+        default=True, description="Enable L4 reranking in retrieval funnel"
+    )
+    rerank_model: str = Field(
+        default="auto", description="Rerank strategy: auto, jina, cohere, cross_encoder, none"
+    )
+
+    model_config = {
+        "env_prefix": "PDF_",
+        "extra": "ignore",
+    }
+
+
 class LoggingSettings(BaseSettings):
     """Logging configuration."""
 
@@ -527,6 +607,7 @@ class Settings(BaseSettings):
     schema_filter: SchemaSettings = Field(default_factory=SchemaSettings)
     hot_cache: HotCacheSettings = Field(default_factory=HotCacheSettings)
     compression: CompressionSettings = Field(default_factory=CompressionSettings)
+    pdf: PDFSettings = Field(default_factory=PDFSettings)
     
     # Concurrency / Performance
     single_flight_timeout: float = Field(
@@ -596,6 +677,7 @@ except Exception as e:
         schema_filter=SchemaSettings.model_construct(),
         hot_cache=HotCacheSettings.model_construct(),
         compression=CompressionSettings.model_construct(),
+        pdf=PDFSettings.model_construct(),
     )
 
 # Apply YAML overlay if present

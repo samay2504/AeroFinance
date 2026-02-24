@@ -622,6 +622,16 @@ templates:
     
     For general conversation or non-finance topics, please use a general-purpose assistant.
 
+  # ============================================================================
+  # PDF VISION EXTRACTION - Multimodal page OCR prompt
+  # ============================================================================
+  pdf_vision_extract: |
+    Extract all visible text from this financial document page.
+    If there are tables, convert them to markdown format.
+    If there are charts, describe the trend or key insight.
+
+    Return JSON: {{"text": "...", "tables": ["..."], "charts": ["..."]}}
+
 # Validation rules for prompt outputs
 validation:
   sql_response:

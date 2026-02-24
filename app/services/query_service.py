@@ -4,6 +4,7 @@ import logging
 from fastapi import HTTPException
 from app.types.schemas import QueryRequest, QueryResponse
 from app.core.prompts import format_natural_response as _format_natural_response
+from app.ingest.excel_ingest import compress_dataframe_for_llm
 
 logger = logging.getLogger("ai-ca")
 
@@ -270,8 +271,7 @@ async def handle_query(request: QueryRequest) -> QueryResponse:
                         table_name = ds.get("dataset_id", "").split(":")[-1]
                         dataset_ids_used.append(ds.get("dataset_id"))
                         context_parts = [f"\n--- TABLE: {table_name} ---"]
-                        context_parts.append(f"Columns: {list(df.columns)}")
-                        context_parts.append(f"Data:\n{df.to_string()}")
+                        context_parts.append(compress_dataframe_for_llm(df))
                         all_data_context.append("\n".join(context_parts))
 
                 if all_data_context:

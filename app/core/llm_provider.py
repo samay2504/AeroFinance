@@ -789,11 +789,135 @@ def create_llm_provider(config: Dict[str, Any]) -> LLMProvider:
     return LLMProvider(config)
 
 
+# ═════════════════════════════════════════════════════════════════
+# GOOGLE CLOUD VISION + GEMINI PROVIDER
+# (Free tier: 1,000 Vision units/month + $300 trial credits)
+# ═════════════════════════════════════════════════════════════════
+
+class GoogleVisionProvider:
+    """
+    Google Cloud Vision + Gemini provider for the PDF pipeline.
+
+    Methods:
+      embed()       — single text embedding via text-embedding-004
+      embed_batch() — batch embedding (loops embed for now)
+      vision_chat() — document OCR via Cloud Vision + Gemini reasoning
+      generate()    — text generation via Gemini
+    """
+
+    def __init__(
+        self,
+        credentials_path: Optional[str] = None,
+        embedding_model: Optional[str] = None,
+        vision_model: Optional[str] = None,
+    ):
+        # Pull defaults from PDFSettings (env-driven via PDF_* prefix)
+        try:
+            from app.config import settings
+            _pdf_cfg = settings.pdf
+        except Exception:
+            _pdf_cfg = None
+
+        resolved_credentials = (
+            credentials_path
+            or (getattr(_pdf_cfg, "google_credentials_path", None) if _pdf_cfg else None)
+        )
+        resolved_vision_model = (
+            vision_model
+            or (getattr(_pdf_cfg, "vision_model", None) if _pdf_cfg else None)
+            or "gemini-2.0-flash"
+        )
+        resolved_embedding_model = (
+            embedding_model
+            or (getattr(_pdf_cfg, "vision_embedding_model", None) if _pdf_cfg else None)
+            or "models/text-embedding-004"
+        )
+
+        if resolved_credentials:
+            os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = resolved_credentials
+
+        try:
+            from google.cloud import vision as gvision
+            self.vision_client = gvision.ImageAnnotatorClient()
+        except Exception as e:
+            logger.warning(f"Google Cloud Vision not available: {e}")
+            self.vision_client = None
+
+        try:
+            import google.generativeai as genai
+            genai.configure()  # uses GOOGLE_API_KEY env var or ADC
+            self.gemini_model = genai.GenerativeModel(resolved_vision_model)
+            self._genai = genai
+        except Exception as e:
+            logger.warning(f"Google Generative AI not available: {e}")
+            self.gemini_model = None
+            self._genai = None
+
+        self.embedding_model_name = resolved_embedding_model
+
+    def embed(self, text: str):
+        """Single embedding via Google text-embedding-004."""
+        result = self._genai.embed_content(
+            model=self.embedding_model_name,
+            content=text,
+            task_type="retrieval_document",
+        )
+        return result["embedding"]
+
+    def embed_batch(self, texts):
+        """Batch embedding (sequential calls to embed_content)."""
+        return [
+            self._genai.embed_content(
+                model=self.embedding_model_name,
+                content=t,
+                task_type="retrieval_document",
+            )["embedding"]
+            for t in texts
+        ]
+
+    def vision_chat(self, image: bytes, prompt: str, **kwargs) -> str:
+        """
+        Vision inference:
+          1. Google Cloud Vision document_text_detection for structured OCR
+          2. Gemini for visual reasoning with the prompt
+        """
+        raw_text = ""
+        if self.vision_client:
+            try:
+                from google.cloud import vision as gvision
+                gv_image = gvision.Image(content=image)
+                response = self.vision_client.document_text_detection(image=gv_image)
+                if response.full_text_annotation:
+                    raw_text = response.full_text_annotation.text
+            except Exception as e:
+                logger.warning(f"Cloud Vision OCR failed: {e}")
+
+        if self.gemini_model:
+            try:
+                from PIL import Image as PILImage
+                import io as _io
+                pil_image = PILImage.open(_io.BytesIO(image))
+                gemini_resp = self.gemini_model.generate_content([prompt, pil_image])
+                return gemini_resp.text if gemini_resp.text else raw_text
+            except Exception as e:
+                logger.warning(f"Gemini vision failed: {e}")
+
+        return raw_text
+
+    def generate(self, prompt: str, **kwargs) -> str:
+        """Text generation via Gemini."""
+        if self.gemini_model:
+            response = self.gemini_model.generate_content(prompt)
+            return response.text
+        return ""
+
+
 __all__ = [
     "LLMProvider",
     "create_llm_provider",
+    "GoogleVisionProvider",
     # Streaming infrastructure
     "StreamMetadata",
-    "StreamCallbacks", 
+    "StreamCallbacks",
     "StreamBuffer",
 ]

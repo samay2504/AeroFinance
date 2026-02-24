@@ -100,6 +100,23 @@ torch>=2.0.0
 torchvision>=0.15.0
 
 # =============================================================================
+# PDF PROCESSING & VISION PIPELINE
+# =============================================================================
+pdfplumber>=0.10.0
+Pillow>=10.1.0
+
+# Vision APIs (Google Cloud Vision: 1K units/month free)
+google-cloud-vision>=3.7.0
+google-generativeai>=0.7.0
+
+# Search & Retrieval (BM25 for keyword pre-filter)
+rank-bm25>=0.2.2
+
+# OCR — Local CPU Fallback (zero cost, no API keys)
+rapidocr-onnxruntime>=1.3.0     # L3a: ONNX-based, preferred local OCR
+pytesseract>=0.3.10             # L3b: Tesseract wrapper, backup fallback
+
+# =============================================================================
 # OPTIONAL: REMOTE CODE EXECUTION SANDBOX
 # =============================================================================
 # E2B for secure remote Python execution (100 hrs/month free)
@@ -115,3 +132,4 @@ e2b-code-interpreter>=0.0.10
 #
 # For semantic routing, the medium model (300-dim vectors) is required
 # Model size: ~40MB download, includes word vectors for similarity matching
+
