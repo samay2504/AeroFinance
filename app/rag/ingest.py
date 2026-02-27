@@ -11,6 +11,7 @@ from pathlib import Path
 import io
 import subprocess
 import time
+import httpx
 
 # Load .env at module initialization (before accessing os.environ)
 try:
@@ -34,7 +35,10 @@ logger = logging.getLogger(__name__)
 
 try:
     from qdrant_client import QdrantClient
-    from qdrant_client.models import VectorParams, Distance, PointStruct
+    from qdrant_client.models import (
+        VectorParams, Distance, PointStruct,
+        Filter, FieldCondition, MatchValue,  # v1.7+ filter API
+    )
     QDRANT_AVAILABLE = True
 except ImportError:
     QDRANT_AVAILABLE = False
@@ -53,6 +57,23 @@ try:
     SENTENCE_TRANSFORMERS_AVAILABLE = True
 except ImportError:
     SENTENCE_TRANSFORMERS_AVAILABLE = False
+
+# ── Shared search defaults (importable by callers) ─────────────────────────
+DEFAULT_TOP_K: int = 5
+DEFAULT_SCORE_THRESHOLD: float = 0.5
+
+# ── Dynamic top-k / adaptive-expansion tuning (importable by callers) ────────
+# RERANK_EXPANSION_FACTOR  – how many extra candidates to fetch before re-ranking
+# MAX_CANDIDATES           – hard cap on first-stage candidate count
+# ADAPTIVE_QUALITY_THRESHOLD – if avg score is below this, trigger expansion
+# ADAPTIVE_EXPANSION_FACTOR  – multiply initial_k by this on low-quality pass
+# ADAPTIVE_MAX_CANDIDATES    – hard cap on expanded candidate count
+RERANK_EXPANSION_FACTOR: int = 3
+MAX_CANDIDATES: int = 50
+ADAPTIVE_QUALITY_THRESHOLD: float = 0.7
+ADAPTIVE_EXPANSION_FACTOR: int = 2
+ADAPTIVE_MAX_CANDIDATES: int = 100
+# ─────────────────────────────────────────────────────────────────────────────
 
 
 class SmartChunker:
@@ -430,8 +451,8 @@ class DocumentIngestor:
         # 2. Try Ollama (local LLM server)
         if not self._embedder:
             try:
-                import requests
-                resp = requests.get("http://localhost:11434/api/version", timeout=2)
+                import httpx
+                resp = httpx.get("http://localhost:11434/api/version", timeout=2)
                 if resp.status_code == 200:
                     from langchain_community.embeddings import OllamaEmbeddings
                     self._embedder = OllamaEmbeddings(model="nomic-embed-text")
@@ -573,10 +594,10 @@ class DocumentIngestor:
     def _ensure_local_qdrant_running(self):
         """Check if local Qdrant is running, if not, pull and start via Docker."""
         try:
-            import requests
+            import httpx
             # Check if running
             try:
-                requests.get(self.qdrant_url.replace("tcp://", "http://"), timeout=1)
+                httpx.get(self.qdrant_url.replace("tcp://", "http://"), timeout=1)
                 return  # Running
             except:
                 pass # Not running
@@ -603,7 +624,7 @@ class DocumentIngestor:
             logger.info("Waiting for Qdrant startup...")
             for _ in range(10):
                 try:
-                    requests.get(self.qdrant_url.replace("tcp://", "http://"), timeout=1)
+                    httpx.get(self.qdrant_url.replace("tcp://", "http://"), timeout=1)
                     logger.info("✅ Qdrant started successfully via Docker")
                     return
                 except:
@@ -612,7 +633,7 @@ class DocumentIngestor:
             logger.warning(f"Failed to auto-start local Qdrant: {e}. Ensure Docker is running.")
 
     def _ensure_qdrant_collection(self):
-        """Ensure Qdrant collection exists."""
+        """Ensure Qdrant collection exists and required payload indexes are built."""
         try:
             self._qdrant.get_collection(self.collection_name)
         except Exception:
@@ -625,37 +646,88 @@ class DocumentIngestor:
             )
             logger.info(f"Created Qdrant collection: {self.collection_name}")
 
+        # ── Payload indexes (idempotent) ────────────────────────────────────
+        # Qdrant requires a keyword index on any field used in Filter queries.
+        # Without this, filtered search returns 400 Bad Request.
+        self._ensure_payload_indexes()
+
+    def _ensure_payload_indexes(self):
+        """Create keyword payload indexes for multi-tenant filter fields.
+
+        Qdrant create_payload_index is idempotent — calling it when the index
+        already exists is a no-op (200 OK), so this is safe to run on every
+        startup without risk of data loss or duplication.
+        """
+        from qdrant_client.models import PayloadSchemaType
+
+        index_fields = {
+            "client_id": PayloadSchemaType.KEYWORD,
+            "dataset_id": PayloadSchemaType.KEYWORD,
+            "doc_id": PayloadSchemaType.KEYWORD,
+            "source": PayloadSchemaType.KEYWORD,
+        }
+        for field_name, schema_type in index_fields.items():
+            try:
+                self._qdrant.create_payload_index(
+                    collection_name=self.collection_name,
+                    field_name=field_name,
+                    field_schema=schema_type,
+                )
+                logger.info(f"Qdrant payload index ensured: {field_name} ({schema_type})")
+            except Exception as e:
+                # Log but don't fail — index may already exist or field unused
+                logger.debug(f"Payload index {field_name}: {e}")
+
     def _generate_embedding(self, text: str) -> List[float]:
-        """Generate embedding for text using available provider."""
+        """Generate embedding for a single text.  Hot path — use _generate_embeddings_batch() for bulk."""
+        result = self._generate_embeddings_batch([text])
+        return result[0] if result else [0.0] * self._embedding_dim
+
+    def _generate_embeddings_batch(self, texts: List[str]) -> List[List[float]]:
+        """
+        Batch-embed texts in one forward pass.
+
+        Speed improvement vs per-text loop:
+          SentenceTransformers: 10-50x faster on GPU (single kernel launch vs N).
+          Cloud APIs: N HTTP calls → 1 HTTP call with multi-text payload.
+
+        Falls back to hash-based dummy embeddings when no model is available.
+        """
+        if not texts:
+            return []
+
         if self._embedder is not None:
             try:
-                # LangChain embeddings use embed_query
-                if self._embedder_type in ("huggingface_api", "ollama", "openai"):
-                    embedding = self._embedder.embed_query(text)
-                    return embedding
-                # SentenceTransformers uses encode
-                elif self._embedder_type == "sentence_transformers":
-                    embedding = self._embedder.encode(text, convert_to_numpy=True)
-                    return embedding.tolist()
+                if self._embedder_type == "sentence_transformers":
+                    # .encode() natively supports batch; show_progress_bar=False for production
+                    vecs = self._embedder.encode(
+                        texts,
+                        batch_size=64,
+                        show_progress_bar=False,
+                        convert_to_numpy=True,
+                    )
+                    return [v.tolist() for v in vecs]
+
+                elif self._embedder_type in ("huggingface_api", "ollama", "openai"):
+                    # LangChain wrappers expose embed_documents for batch
+                    if hasattr(self._embedder, "embed_documents"):
+                        return self._embedder.embed_documents(texts)
+                    # Fallback: parallel single-text calls (still 1 model init)
+                    return [self._embedder.embed_query(t) for t in texts]
+
             except Exception as e:
-                logger.error(f"Embedding generation failed ({self._embedder_type}): {e}")
-        
-        # Fallback: simple hash-based embedding when no model available
-        # This provides basic semantic matching via word hashing
-        words = text.lower().split()[:100]  # Use first 100 words
-        embedding = [0.0] * self._embedding_dim
-        
-        for i, word in enumerate(words):
-            # Hash word to embedding dimension
-            word_hash = hash(word) % self._embedding_dim
-            embedding[word_hash] += 1.0 / (i + 1)  # Weight by position
-        
-        # Normalize
-        norm = sum(x * x for x in embedding) ** 0.5
-        if norm > 0:
-            embedding = [x / norm for x in embedding]
-        
-        return embedding
+                logger.error(f"Batch embedding failed ({self._embedder_type}): {e}")
+
+        # ── Fallback: deterministic hash-based pseudo-embeddings ──────────
+        results: List[List[float]] = []
+        for text in texts:
+            words = text.lower().split()[:100]
+            emb = [0.0] * self._embedding_dim
+            for i, word in enumerate(words):
+                emb[hash(word) % self._embedding_dim] += 1.0 / (i + 1)
+            norm = sum(x * x for x in emb) ** 0.5
+            results.append([x / norm for x in emb] if norm > 0 else emb)
+        return results
 
     def _generate_id(self, content: str, metadata: Dict) -> str:
         """Generate unique ID for chunk."""
@@ -719,44 +791,68 @@ class DocumentIngestor:
         base_metadata["client_id"] = safe_client_id  # Use normalized ID
         base_metadata["dataset_id"] = dataset_id
 
-        # Ingest chunks
-        ingested = 0
-        
-        for i, chunk in enumerate(chunks):
-            chunk_metadata = {
+        # ── Batch embed all chunks in one forward pass (10-50x faster than loop) ──
+        contents: List[str] = [c["content"] for c in chunks]
+        metadatas: List[Dict[str, Any]] = [
+            {
                 **base_metadata,
                 "chunk_index": i,
-                "chunk_type": chunk.get("type", "unknown"),
-                "context": chunk.get("context", "")
+                "chunk_type": c.get("type", "unknown"),
+                "context": c.get("context", ""),
             }
-            
-            content = chunk["content"]
-            embedding = self._generate_embedding(content)
-            chunk_id = self._generate_id(content, chunk_metadata)
-            
+            for i, c in enumerate(chunks)
+        ]
+        chunk_ids: List[str] = [
+            self._generate_id(content, meta)
+            for content, meta in zip(contents, metadatas)
+        ]
+
+        t_embed = time.time()
+        embeddings = self._generate_embeddings_batch(contents)
+        logger.info(
+            f"Batch embedded {len(contents)} chunks in {time.time() - t_embed:.2f}s "
+            f"(avg {(time.time() - t_embed) / max(len(contents), 1) * 1000:.1f}ms/chunk)"
+        )
+
+        # ── Single batch upsert (1 HTTP round-trip vs N) ──────────────────
+        ingested = 0
+        _QDRANT_BATCH = 256  # Qdrant recommended max payload ~10 MB → tune to chunk size
+
+        if self._active_store == "qdrant":
             try:
-                if self._active_store == "qdrant":
+                # Build all PointStructs
+                points = [
+                    PointStruct(
+                        id=cid,
+                        vector=emb,
+                        payload={"content": content, **meta},
+                    )
+                    for cid, emb, content, meta in zip(chunk_ids, embeddings, contents, metadatas)
+                ]
+                # Upload in sub-batches to stay within Qdrant payload limits
+                for batch_start in range(0, len(points), _QDRANT_BATCH):
+                    batch = points[batch_start: batch_start + _QDRANT_BATCH]
                     self._qdrant.upsert(
                         collection_name=self.collection_name,
-                        points=[
-                            PointStruct(
-                                id=chunk_id,
-                                vector=embedding,
-                                payload={"content": content, **chunk_metadata}
-                            )
-                        ]
+                        points=batch,
+                        wait=False,           # async — don't block for ACK; ~3x throughput
                     )
-                elif self._active_store == "chroma":
-                    self._chroma_collection.upsert(
-                        ids=[chunk_id],
-                        embeddings=[embedding],
-                        documents=[content],
-                        metadatas=[chunk_metadata]
-                    )
-                ingested += 1
+                    ingested += len(batch)
+                logger.info(f"Qdrant batch upsert: {ingested} points in {len(range(0, len(points), _QDRANT_BATCH))} request(s)")
             except Exception as e:
-                logger.error(f"Failed to ingest chunk {i}: {e}")
-                continue
+                logger.error(f"Qdrant batch upsert failed: {e}")
+
+        elif self._active_store == "chroma":
+            try:
+                self._chroma_collection.upsert(
+                    ids=chunk_ids,
+                    embeddings=embeddings,
+                    documents=contents,
+                    metadatas=metadatas,
+                )
+                ingested = len(chunk_ids)
+            except Exception as e:
+                logger.error(f"Chroma batch upsert failed: {e}")
 
         return {
             "success": True,
@@ -767,12 +863,124 @@ class DocumentIngestor:
             "dataset_id": dataset_id
         }
 
+    def ingest_chunks_batch(
+        self,
+        chunks: List[Dict[str, Any]],
+        client_id: str,
+        dataset_id: str,
+        metadata: Optional[Dict[str, Any]] = None,
+        qdrant_batch_size: int = 256,
+    ) -> Dict[str, Any]:
+        """
+        High-throughput batch ingest of pre-chunked content.
+
+        Unlike ingest_text() this method skips SmartChunker entirely — callers
+        supply already-chunked items (e.g. from SmartPDFIngestor). This avoids:
+          1. Re-chunking a huge concatenated string (the 5-minute bottleneck).
+          2. N individual Qdrant upserts replaced by ceil(N/batch_size) requests.
+          3. N individual embedding calls replaced by ONE batch encode.
+
+        Args:
+            chunks: List of dicts with at least ``content`` (str) key.
+                    Optional extra fields passed through as Qdrant payload.
+            client_id: Tenant identifier (will be normalised).
+            dataset_id: Document / dataset ID.
+            metadata: Extra metadata added to every point's payload.
+            qdrant_batch_size: Max points per Qdrant upsert request (default 256).
+
+        Returns:
+            Dict with success, chunks_ingested, store, timings.
+        """
+        if self._active_store is None:
+            return {"success": False, "error": "No vector store available"}
+        if not chunks:
+            return {"success": True, "chunks_ingested": 0, "total_chunks": 0}
+
+        try:
+            from app.core.id_generator import normalize_client_id, sanitize_metadata_value
+            safe_client = normalize_client_id(client_id)
+        except ImportError:
+            safe_client = (client_id or "default").lower().replace(" ", "_").replace(":", "_")
+
+        base_meta: Dict[str, Any] = {"client_id": safe_client, "dataset_id": dataset_id}
+        for k, v in (metadata or {}).items():
+            if isinstance(v, (list, tuple)):
+                base_meta[k] = ", ".join(str(x) for x in v)
+            elif isinstance(v, dict):
+                base_meta[k] = str(v)
+            else:
+                base_meta[k] = v
+
+        contents = [str(c.get("content") or c.get("text") or "") for c in chunks]
+        payloads = [
+            {**base_meta, **{k: v for k, v in c.items() if k not in ("content", "text")}}
+            for c in chunks
+        ]
+        chunk_ids = [
+            self._generate_id(cnt, pl) for cnt, pl in zip(contents, payloads)
+        ]
+
+        t0 = time.time()
+        embeddings = self._generate_embeddings_batch(contents)
+        embed_secs = time.time() - t0
+        logger.info(
+            f"[ingest_chunks_batch] Embedded {len(contents)} chunks in {embed_secs:.2f}s "
+            f"({embed_secs / max(len(contents), 1) * 1000:.1f}ms/chunk)"
+        )
+
+        ingested = 0
+        t1 = time.time()
+
+        if self._active_store == "qdrant":
+            points = [
+                PointStruct(id=cid, vector=emb, payload={"content": cnt, **pl})
+                for cid, emb, cnt, pl in zip(chunk_ids, embeddings, contents, payloads)
+            ]
+            n_batches = 0
+            for b in range(0, len(points), qdrant_batch_size):
+                batch = points[b: b + qdrant_batch_size]
+                try:
+                    self._qdrant.upsert(
+                        collection_name=self.collection_name,
+                        points=batch,
+                        wait=False,   # fire-and-forget; ~3x throughput vs wait=True
+                    )
+                    ingested += len(batch)
+                    n_batches += 1
+                except Exception as exc:
+                    logger.error(f"Qdrant upsert batch {n_batches} failed: {exc}")
+            logger.info(
+                f"[ingest_chunks_batch] Qdrant: {ingested}/{len(points)} points "
+                f"in {n_batches} request(s), {time.time() - t1:.2f}s"
+            )
+
+        elif self._active_store == "chroma":
+            try:
+                self._chroma_collection.upsert(
+                    ids=chunk_ids,
+                    embeddings=embeddings,
+                    documents=contents,
+                    metadatas=payloads,
+                )
+                ingested = len(chunk_ids)
+            except Exception as exc:
+                logger.error(f"Chroma batch upsert failed: {exc}")
+
+        return {
+            "success": ingested > 0,
+            "chunks_ingested": ingested,
+            "total_chunks": len(chunks),
+            "store": self._active_store,
+            "embed_seconds": round(embed_secs, 3),
+            "upsert_seconds": round(time.time() - t1, 3),
+        }
+
     def search(
         self,
         query: str,
         client_id: str,
-        top_k: int = 5,
-        score_threshold: float = 0.5,
+        top_k: int = DEFAULT_TOP_K,
+        score_threshold: float = DEFAULT_SCORE_THRESHOLD,
         enable_rerank: bool = True,
         rerank_model: str = "auto"
     ) -> List[Dict[str, Any]]:
@@ -811,10 +1019,10 @@ class DocumentIngestor:
         # ================================================================
         # DYNAMIC TOP_K STRATEGY
         # ================================================================
-        # Fetch more candidates than needed for re-ranking (2-4x top_k)
+        # Fetch more candidates than needed for re-ranking (RERANK_EXPANSION_FACTOR x top_k)
         # This ensures we have enough diversity for re-ranker to work with
-        initial_k = top_k * 3 if enable_rerank else top_k
-        initial_k = min(initial_k, 50)  # Cap at 50 to control latency
+        initial_k = top_k * RERANK_EXPANSION_FACTOR if enable_rerank else top_k
+        initial_k = min(initial_k, MAX_CANDIDATES)  # Cap to control latency
         
         try:
             candidates = self._fetch_candidates(
@@ -831,10 +1039,10 @@ class DocumentIngestor:
             avg_score = sum(c["score"] for c in candidates) / len(candidates) if candidates else 0
             high_quality_count = sum(1 for c in candidates if c["score"] >= score_threshold)
             
-            if high_quality_count < top_k and avg_score < 0.7 and len(candidates) < initial_k:
+            if high_quality_count < top_k and avg_score < ADAPTIVE_QUALITY_THRESHOLD and len(candidates) < initial_k:
                 # Expand search with lower threshold
                 logger.info(f"Adaptive expansion: only {high_quality_count} quality results, expanding search")
-                expanded_k = min(initial_k * 2, 100)
+                expanded_k = min(initial_k * ADAPTIVE_EXPANSION_FACTOR, ADAPTIVE_MAX_CANDIDATES)
                 candidates = self._fetch_candidates(
                     query_embedding, safe_client_id, expanded_k
                 )
@@ -868,24 +1076,27 @@ class DocumentIngestor:
         """Fetch initial candidates from vector store."""
         try:
             if self._active_store == "qdrant":
-                results = self._qdrant.search(
+                # qdrant-client ≥1.7: .search() removed, use .query_points()
+                response = self._qdrant.query_points(
                     collection_name=self.collection_name,
-                    query_vector=query_embedding,
+                    query=query_embedding,
                     limit=limit,
-                    query_filter={
-                        "must": [
-                            {"key": "client_id", "match": {"value": client_id}}
+                    query_filter=Filter(
+                        must=[
+                            FieldCondition(
+                                key="client_id",
+                                match=MatchValue(value=client_id),
+                            )
                         ]
-                    }
+                    ),
                 )
-                
                 return [
                     {
                         "content": r.payload.get("content", ""),
                         "score": r.score,
                         "metadata": {k: v for k, v in r.payload.items() if k != "content"}
                     }
-                    for r in results
+                    for r in response.points
                 ]
 
             elif self._active_store == "chroma":
@@ -972,15 +1183,15 @@ class DocumentIngestor:
             return self._rerank_with_cross_encoder(query, candidates, top_k)
         
         try:
-            import requests
-            
+            import httpx
+
             # Prepare documents
             docs = [c["content"] for c in candidates]
-            
+
             # Call Jina Reranker API
             model = os.environ.get("JINA_RERANK_MODEL", "jina-reranker-v2-base-multilingual")
-            
-            response = requests.post(
+
+            response = httpx.post(
                 "https://api.jina.ai/v1/rerank",
                 headers={
                     "Authorization": f"Bearer {jina_key}",
@@ -1014,9 +1225,6 @@ class DocumentIngestor:
             logger.info(f"Jina rerank: {len(candidates)} candidates -> {len(reranked)} results [FREE]")
             return reranked
             
-        except ImportError:
-            logger.debug("requests package not available")
-            return candidates[:top_k]
         except Exception as e:
             logger.warning(f"Jina rerank failed: {e}")
             return self._rerank_with_cross_encoder(query, candidates, top_k)
@@ -1403,11 +1611,71 @@ def get_rag_pipeline(llm_wrapper=None) -> RAGPipeline:
     return _rag_pipeline
 
 
+def rerank_candidates(
+    query: str,
+    candidates: List[Dict[str, Any]],
+    top_k: int = DEFAULT_TOP_K,
+    rerank_model: str = "auto",
+) -> List[Dict[str, Any]]:
+    """
+    Standalone re-ranking helper usable by any caller (PDF BM25, etc.).
+
+    Normalises the candidate list to ``{content, score, ...}`` shape, delegates
+    to ``DocumentIngestor._rerank_results`` via the process singleton, then
+    restores any extra fields (e.g. ``page_num``, ``text``) from the originals.
+
+    Args:
+        query:        Search query used to score relevance.
+        candidates:   List of result dicts. Must contain at least one of
+                      ``content`` or ``text`` for the document text, and
+                      optionally a ``score`` (defaults to 0.0).
+        top_k:        How many results to return after re-ranking.
+        rerank_model: ``"auto"`` | ``"jina"`` | ``"cohere"`` |
+                      ``"cross_encoder"`` | ``"none"``.
+
+    Returns:
+        Re-ranked list of the original dicts (preserving all original fields),
+        trimmed to ``top_k``.  Falls back to score-sorted order on any error.
+    """
+    if not candidates:
+        return []
+
+    # Always normalise to {content, score, ...} shape — even for the none path —
+    # so callers with 'text'-keyed BM25 results always get 'content' back.
+    normalised: List[Dict[str, Any]] = [
+        {
+            **c,
+            "content": c.get("content") or c.get("text", ""),
+            "score": float(c.get("score", 0.0)),
+        }
+        for c in candidates
+    ]
+
+    if rerank_model == "none":
+        return normalised[:top_k]
+
+    try:
+        ingestor = get_document_ingestor()
+        reranked = ingestor._rerank_results(query, normalised, top_k, rerank_model)
+        return reranked
+    except Exception as e:
+        logger.warning(f"rerank_candidates failed ({rerank_model}): {e}. Returning score-sorted.")
+        return sorted(normalised, key=lambda x: x["score"], reverse=True)[:top_k]
+
+
 __all__ = [
-    "DocumentIngestor", 
-    "SmartChunker", 
+    "DocumentIngestor",
+    "SmartChunker",
     "get_document_ingestor",
     "RAGPipeline",
-    "get_rag_pipeline"
+    "get_rag_pipeline",
+    "rerank_candidates",
+    "DEFAULT_TOP_K",
+    "DEFAULT_SCORE_THRESHOLD",
+    "RERANK_EXPANSION_FACTOR",
+    "MAX_CANDIDATES",
+    "ADAPTIVE_QUALITY_THRESHOLD",
+    "ADAPTIVE_EXPANSION_FACTOR",
+    "ADAPTIVE_MAX_CANDIDATES",
 ]
 

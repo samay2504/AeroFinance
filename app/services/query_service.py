@@ -1,32 +1,43 @@
 """Query handling service."""
 
 import logging
+import time
 from fastapi import HTTPException
 from app.types.schemas import QueryRequest, QueryResponse
 from app.core.prompts import format_natural_response as _format_natural_response
 from app.ingest.excel_ingest import compress_dataframe_for_llm
+from app.agents.router import (
+    get_router_agent,
+    TRACK_DATA,
+    TRACK_DOC,
+    TRACK_WEB,
+    TRACK_DOC_SUMMARY,
+    TRACK_OUT_OF_DOMAIN,
+)
+from app.agents.data_analyst import get_data_analyst_agent
+from app.core.llm_wrapper import get_llm_wrapper
+from app.core.id_generator import generate_query_id, get_iso_timestamp
 
 logger = logging.getLogger("ai-ca")
+
+# ── Lightweight summary-intent keywords ────────────────────────────────────
+# Avoids an LLM round-trip by matching high-confidence keywords.
+# Aligned with router.py SUMMARY_INTENT_EXEMPLARS for consistency.
+_SUMMARY_KEYWORDS = frozenset({
+    "summary", "summarize", "summarise", "overview", "describe", "description",
+    "explain", "about", "highlights", "key points", "main points", "gist",
+    "what is this", "what does this contain", "what information",
+    "tell me about", "brief", "outline", "recap", "digest",
+})
 
 
 async def handle_query(request: QueryRequest) -> QueryResponse:
     """Execute analytical query with unique query ID for audit trail."""
     try:
-        from app.agents.router import (
-            get_router_agent,
-            TRACK_DATA,
-            TRACK_DOC,
-            TRACK_WEB,
-            TRACK_DOC_SUMMARY,
-            TRACK_OUT_OF_DOMAIN,
-        )
-        from app.agents.data_analyst import get_data_analyst_agent
-        from app.core.llm_wrapper import get_llm_wrapper
-        from app.core.id_generator import generate_query_id, get_iso_timestamp
-
         # Generate unique query ID for audit trail
         query_id = generate_query_id()
         timestamp = get_iso_timestamp()
+        _t0 = time.time()
         logger.info(
             f"Query {query_id}: '{request.query[:50]}...' from {request.client}"
         )
@@ -35,9 +46,142 @@ async def handle_query(request: QueryRequest) -> QueryResponse:
         router = get_router_agent(llm)
         agent = get_data_analyst_agent(llm)
 
-        # Check if client has data loaded
+        # Check if client has data loaded (SQL/Excel/CSV datasets)
         datasets = agent.list_datasets_for_client(request.client)
         has_loaded_data = len(datasets) > 0
+
+        # ── PDF doc shortcut ────────────────────────────────────────────────
+        # If a dataset_id starting with "doc_" is provided and no matching SQL
+        # dataframe exists for it, skip the TRACK_DATA routing entirely and go
+        # straight to SmartPDFIngestor BM25 → vector retrieval.
+        # This prevents financial-keyword queries from being mis-routed to
+        # TRACK_DATA when the data source is a PDF (not a spreadsheet).
+        dataset_id = request.dataset_id or ""
+        is_pdf_doc = dataset_id.startswith("doc_") and not any(
+            ds.get("dataset_id") == dataset_id
+            for ds in datasets
+        )
+        if is_pdf_doc:
+            # ── Summary intent detection (keyword-based, <1 ms) ──────────────
+            # If the user wants a summary/overview of the PDF, delegate to
+            # DataAnalystAgent.summarize_dataset() which produces coherent
+            # summaries rather than chunk-level Q&A.
+            q_lower = request.query.lower()
+            _is_summary = any(kw in q_lower for kw in _SUMMARY_KEYWORDS)
+
+            if _is_summary:
+                # Try summarize_dataset() — requires a DataFrame registered
+                # during PDF ingest (page, text columns).
+                summary_result = agent.summarize_dataset(
+                    dataset_id, client_id=request.client, user_query=request.query
+                )
+                if summary_result.get("value"):
+                    _elapsed = round(time.time() - _t0, 2)
+                    logger.info(f"Query {query_id}: PDF summary via summarize_dataset in {_elapsed}s")
+                    return QueryResponse(
+                        success=True,
+                        result=summary_result["value"],
+                        method=f"pdf:summarize_dataset:{summary_result.get('method', 'llm')}",
+                        explanation="Summary generated from PDF document data",
+                        query_id=query_id,
+                        metadata={
+                            "route": "TRACK_PDF_SUMMARY",
+                            "doc_id": dataset_id,
+                            "elapsed_s": _elapsed,
+                        },
+                        provenance=summary_result.get("provenance", []),
+                    )
+                # summarize_dataset() failed (DataFrame not registered) —
+                # fall through to RAG retrieval with a summary-oriented prompt.
+                logger.debug("summarize_dataset() returned no value for PDF; using RAG summary fallback")
+
+            from app.rag.ingest import (
+                get_document_ingestor,
+                rerank_candidates,
+                DEFAULT_TOP_K,
+                DEFAULT_SCORE_THRESHOLD,
+                RERANK_EXPANSION_FACTOR,
+                MAX_CANDIDATES,
+            )
+            from app.ingest.pdf_ingest import get_pdf_ingestor
+
+            # ── Primary: DocumentIngestor (Chroma/Qdrant) ─────────────────────
+            # Chunks were pushed here during ingest. Gets the full pipeline:
+            # dynamic top_k → adaptive expansion → Jina/Cohere/Cross-Encoder rerank.
+            doc_ingestor = get_document_ingestor()
+            pdf_results = doc_ingestor.search(
+                query=request.query,
+                client_id=request.client,
+                top_k=DEFAULT_TOP_K,
+                score_threshold=DEFAULT_SCORE_THRESHOLD,
+            )
+
+            # ── Fallback: SmartPDFIngestor BM25 ───────────────────────────────
+            # Also applies the full pipeline (candidate expansion + re-ranking)
+            # via the shared rerank_candidates() helper.
+            if not pdf_results:
+                logger.debug("DocumentIngestor returned no results; using BM25 fallback")
+                pdf_ingestor = get_pdf_ingestor()  # singleton — no re-init cost
+                # 1. Fetch expanded candidate pool (same multiplier as vector path)
+                bm25_fetch_k = min(DEFAULT_TOP_K * RERANK_EXPANSION_FACTOR, MAX_CANDIDATES)
+                raw_bm25 = pdf_ingestor.retrieve(
+                    query=request.query,
+                    client_id=request.client,
+                    top_k=bm25_fetch_k,
+                )
+                # 2. Re-rank with Jina → Cohere → Cross-Encoder (same as vector path)
+                pdf_results = rerank_candidates(
+                    query=request.query,
+                    candidates=raw_bm25,
+                    top_k=DEFAULT_TOP_K,
+                )
+
+            if pdf_results:
+                # Use more chunks for summary queries to provide comprehensive coverage
+                _chunk_limit = 10 if _is_summary else 5
+                context = "\n\n".join(
+                    f"[Page {r.get('page_num', r.get('metadata', {}).get('page_num', '?'))}] "
+                    f"{r.get('content', r.get('text', ''))[:800]}"
+                    for r in pdf_results[:_chunk_limit]
+                )
+                if _is_summary:
+                    prompt = (
+                        "You are a financial document analyst. Using the following excerpts "
+                        "from the document, provide a comprehensive summary covering the key "
+                        "themes, figures, and takeaways.\n\n"
+                        f"{context}\n\n"
+                        f"User request: {request.query}"
+                    )
+                else:
+                    prompt = (
+                        "Use the following excerpts from the document to answer the question.\n\n"
+                        f"{context}\n\n"
+                        f"Question: {request.query}"
+                    )
+                response = llm.invoke(prompt, cache_context=f"pdf:{request.client}:{dataset_id}")
+                _elapsed = round(time.time() - _t0, 2)
+                logger.info(f"Query {query_id}: PDF {'summary' if _is_summary else 'QA'} in {_elapsed}s")
+                return QueryResponse(
+                    success=True,
+                    result=response,
+                    method=f"pdf:{'summary' if _is_summary else 'bm25+vector'}",
+                    explanation=f"Retrieved {len(pdf_results)} chunk(s) from PDF",
+                    query_id=query_id,
+                    metadata={
+                        "route": "TRACK_PDF_SUMMARY" if _is_summary else "TRACK_PDF",
+                        "doc_id": dataset_id,
+                        "chunks": len(pdf_results),
+                        "elapsed_s": _elapsed,
+                    },
+                    provenance={
+                        "method": "pdf_summary" if _is_summary else "pdf_bm25_vector",
+                        "doc_id": dataset_id,
+                        "chunks_retrieved": len(pdf_results),
+                        "client_id": request.client,
+                    },
+                )
+            logger.warning(f"PDF retrieve returned no chunks for {dataset_id}, falling through to router")
+        # ── end PDF shortcut ────────────────────────────────────────────────
 
         # Route query with data context
         route_result = router.route(
@@ -89,13 +233,15 @@ async def handle_query(request: QueryRequest) -> QueryResponse:
 
             if summaries:
                 combined = "\n\n".join(summaries)
+                _elapsed = round(time.time() - _t0, 2)
+                logger.info(f"Query {query_id}: summarize_dataset completed in {_elapsed}s")
                 return QueryResponse(
                     success=True,
                     result=combined,
                     method="summarize_dataset",
                     explanation=f"Summary of {len(summaries)} dataset(s)",
                     query_id=query_id,
-                    metadata={"route": track, "datasets": len(summaries)},
+                    metadata={"route": track, "datasets": len(summaries), "elapsed_s": _elapsed},
                 )
             return QueryResponse(
                 success=False,

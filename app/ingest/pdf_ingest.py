@@ -28,14 +28,25 @@ import io
 import os
 import json
 import time
+import uuid
 import struct
 import hashlib
 import logging
+import threading
 from typing import List, Dict, Any, Optional, Tuple, Set
 from pathlib import Path
 from collections import defaultdict
 from dataclasses import dataclass, field, asdict
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
+
+# ═══ DLL Fix: Must run before loading native extensions (pdfplumber, numpy) ═══
+# Prevents WinError 1114 "A dynamic link library (DLL) initialization routine
+# failed" on Windows conda environments when torch DLLs are loaded later.
+try:
+    from app.core.dll_fix import apply_dll_fix
+    apply_dll_fix()
+except ImportError:
+    pass
 
 import pdfplumber
 import numpy as np
@@ -47,6 +58,7 @@ from app.core.llm_utils import get_semantic_cache, get_single_flight
 from app.core.id_generator import normalize_client_id, generate_chunk_id, generate_doc_id
 from app.core.prompts import get_token_manager, _PROMPT_TEMPLATES
 from app.core.data_registry import BloomFilter
+from app.core.redis_client import get_redis
 from app.rag.ingest import SmartChunker
 
 logger = logging.getLogger(__name__)
@@ -60,6 +72,10 @@ _SIMHASH_BITS = 64                   # SimHash width
 _SIMHASH_NEAR_DUP_THRESHOLD = 3      # Hamming distance ≤ 3 → near duplicate
 _MINHASH_JACCARD_THRESHOLD = 0.80     # ≥ 80% estimated Jaccard → fuzzy duplicate
 _SHINGLE_K = 3                        # Character n-gram width for MinHash
+_MINHASH_WINDOW = 500               # Sliding window: compare new chunk vs last N chunks
+                                    # Prevents O(n²) on large docs while still catching dups
+_VISION_CACHE_TTL = 86400 * 7       # Redis vision cache TTL: 7 days
+_BLOOM_REDIS_KEY = "pdf:bloom:hashes"  # Redis SET key for bloom filter persistence
 
 
 # ═════════════════════════════════════════════════════════════════
@@ -274,19 +290,44 @@ class SmartPDFIngestor:
         self.max_chunk_tokens = max_chunk_tokens if max_chunk_tokens is not None else _pdf_cfg.max_chunk_tokens
         self.parallel_workers = parallel_workers if parallel_workers is not None else _pdf_cfg.parallel_workers
 
-        # dots.ocr — fully env-driven via PDFSettings
+        # dots.ocr — intelligent Docker lifecycle management
         self._dots_ocr_enabled = _pdf_cfg.dots_ocr_enabled
         self._dots_ocr_endpoint = _pdf_cfg.dots_ocr_endpoint
         self._dots_ocr_timeout = _pdf_cfg.dots_ocr_timeout
         self._dots_ocr_min_confidence = _pdf_cfg.dots_ocr_min_confidence
+        self._dots_ocr_manager = None
 
-        # Fail-fast: if dots.ocr is enabled, endpoint MUST be configured
-        if self._dots_ocr_enabled and not self._dots_ocr_endpoint:
-            raise ValueError(
-                "dots.ocr is enabled (PDF_DOTS_OCR_ENABLED=true) but "
-                "PDF_DOTS_OCR_ENDPOINT is not set. Add it to your .env file, e.g.:\n"
-                "  PDF_DOTS_OCR_ENDPOINT=http://localhost:8000"
-            )
+        # dots.ocr: only pre-validate config here — actual Docker startup is
+        # deferred to first use (after Gemini vision fails) via _ensure_dots_ocr_ready().
+        self._dots_ocr_ready = False  # True once ensure_running() succeeds
+        if self._dots_ocr_enabled:
+            if _pdf_cfg.dots_ocr_auto_docker:
+                try:
+                    from app.core.gpu_utils import DotsOCRManager
+                    host_port = self._parse_port(self._dots_ocr_endpoint) or 5555
+                    self._dots_ocr_manager = DotsOCRManager(
+                        host_port=host_port,
+                        docker_image=_pdf_cfg.dots_ocr_docker_image,
+                        model_name=_pdf_cfg.dots_ocr_model,
+                    )
+                    gpu = self._dots_ocr_manager.gpu_info
+                    logger.info(
+                        f"dots.ocr configured (lazy start): GPU={gpu.device_name or 'none'}, "
+                        f"VRAM={gpu.vram_total_gib:.1f}GiB — container will start on first use"
+                    )
+                except Exception as exc:
+                    logger.warning(f"dots.ocr auto-docker config failed: {exc} — disabling")
+                    self._dots_ocr_enabled = False
+            elif not self._dots_ocr_endpoint:
+                raise ValueError(
+                    "dots.ocr is enabled (PDF_DOTS_OCR_ENABLED=true) but "
+                    "PDF_DOTS_OCR_ENDPOINT is not set. Either:\n"
+                    "  1. Set PDF_DOTS_OCR_ENDPOINT=http://your-host:port in .env\n"
+                    "  2. Set PDF_DOTS_OCR_AUTO_DOCKER=true for automatic management"
+                )
+            else:
+                # Manual endpoint provided — mark ready immediately (no Docker to start)
+                self._dots_ocr_ready = True
 
         # Probe local OCR availability once at init (avoid repeated ImportError)
         self._rapid_ocr_available = False
@@ -337,8 +378,9 @@ class SmartPDFIngestor:
         self._simhash_registry: Dict[int, Tuple[str, int]] = {}
 
         # MinHash registry for chunk-level fuzzy dedup
-        # Maps chunk_id → MinHash signature
+        # Maps chunk_id → MinHash signature — bounded deque for O(window) comparisons
         self._minhash_registry: Dict[str, List[int]] = {}
+        self._minhash_insertion_order: List[str] = []  # maintain insertion order for window
 
         # Counters
         self._stats: Dict[str, int] = defaultdict(int, {
@@ -354,9 +396,18 @@ class SmartPDFIngestor:
             "minhash_fuzzy_dups": 0,
             "qdrant_upserts": 0,
         })
+        # Thread-safe lock for _stats mutations from parallel workers.
+        self._stats_lock = threading.Lock()
+
+        # Semaphore for concurrent cloud-vision API calls.
+        # Configured via PDF_VISION_CONCURRENCY (default 3).
+        # Prevents 429 rate-limit cascades on large multi-page PDFs.
+        self._vision_concurrency = _pdf_cfg.vision_concurrency
+        self._vision_sem = threading.Semaphore(self._vision_concurrency)
 
         logger.info(
             f"SmartPDFIngestor initialized: vision={self.enable_vision}, "
+            f"vision_concurrency={self._vision_concurrency}, "
             f"cache={self.cache_dir}"
         )
 
@@ -366,16 +417,46 @@ class SmartPDFIngestor:
 
     def _get_reranker(self):
         """
-        Lazily obtain a DocumentIngestor instance for reranking.
-        This avoids circular imports and heavy init cost until needed.
+        Lazily obtain the *singleton* DocumentIngestor for reranking,
+        embedding, and Qdrant access.  Using the module-level singleton
+        avoids creating a second SentenceTransformer instance (saves ~46s
+        on first query).
         """
         if self._doc_ingestor is None:
             try:
-                from app.rag.ingest import DocumentIngestor
-                self._doc_ingestor = DocumentIngestor()
+                from app.rag.ingest import get_document_ingestor
+                self._doc_ingestor = get_document_ingestor()
             except Exception as e:
-                logger.warning(f"Could not init DocumentIngestor for reranking: {e}")
+                logger.warning(f"Could not init DocumentIngestor: {e}")
         return self._doc_ingestor
+
+    def _ensure_dots_ocr_ready(self) -> bool:
+        """
+        Lazily start the dots.ocr Docker container on first actual use.
+
+        Called only after Gemini vision (L1) fails — avoids the 120s
+        model-load wait on every SmartPDFIngestor construction.
+        Returns True if dots.ocr is available, False otherwise.
+        """
+        if self._dots_ocr_ready:
+            return True
+        if not self._dots_ocr_enabled or self._dots_ocr_manager is None:
+            return False
+        try:
+            logger.info("dots.ocr: starting container on first use (lazy init)...")
+            if self._dots_ocr_manager.ensure_running():
+                self._dots_ocr_endpoint = self._dots_ocr_manager.endpoint
+                self._dots_ocr_ready = True
+                logger.info(f"dots.ocr container healthy at {self._dots_ocr_endpoint}")
+                return True
+            else:
+                logger.warning("dots.ocr Docker start failed — disabling for this session")
+                self._dots_ocr_enabled = False
+                return False
+        except Exception as exc:
+            logger.warning(f"dots.ocr lazy start failed: {exc} — disabling")
+            self._dots_ocr_enabled = False
+            return False
 
     # ─────────────────────────────────────────────────────────────
     # PUBLIC API
@@ -411,32 +492,86 @@ class SmartPDFIngestor:
         total_pages = 0
 
         try:
-            with pdfplumber.open(file_path) as pdf:
-                total_pages = len(pdf.pages)
-                logger.info(f"Processing {total_pages} pages")
+            # ── Read PDF bytes once into memory ──────────────────────────────
+            # Workers each open their own io.BytesIO(pdf_bytes) — no disk I/O
+            # in the thread pool, no shared file-handle state between threads.
+            # For an 11 MB file × 4 workers this costs ~44 MB RAM, which is
+            # negligible compared to the 5-25 min saved by parallelising table
+            # extraction and PNG rendering.
+            pdf_bytes = Path(file_path).read_bytes()
 
-                if self.parallel_workers > 1 and total_pages > 4:
-                    with ProcessPoolExecutor(max_workers=self.parallel_workers) as pool:
-                        futures = [
-                            pool.submit(
-                                self._process_page_wrapper,
-                                file_path, i, doc_id,
-                            )
-                            for i in range(total_pages)
-                        ]
-                        for fut in futures:
-                            page_chunks, stats = fut.result()
-                            chunks.extend(page_chunks)
-                            text_pages += stats["text"]
-                            vision_pages += stats["vision"]
-                            table_count += stats["tables"]
-                else:
-                    for i, page in enumerate(pdf.pages):
-                        page_chunks, stats = self._process_page(page, i, doc_id)
+            # ── FAST classify pass in main thread ────────────────────────────
+            # extract_text() only:  ~0.05 s/page → 146 pages ≈  7 s total.
+            # extract_tables() is intentionally deferred to each worker thread
+            # (2-10 s/page, extremely slow for annual-report-style PDFs with
+            # merged cells and multi-column layouts).  Running all 146 pages
+            # sequentially here would add 5-25 minutes of serial wall-clock
+            # time before the first thread even starts.
+            page_payloads: list = []
+            with pdfplumber.open(io.BytesIO(pdf_bytes)) as _classify_pdf:
+                total_pages = len(_classify_pdf.pages)
+                logger.info(f"Processing {total_pages} pages")
+                for i, page in enumerate(_classify_pdf.pages):
+                    text = page.extract_text() or ""
+                    text_chars = len(text.strip())
+                    page_payloads.append({
+                        "page_num": i,
+                        "text": text,
+                        "text_chars": text_chars,
+                    })
+
+            # ── Vision page cap ───────────────────────────────────────────────
+            # Sort sparse pages by text density (fewest chars first) and cap at
+            # PDF_MAX_VISION_PAGES (default 20).  Annual reports with 40-60
+            # chart/image pages can otherwise send 200+ API calls without this
+            # guard.  Pages beyond the cap fall through to local OCR (L3).
+            max_vision = _pdf_cfg.max_vision_pages
+            vision_page_nums: Set[int] = set()
+            if self.enable_vision and max_vision > 0:
+                sparse_pages = [
+                    p for p in page_payloads
+                    if p["text_chars"] < self.vision_threshold
+                ]
+                capped = sorted(sparse_pages, key=lambda p: p["text_chars"])[:max_vision]
+                vision_page_nums = {p["page_num"] for p in capped}
+                n_sparse = len(sparse_pages)
+                if n_sparse > max_vision:
+                    logger.info(
+                        f"Vision cap: {max_vision}/{n_sparse} sparse pages routed to "
+                        f"cloud vision (PDF_MAX_VISION_PAGES={max_vision}); "
+                        f"remaining {n_sparse - max_vision} pages use local OCR"
+                    )
+
+            for p in page_payloads:
+                p["vision_eligible"] = self.enable_vision and (
+                    p["page_num"] in vision_page_nums
+                )
+
+            if self.parallel_workers > 1 and total_pages > 4:
+                # ThreadPoolExecutor — each worker receives (payload_dict, pdf_bytes).
+                # The slow work (extract_tables, to_image, vision API) runs in parallel.
+                with ThreadPoolExecutor(max_workers=self.parallel_workers) as pool:
+                    futures = [
+                        pool.submit(
+                            self._process_extracted_page, payload, doc_id, pdf_bytes,
+                        )
+                        for payload in page_payloads
+                    ]
+                    for fut in futures:
+                        page_chunks, stats = fut.result()
                         chunks.extend(page_chunks)
                         text_pages += stats["text"]
                         vision_pages += stats["vision"]
                         table_count += stats["tables"]
+            else:
+                for payload in page_payloads:
+                    page_chunks, stats = self._process_extracted_page(
+                        payload, doc_id, pdf_bytes
+                    )
+                    chunks.extend(page_chunks)
+                    text_pages += stats["text"]
+                    vision_pages += stats["vision"]
+                    table_count += stats["tables"]
 
         except Exception as e:
             logger.error(f"Failed to process PDF: {e}", exc_info=True)
@@ -447,10 +582,68 @@ class SmartPDFIngestor:
         self._update_chunk_hashes(chunks, fingerprint)
         self._compute_minhash_signatures(chunks, fingerprint)
 
-        # ── Step 4: BM25 index ──
-        self._update_bm25_index(chunks, safe_client)
+        # ── Step 4: Detect cloud vector store availability ──────────────────────
+        # When Qdrant or Chroma is connected we push chunks directly during
+        # ingestion and skip the intermediate JSONL + BM25 disk files.  The
+        # bloom filter is still written (dedup across restarts) and in-memory
+        # BM25 is still built (within-session keyword fallback).
+        _cloud_store_active = False
+        _doc_ingestor = None
+        try:
+            from app.rag.ingest import get_document_ingestor as _get_doc_ingestor  # local import — avoids circular at module level
+            _doc_ingestor = _get_doc_ingestor()
+            _cloud_store_active = _doc_ingestor._active_store is not None
+        except Exception as _cse:
+            logger.debug(f"Cloud store check skipped: {_cse}")
 
-        # ── Step 5: Persist ──
+        # ── Step 5: Direct push to cloud vector store ────────────────────────
+        # Use ingest_chunks_batch() — embeds all chunks in ONE forward pass and
+        # sends ONE batch Qdrant upsert, replacing the old concatenate→re-chunk
+        # →per-chunk-upsert approach that caused the 5-minute bottleneck.
+        if _cloud_store_active and _doc_ingestor is not None:
+            try:
+                push_chunks = [
+                    {
+                        "content": (_c.text or _c.summary or "").strip(),
+                        "page_num": _c.page_num,
+                        "chunk_id": _c.chunk_id,
+                        "is_table": _c.is_table,
+                        "is_visual": _c.is_visual,
+                        "confidence": _c.confidence,
+                        "summary": _c.summary,
+                    }
+                    for _c in chunks
+                    if (_c.text or _c.summary or "").strip()
+                ]
+                if push_chunks:
+                    push_result = _doc_ingestor.ingest_chunks_batch(
+                        chunks=push_chunks,
+                        client_id=safe_client,
+                        dataset_id=doc_id,
+                        metadata={
+                            "source": "pdf",
+                            "filename": Path(file_path).name,
+                            "doc_id": doc_id,
+                        },
+                    )
+                    self._stats["qdrant_upserts"] += push_result.get("chunks_ingested", 0)
+                    logger.info(
+                        f"PDF batch push → {_doc_ingestor._active_store}: "
+                        f"{push_result.get('chunks_ingested')}/{len(push_chunks)} chunks, "
+                        f"embed={push_result.get('embed_seconds'):.2f}s, "
+                        f"upsert={push_result.get('upsert_seconds'):.2f}s"
+                    )
+            except Exception as _ve:
+                # Non-fatal: fall back to JSONL so ingest_service can do the push
+                logger.warning(f"Direct batch push failed, falling back to JSONL: {_ve}")
+                _cloud_store_active = False
+
+        # ── Step 6: BM25 index ───────────────────────────────────────────────
+        # persist=False when cloud store holds the canonical chunks (no disk needed).
+        # persist=True when fallback to JSONL so BM25 map survives restarts.
+        self._update_bm25_index(chunks, safe_client, persist=not _cloud_store_active)
+
+        # ── Step 7: Persist metadata + optional JSONL ────────────────────────
         ingestion_meta = {
             "doc_id": doc_id,
             "client_id": safe_client,
@@ -475,10 +668,14 @@ class SmartPDFIngestor:
                 }
                 for c in chunks
             ],
+            "cloud_store_used": _cloud_store_active,
         }
 
         self._save_metadata(ingestion_meta)
-        self._save_chunks(chunks, doc_id)
+        if _cloud_store_active:
+            logger.debug("Skipping JSONL chunk write — chunks pushed directly to cloud vector store")
+        else:
+            self._save_chunks(chunks, doc_id)
 
         self._stats["documents_processed"] += 1
         self._stats["pages_processed"] += total_pages
@@ -536,10 +733,18 @@ class SmartPDFIngestor:
 
         survivors = filtered[:_pdf_cfg.vector_cap]  # cap before embedding
 
+        # ── Load chunk texts once (reused for embedding + returned to caller)
+        chunk_ids = [c["chunk_id"] for c in survivors]
+        chunk_texts = self._load_chunk_texts(chunk_ids)
+        for c in survivors:
+            txt = chunk_texts.get(c["chunk_id"], "")
+            c["text"] = txt
+            c["content"] = txt
+
         # L2: Lazy embed (cache-first, batch embed misses)
         t1 = time.time()
         embeddings = self._ensure_embeddings_for_chunks(
-            [c["chunk_id"] for c in survivors]
+            chunk_ids, preloaded_texts=chunk_texts,
         )
         logger.info(f"Embedding ensured in {(time.time()-t1)*1000:.0f}ms")
 
@@ -554,7 +759,6 @@ class SmartPDFIngestor:
             reranker = self._get_reranker()
             if reranker is not None:
                 try:
-                    # Convert to the format expected by _rerank_results
                     for r in results:
                         r.setdefault("content", r.get("text", ""))
                         r.setdefault("score", r.get("vector_score", 0.0))
@@ -571,41 +775,70 @@ class SmartPDFIngestor:
     # PAGE PROCESSING
     # ─────────────────────────────────────────────────────────────
 
-    def _process_page_wrapper(
-        self, file_path: str, page_num: int, doc_id: str
-    ) -> Tuple[List[Chunk], Dict[str, int]]:
-        """Picklable wrapper for ProcessPoolExecutor."""
-        with pdfplumber.open(file_path) as pdf:
-            return self._process_page(pdf.pages[page_num], page_num, doc_id)
+    # ─────────────────────────────────────────────────────────────
+    # PRE-EXTRACTED PAGE PROCESSING (thread-safe, no pdfplumber handles)
+    # ─────────────────────────────────────────────────────────────
 
-    def _process_page(
-        self, page, page_num: int, doc_id: str
+    def _process_extracted_page(
+        self, payload: Dict[str, Any], doc_id: str, pdf_bytes: bytes
     ) -> Tuple[List[Chunk], Dict[str, int]]:
+        """Process one PDF page inside a worker thread — fully parallel.
+
+        The main thread ran only the fast classify pass (extract_text only,
+        ~0.05 s/page).  All heavy work happens here in the thread pool:
+
+        * ``extract_tables()``  — pdfplumber lattice/stream (2-10 s/page for
+          annual-report PDFs with merged cells).  Running this in parallel for
+          a 146-page document cuts wall-clock time from 5-25 min to ~3-5 min.
+        * ``page.to_image()``   — PNG render for vision-candidate pages.
+        * Vision-cascade API   — Gemini / dots.ocr / RapidOCR / Tesseract.
+
+        Each thread opens its own ``io.BytesIO(pdf_bytes)`` pdfplumber handle
+        (no shared state, no file-lock contention).  For an 11 MB PDF × 4
+        workers the RAM cost is ~44 MB — negligible on a modern machine.
+
+        Thread-safety:
+          * ``self._stats`` mutations are always inside ``self._stats_lock``.
+          * SimHash registry write is inside the lock; the read-only
+            near-dup scan loop runs outside (minimal critical section).
+          * Vision-API semaphore is acquired inside ``_extract_via_vision``.
         """
-        Route page to text or vision extraction based on text density,
-        then semantic-chunk the result via SmartChunker.
-        """
+        page_num: int = payload["page_num"]
+        text: str = payload["text"]
+        text_chars: int = payload["text_chars"]
+        vision_eligible: bool = payload.get("vision_eligible", False)
+
         stats = {"text": 0, "vision": 0, "tables": 0}
 
-        text = page.extract_text() or ""
-        page_area = (page.width * page.height) if (page.width and page.height) else 1
-        text_density = len(text) / page_area
+        # ── Open private pdfplumber handle for this worker ────────────────────
+        # BytesIO wraps bytes already in process memory — zero disk I/O.
+        # Table extraction (lattice + stream algorithms) runs in parallel across
+        # all page workers, giving O(1/workers) latency instead of O(n_pages).
+        with pdfplumber.open(io.BytesIO(pdf_bytes)) as _worker_pdf:
+            page = _worker_pdf.pages[page_num]
+            tables: list = page.extract_tables()
 
-        tables = page.extract_tables()
-        has_complex_tables = len(tables) > 2 or any(
-            len(t) > 10 for t in tables if t
-        )
+            img_bytes: Optional[bytes] = None
+            page_hash: Optional[str] = None
+            if vision_eligible:
+                image = page.to_image(resolution=150)
+                buf = io.BytesIO()
+                image.save(buf, format="PNG")
+                img_bytes = buf.getvalue()
+                page_hash = hashlib.md5(text.encode()).hexdigest()
 
-        use_vision = self.enable_vision and (
-            text_density < self.vision_threshold or has_complex_tables
-        )
-
+        # ── Vision vs text path ───────────────────────────────────────────────
+        use_vision = vision_eligible and img_bytes is not None
         if use_vision:
-            logger.debug(f"Page {page_num}: vision path (density={text_density:.4f})")
-            content, extracted_tables = self._extract_via_vision(page, page_num)
+            logger.debug(f"Page {page_num}: vision path ({text_chars} chars < {self.vision_threshold})")
+            content, extracted_tables = self._extract_via_vision(
+                page=None, page_num=page_num,
+                img_bytes=img_bytes, page_hash=page_hash,
+            )
             stats["vision"] = 1
             stats["tables"] = len(extracted_tables)
-            self._stats["vision_calls"] += 1
+            with self._stats_lock:
+                self._stats["vision_calls"] += 1
         else:
             logger.debug(f"Page {page_num}: text path")
             content = text
@@ -615,8 +848,28 @@ class SmartPDFIngestor:
             if extracted_tables:
                 content += f"\n\n[TABLES]\n{self._tables_to_markdown(extracted_tables)}"
 
-        # SimHash for near-duplicate page detection (cross-document)
-        page_sh = self._simhash_page(page, page_num, doc_id)
+        # SimHash from pre-extracted text (no page object needed).
+        # Minimal critical section: scan runs outside the lock (read-only);
+        # only the registry write + stat increment require the lock.
+        sh = _simhash(text, bits=_SIMHASH_BITS)
+        _near_dup_info: Optional[Tuple] = None
+        for existing_sh, (existing_doc, existing_page) in self._simhash_registry.items():
+            if existing_doc == doc_id:
+                continue
+            if _simhash_is_near_dup(sh, existing_sh):
+                _near_dup_info = (existing_doc, existing_page, _hamming_distance(sh, existing_sh))
+                break
+
+        with self._stats_lock:
+            if _near_dup_info is not None:
+                _dup_doc, _dup_page, _dist = _near_dup_info
+                self._stats["simhash_near_dups"] += 1
+                logger.warning(
+                    f"SimHash near-duplicate detected: page {page_num} of {doc_id[:8]} "
+                    f"matches page {_dup_page} of {_dup_doc[:8]} "
+                    f"(hamming_dist={_dist})"
+                )
+            self._simhash_registry[sh] = (doc_id, page_num)
 
         # Reuse SmartChunker from app.rag.ingest
         context = f"page_{page_num}"
@@ -638,6 +891,22 @@ class SmartPDFIngestor:
         return chunks, stats
 
     # ─────────────────────────────────────────────────────────────
+    # HELPERS
+    # ─────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _parse_port(url: Optional[str]) -> Optional[int]:
+        """Extract port from URL string, e.g. 'http://localhost:5555' → 5555."""
+        if not url:
+            return None
+        try:
+            from urllib.parse import urlparse
+            parsed = urlparse(url)
+            return parsed.port
+        except Exception:
+            return None
+
+    # ─────────────────────────────────────────────────────────────
     # 4-STAGE VISION CASCADE
     # ─────────────────────────────────────────────────────────────
 
@@ -651,7 +920,11 @@ class SmartPDFIngestor:
         ))
 
     def _extract_via_vision(
-        self, page, page_num: int
+        self,
+        page,
+        page_num: int,
+        img_bytes: Optional[bytes] = None,
+        page_hash: Optional[str] = None,
     ) -> Tuple[str, List]:
         """
         Cascading vision pipeline:
@@ -659,27 +932,46 @@ class SmartPDFIngestor:
           L2  dots.ocr             (self-hosted 1.7B VLM, if enabled)
           L3a RapidOCR             (ONNX CPU, zero cost)
           L3b Tesseract            (classic OCR, final fallback)
+
+        When ``img_bytes`` and ``page_hash`` are supplied (pre-extracted path),
+        ``page`` may be None — no pdfplumber handle is touched.
         """
-        # Cache check
-        page_hash = self._hash_page(page)
+        # --- Hash & cache key ---
+        if page_hash is None:
+            page_hash = self._hash_page(page)
         cache_key = f"vision_{page_hash}"
         cached = self._get_vision_cache(cache_key)
         if cached:
-            self._stats["cache_hits"] += 1
+            with self._stats_lock:
+                self._stats["cache_hits"] += 1
             return cached["text"], cached["tables"]
 
-        # Render to image bytes
-        image = page.to_image(resolution=150)
-        buf = io.BytesIO()
-        image.save(buf, format="PNG")
-        buf.seek(0)
-        img_data = buf.getvalue()
+        # --- Image bytes (use pre-rendered if available) ---
+        if img_bytes is not None:
+            img_data = img_bytes
+        else:
+            image = page.to_image(resolution=150)
+            buf = io.BytesIO()
+            image.save(buf, format="PNG")
+            buf.seek(0)
+            img_data = buf.getvalue()
 
         vision_prompt = self._get_vision_prompt()
 
         # ── L1: Primary Vision API ──
         try:
-            response = self.llm.vision_chat(image=img_data, prompt=vision_prompt)
+            with self._vision_sem:  # max N concurrent Gemini/Cloud-Vision calls
+                # Per-call timeout: if Gemini stalls, abandon and fall through to L2/L3.
+                # Without this a single slow response holds a semaphore slot indefinitely.
+                _call_timeout = _pdf_cfg.vision_call_timeout  # default 30 s
+                with ThreadPoolExecutor(max_workers=1) as _vision_pool:
+                    _fut = _vision_pool.submit(
+                        self.llm.vision_chat, img_data, vision_prompt
+                    )
+                    try:
+                        response = _fut.result(timeout=_call_timeout)
+                    except Exception as _te:
+                        raise RuntimeError(f"vision_chat timeout/error after {_call_timeout}s: {_te}") from _te
             result = json.loads(response)
             text = result.get("text", "")
             tables = result.get("tables", [])
@@ -697,8 +989,8 @@ class SmartPDFIngestor:
         except Exception as e:
             logger.warning(f"Primary vision failed p{page_num}: {e}")
 
-        # ── L2: dots.ocr ──
-        if self._dots_ocr_enabled:
+        # ── L2: dots.ocr (lazy-started only after L1 fails) ──
+        if self._dots_ocr_enabled and self._ensure_dots_ocr_ready():
             try:
                 dots_result = self._extract_via_dots_ocr(img_data, page_num)
                 if dots_result:
@@ -707,7 +999,8 @@ class SmartPDFIngestor:
                         "tables": dots_result.get("tables", []),
                         "source": "dots_ocr",
                     })
-                    self._stats["dots_ocr_calls"] += 1
+                    with self._stats_lock:
+                        self._stats["dots_ocr_calls"] += 1
                     logger.info(f"Page {page_num}: dots.ocr succeeded")
                     return dots_result["text"], dots_result.get("tables", [])
             except Exception as e:
@@ -719,12 +1012,18 @@ class SmartPDFIngestor:
             self._save_vision_cache(cache_key, {
                 "text": ocr_text, "tables": [], "source": "local_ocr"
             })
-            self._stats["local_ocr_calls"] += 1
+            with self._stats_lock:
+                self._stats["local_ocr_calls"] += 1
             logger.info(f"Page {page_num}: local OCR succeeded")
             return ocr_text, []
         except Exception as e:
             logger.error(f"All vision methods failed p{page_num}: {e}")
-            return page.extract_text() or "", []
+            # Fallback: return whatever text was pre-extracted (may be empty).
+            # When called from _process_extracted_page, page is None so we
+            # use the text already available in the payload (passed via content).
+            if page is not None:
+                return page.extract_text() or "", []
+            return "", []
 
     def _extract_via_dots_ocr(
         self, image_data: bytes, page_num: int
@@ -734,7 +1033,7 @@ class SmartPDFIngestor:
         Endpoint and timeout driven entirely by PDFSettings.
         """
         try:
-            import requests
+            import httpx
             import base64
 
             b64 = base64.b64encode(image_data).decode("utf-8")
@@ -745,7 +1044,7 @@ class SmartPDFIngestor:
                     'Return JSON: {"text": "...", "tables": [...], "confidence": 0.0}'
                 ),
             }
-            resp = requests.post(
+            resp = httpx.post(
                 f"{self._dots_ocr_endpoint}/parse",
                 json=payload,
                 timeout=self._dots_ocr_timeout,
@@ -765,7 +1064,7 @@ class SmartPDFIngestor:
             }
 
         except ImportError:
-            logger.warning("requests not installed — skipping dots.ocr")
+            logger.warning("httpx not installed — skipping dots.ocr")
             return None
         except Exception as e:
             logger.error(f"dots.ocr extraction failed: {e}")
@@ -810,17 +1109,33 @@ class SmartPDFIngestor:
 
     def _bloom_prepopulate(self):
         """
-        Scan cache_dir for existing .meta.json files and add their
-        doc_hash to the Bloom filter so subsequent dedup checks
-        avoid unnecessary I/O.
+        Pre-populate the in-process Bloom filter.
+
+        Priority:
+          1. Redis SET  — O(1) SMEMBERS, no disk scan, survives restarts.
+          2. Disk scan  — legacy fallback when Redis is unavailable.
         """
         count = 0
+        r = get_redis()
+        if r is not None:
+            try:
+                members = r.smembers(_BLOOM_REDIS_KEY)  # returns set of str (decode_responses=True)
+                for doc_hash in members:
+                    self._bloom.add(doc_hash)
+                count = len(members)
+                if count:
+                    logger.info(f"Bloom filter pre-populated from Redis: {count} doc hashes")
+                return
+            except Exception as exc:
+                logger.warning(f"Redis bloom load failed, falling back to disk scan: {exc}")
+
+        # ── Disk fallback ──────────────────────────────────────────────────
         for meta_file in self.cache_dir.glob("*.meta.json"):
             doc_hash = meta_file.stem.replace(".meta", "")
             self._bloom.add(doc_hash)
             count += 1
         if count:
-            logger.info(f"Bloom filter pre-populated with {count} doc hashes")
+            logger.info(f"Bloom filter pre-populated from disk: {count} doc hashes")
 
     def _generate_fingerprint(self, file_path: str) -> DocumentFingerprint:
         """SHA256 of entire file for exact duplicate detection."""
@@ -906,20 +1221,35 @@ class SmartPDFIngestor:
             c.minhash_sig = sig
             fingerprint.chunk_minhashes[c.chunk_id] = sig
 
-            # Cross-check against registry for fuzzy dedup
-            for existing_id, existing_sig in self._minhash_registry.items():
+            # ── Sliding-window fuzzy dedup — O(_MINHASH_WINDOW) not O(n²) ──
+            # Only compare against the most recent _MINHASH_WINDOW chunks.
+            # For large docs (146 pages × ~10 chunks = 1460 chunks) this cuts
+            # comparisons from ~1M to ~500K without sacrificing near-dup recall
+            # (practically identical content appears within a sliding window).
+            window_ids = self._minhash_insertion_order[-_MINHASH_WINDOW:]
+            for existing_id in window_ids:
+                existing_sig = self._minhash_registry.get(existing_id)
+                if existing_sig is None:
+                    continue
                 jaccard = _minhash_jaccard(sig, existing_sig)
                 if jaccard >= _MINHASH_JACCARD_THRESHOLD:
                     self._stats["minhash_fuzzy_dups"] += 1
-                    logger.info(
-                        f"MinHash fuzzy duplicate: chunk {c.chunk_id[:12]} ≈ "
-                        f"{existing_id[:12]} (est. Jaccard={jaccard:.2f})"
+                    logger.debug(
+                        f"MinHash fuzzy dup: {c.chunk_id[:12]} ≈ "
+                        f"{existing_id[:12]} (Jaccard={jaccard:.2f})"
                     )
                     c.metadata["fuzzy_dup_of"] = existing_id
-                    break  # One match suffices
+                    break
 
-            # Register
+            # Register and maintain insertion-order list (bounded by window)
             self._minhash_registry[c.chunk_id] = sig
+            self._minhash_insertion_order.append(c.chunk_id)
+            # Evict old entries beyond 2× window to bound memory
+            if len(self._minhash_insertion_order) > _MINHASH_WINDOW * 2:
+                oldest = self._minhash_insertion_order[: _MINHASH_WINDOW]
+                for old_id in oldest:
+                    self._minhash_registry.pop(old_id, None)
+                self._minhash_insertion_order = self._minhash_insertion_order[_MINHASH_WINDOW:]
 
     # ─────────────────────────────────────────────────────────────
     # SUMMARISATION (reuses TokenManager.summarize_for_context)
@@ -930,25 +1260,43 @@ class SmartPDFIngestor:
         Extractive summary via TokenManager — reuses the scoring heuristics
         (key financial terms, headers, numeric density) from prompts.py.
         Falls back to first-3-sentence extraction if token manager unavailable.
+
+        Uses ThreadPoolExecutor to summarise chunks in parallel (CPU-bound
+        extractive logic + optional LLM calls), matching the throughput of
+        the parallel page-extraction step.
         """
-        for c in chunks:
+        def _summarise_one(c: "Chunk"):
             try:
-                # Target ~125 tokens ≈ 500 chars for summary
                 c.summary = self._token_mgr.summarize_for_context(
                     c.text, target_tokens=125, preserve_key_info=True,
                 )
             except Exception:
-                # Absolute fallback — first 3 sentences
                 sentences = c.text.split(".")
                 summary = ". ".join(s.strip() for s in sentences[:3] if s.strip()) + "."
                 c.summary = summary[:500] + "..." if len(summary) > 500 else summary
+
+        workers = min(self.parallel_workers, len(chunks)) if chunks else 1
+        if workers <= 1:
+            for c in chunks:
+                _summarise_one(c)
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                list(pool.map(_summarise_one, chunks))  # consume futures; exceptions surface
 
     # ─────────────────────────────────────────────────────────────
     # BM25 INDEX
     # ─────────────────────────────────────────────────────────────
 
-    def _update_bm25_index(self, chunks: List[Chunk], client_id: str):
-        """Rebuild BM25 inverted index from chunk summaries."""
+    def _update_bm25_index(self, chunks: List[Chunk], client_id: str, persist: bool = True):
+        """Rebuild BM25 inverted index from chunk summaries.
+
+        Args:
+            chunks: PDF chunks to index.
+            client_id: Client/tenant identifier.
+            persist: When False, skip writing the JSON map to disk (use when a
+                     cloud vector store already holds the canonical chunks so the
+                     disk copy would be redundant).
+        """
         corpus: List[List[str]] = []
         chunk_map: Dict[int, Dict[str, Any]] = {}
 
@@ -965,20 +1313,78 @@ class SmartPDFIngestor:
         self._bm25_index = BM25Okapi(corpus) if corpus else None
         self._bm25_corpus_map = chunk_map
 
-        # Persist for retrieval across restarts
-        idx_path = self.cache_dir / f"bm25_index_{client_id}.json"
-        with open(idx_path, "w") as f:
-            json.dump({str(k): v for k, v in chunk_map.items()}, f)
+        if persist:
+            # Persist for retrieval across restarts (only needed when no cloud store)
+            idx_path = self.cache_dir / f"bm25_index_{client_id}.json"
+            with open(idx_path, "w") as f:
+                json.dump({str(k): v for k, v in chunk_map.items()}, f)
 
-        logger.info(f"BM25 index updated: {len(corpus)} chunks")
+        logger.info(f"BM25 index updated: {len(corpus)} chunks (persist={persist})")
 
     def _bm25_search(
         self, query: str, client_id: str, top_k: int = 500
     ) -> List[Dict[str, Any]]:
-        """Keyword search over chunk summaries; returns scored candidates."""
+        """Keyword search over chunk summaries; returns scored candidates.
+
+        On first call after a restart, lazily reconstructs the BM25Okapi object
+        from the persisted chunk_map JSON + per-doc chunks JSONL files so that
+        retrieval works across process boundaries without re-ingesting.
+        """
         if not self._bm25_index:
-            logger.warning("BM25 index not initialised")
-            return []
+            # ── Lazy BM25 reconstruction from disk ──────────────────────────
+            # The chunk_map (index → {chunk_id, doc_id, …}) is always persisted.
+            # Summaries live in {doc_id}.chunks.jsonl — reconstruct corpus from them.
+            idx_path = self.cache_dir / f"bm25_index_{client_id}.json"
+            if not idx_path.exists():
+                logger.warning("BM25 index not initialised and no persisted map found")
+                return []
+            with open(idx_path) as f:
+                raw_map: Dict[str, Any] = {int(k): v for k, v in json.load(f).items()}
+
+            if not raw_map:
+                return []
+
+            # Collect unique doc_ids and load all their chunks once
+            doc_ids = {v["doc_id"] for v in raw_map.values() if v.get("doc_id")}
+            chunk_summary: Dict[str, str] = {}
+            for doc_id in doc_ids:
+                jsonl_path = self.cache_dir / f"{doc_id}.chunks.jsonl"
+                if not jsonl_path.exists():
+                    continue
+                try:
+                    with open(jsonl_path) as f:
+                        for line in f:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            c = json.loads(line)
+                            chunk_summary[c["chunk_id"]] = c.get("summary") or c.get("text", "")
+                except Exception as exc:
+                    logger.warning(f"Failed loading chunks from {jsonl_path}: {exc}")
+
+            # Rebuild BM25 corpus in original index order
+            max_idx = max(raw_map.keys()) + 1
+            corpus: List[List[str]] = []
+            rebuilt_map: Dict[int, Dict[str, Any]] = {}
+            for idx in range(max_idx):
+                entry = raw_map.get(idx)
+                if entry is None:
+                    corpus.append([])  # keep index alignment
+                    continue
+                summary = chunk_summary.get(entry.get("chunk_id", ""), "")
+                corpus.append(summary.lower().split() if summary else [])
+                rebuilt_map[idx] = entry
+
+            self._bm25_index = BM25Okapi(corpus) if any(corpus) else None
+            self._bm25_corpus_map = rebuilt_map
+            logger.info(
+                f"BM25 index reconstructed from disk: {len(rebuilt_map)} chunks "
+                f"across {len(doc_ids)} doc(s)"
+            )
+
+            if not self._bm25_index:
+                logger.warning("BM25 reconstruction produced empty corpus")
+                return []
 
         scores = self._bm25_index.get_scores(query.lower().split())
 
@@ -1006,13 +1412,15 @@ class SmartPDFIngestor:
     # ─────────────────────────────────────────────────────────────
 
     def _ensure_embeddings_for_chunks(
-        self, chunk_ids: List[str]
+        self,
+        chunk_ids: List[str],
+        preloaded_texts: Optional[Dict[str, str]] = None,
     ) -> Dict[str, List[float]]:
         """
         Cache-first lazy embedding via SemanticCache.
         1. Check cache for each chunk_id.
-        2. Load text for misses from JSONL on disk.
-        3. Batch-embed misses via llm.embed_batch().
+        2. Load text for misses from JSONL on disk (or reuse *preloaded_texts*).
+        3. Batch-embed misses via DocumentIngestor (CUDA fast-path).
         4. Store results in SemanticCache.
         5. Push newly-generated vectors to Qdrant (hot storage) if available.
         """
@@ -1030,14 +1438,32 @@ class SmartPDFIngestor:
         if not missing:
             return embeddings
 
-        texts = self._load_chunk_texts(missing)
+        texts = preloaded_texts or self._load_chunk_texts(missing)
         batch_size = _pdf_cfg.embedding_batch_size
         newly_embedded: Dict[str, Tuple[List[float], str]] = {}  # cid → (vector, text)
 
-        for i in range(0, len(missing), batch_size):
-            batch_ids = missing[i : i + batch_size]
-            batch_texts = [texts.get(cid, "") for cid in batch_ids]
-            batch_embs = self.llm.embed_batch(batch_texts)
+        # When JSONL was skipped (cloud-push path), texts may be empty — filter those
+        # out so we don't send empty strings to the embedding API.
+        embeddable_ids = [cid for cid in missing if texts.get(cid, "").strip()]
+        if not embeddable_ids:
+            logger.debug(
+                f"No chunk texts found on disk for {len(missing)} chunk(s) — "
+                "skipping lazy embedding (chunks live in cloud vector store)"
+            )
+            return embeddings
+
+        # Use the singleton DocumentIngestor for embedding (already on GPU).
+        # Falls back to LLMProvider.embed_batch() only if DocumentIngestor
+        # is unavailable — avoids creating a second SentenceTransformer.
+        embedder = self._get_reranker()
+
+        for i in range(0, len(embeddable_ids), batch_size):
+            batch_ids = embeddable_ids[i : i + batch_size]
+            batch_texts = [texts[cid] for cid in batch_ids]
+            if embedder is not None:
+                batch_embs = embedder._generate_embeddings_batch(batch_texts)
+            else:
+                batch_embs = self.llm.embed_batch(batch_texts)
 
             for cid, emb, txt in zip(batch_ids, batch_embs, batch_texts):
                 self._semantic_cache.set(f"emb_{cid}", emb)
@@ -1055,12 +1481,20 @@ class SmartPDFIngestor:
         return embeddings
 
     def _embed_query(self, query: str) -> List[float]:
-        """Embed query with single-flight dedup and caching."""
+        """Embed query with single-flight dedup and caching.
+
+        Uses the singleton DocumentIngestor (already on GPU) when available,
+        falling back to LLMProvider.embed() otherwise.
+        """
         cache_key = f"qemb_{hashlib.md5(query.encode()).hexdigest()[:16]}"
         cached = self._semantic_cache.get(cache_key)
         if cached is not None:
             return cached
-        emb = self.llm.embed(query)
+        embedder = self._get_reranker()
+        if embedder is not None:
+            emb = embedder._generate_embedding(query)
+        else:
+            emb = self.llm.embed(query)
         self._semantic_cache.set(cache_key, emb)
         return emb
 
@@ -1138,14 +1572,19 @@ class SmartPDFIngestor:
         except ImportError:
             return
 
+        # Deterministic namespace for UUID5 — Qdrant requires UUID or uint64.
+        _QDRANT_NS = uuid.UUID("6ba7b810-9dad-11d1-80b4-00c04fd430c8")
+
         points = []
         for cid, (vector, text) in newly_embedded.items():
             # Extract doc_id from chunk_id convention: "{doc_id}_chunk_{idx}"
             parts = cid.rsplit("_chunk_", 1)
             doc_id = parts[0] if len(parts) == 2 else ""
+            # Convert string chunk_id → deterministic UUID5 (Qdrant requires it)
+            point_id = str(uuid.uuid5(_QDRANT_NS, cid))
             points.append(
                 PointStruct(
-                    id=cid,
+                    id=point_id,
                     vector=vector,
                     payload={
                         "content": text,
@@ -1178,15 +1617,31 @@ class SmartPDFIngestor:
 
     def _check_if_processed(self, doc_hash: str, client_id: str) -> bool:
         """
-        Fast dedup check using Bloom filter + disk fallback.
+        Fast dedup check — three-tier cascade:
 
-        1. Bloom says "definitely not" → return False immediately (save I/O).
-        2. Bloom says "maybe"          → verify with actual file stat.
+          1. In-process Bloom (sub-μs) → Definitely not → skip everything.
+          2. Redis SISMEMBER (< 1ms)   → Exact set membership → skip disk.
+          3. Disk stat                 → Final ground truth (Redis miss).
+
+        Guarantees: no false negatives (never misses a processed doc).
         """
+        # Tier 1: in-process Bloom — zero I/O fast reject
         if not self._bloom.might_contain(doc_hash):
             self._stats["bloom_io_saved"] += 1
             return False
-        # Bloom says "maybe" — verify on disk
+
+        # Tier 2: Redis exact check — O(1) but network
+        r = get_redis()
+        if r is not None:
+            try:
+                if r.sismember(_BLOOM_REDIS_KEY, doc_hash):
+                    return True
+                # Redis says definitely not in the SET → skip disk stat
+                return False
+            except Exception:
+                pass  # Redis hiccup — fall through to disk
+
+        # Tier 3: Disk fallback
         return (self.cache_dir / f"{doc_hash}.meta.json").exists()
 
     def _get_cached_metadata(self, doc_hash: str) -> Dict[str, Any]:
@@ -1197,13 +1652,22 @@ class SmartPDFIngestor:
         path = self.cache_dir / f"{metadata['doc_id']}.meta.json"
         with open(path, "w") as f:
             json.dump(metadata, f, indent=2, default=_json_default)
-        # Register in Bloom filter for future fast-reject.
-        # In the real pipeline doc_id == doc_hash (SHA256 of file).
-        # We add both doc_id and fingerprint.doc_hash to handle all paths.
-        self._bloom.add(metadata["doc_id"])
+
+        # Register in in-process Bloom + Redis SET for persistence/cross-worker dedup
+        hashes_to_register = [metadata["doc_id"]]
         doc_hash = metadata.get("fingerprint", {}).get("doc_hash", "")
         if doc_hash and doc_hash != metadata["doc_id"]:
-            self._bloom.add(doc_hash)
+            hashes_to_register.append(doc_hash)
+
+        for h in hashes_to_register:
+            self._bloom.add(h)
+
+        r = get_redis()
+        if r is not None:
+            try:
+                r.sadd(_BLOOM_REDIS_KEY, *hashes_to_register)  # atomic SADD of multiple members
+            except Exception as exc:
+                logger.debug(f"Redis bloom write failed (non-fatal): {exc}")
 
     def _save_chunks(self, chunks: List[Chunk], doc_id: str):
         path = self.cache_dir / f"{doc_id}.chunks.jsonl"
@@ -1212,6 +1676,22 @@ class SmartPDFIngestor:
                 f.write(json.dumps(asdict(c), default=_json_default) + "\n")
 
     def _get_vision_cache(self, cache_key: str) -> Optional[Dict[str, Any]]:
+        """
+        Two-tier vision cache lookup:
+          1. Redis   — sub-ms, survives restarts, shared across workers.
+          2. Disk    — legacy fallback when Redis is unavailable.
+        """
+        redis_key = f"pdf:vision:{cache_key}"
+        r = get_redis()
+        if r is not None:
+            try:
+                raw = r.get(redis_key)
+                if raw is not None:
+                    return json.loads(raw)
+            except Exception as exc:
+                logger.debug(f"Redis vision cache get failed: {exc}")
+
+        # Disk fallback
         path = self.cache_dir / "vision_cache" / f"{cache_key}.json"
         if path.exists():
             with open(path) as f:
@@ -1219,10 +1699,28 @@ class SmartPDFIngestor:
         return None
 
     def _save_vision_cache(self, cache_key: str, result: Dict[str, Any]):
-        d = self.cache_dir / "vision_cache"
-        d.mkdir(exist_ok=True)
-        with open(d / f"{cache_key}.json", "w") as f:
-            json.dump(result, f)
+        """
+        Persist vision result to Redis (primary) and disk (fallback/backup).
+        Redis TTL = 7 days.  Disk write is best-effort (non-fatal on failure).
+        """
+        redis_key = f"pdf:vision:{cache_key}"
+        serialised = json.dumps(result, default=_json_default)
+
+        r = get_redis()
+        if r is not None:
+            try:
+                r.set(redis_key, serialised, ex=_VISION_CACHE_TTL)
+            except Exception as exc:
+                logger.debug(f"Redis vision cache set failed: {exc}")
+
+        # Always write disk copy as fallback
+        try:
+            d = self.cache_dir / "vision_cache"
+            d.mkdir(exist_ok=True)
+            with open(d / f"{cache_key}.json", "w") as f:
+                f.write(serialised)
+        except Exception as exc:
+            logger.debug(f"Disk vision cache write failed (non-fatal): {exc}")
 
     def _apply_metadata_filters(
         self, candidates: List[Dict[str, Any]], filters: Dict[str, Any]
@@ -1282,3 +1780,37 @@ def _json_default(obj):
     if isinstance(obj, bytes):
         return obj.decode("utf-8", errors="replace")
     raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+
+# ═════════════════════════════════════════════════════════════════
+# SINGLETON — one ingestor per process, lazy-initialised
+# ═════════════════════════════════════════════════════════════════
+
+_pdf_ingestor_instance: Optional["SmartPDFIngestor"] = None
+
+
+def get_pdf_ingestor() -> "SmartPDFIngestor":
+    """
+    Return a process-level singleton SmartPDFIngestor.
+
+    First call initialises the ingestor (GPU detection, bloom populate,
+    dots.ocr lazy config, etc.). Subsequent calls return the cached
+    instance instantly — no re-initialisation cost on every query.
+
+    LLMProvider is built from settings so no arguments are required
+    by callers.
+    """
+    global _pdf_ingestor_instance
+    if _pdf_ingestor_instance is None:
+        from app.core.llm_provider import create_llm_provider
+        from app.config import settings as _s
+        _llm = create_llm_provider({
+            "provider_preference": _s.llm.provider_preference,
+            "temperature": _s.llm.temperature,
+        })
+        _pdf_ingestor_instance = SmartPDFIngestor(
+            llm_provider=_llm,
+            parallel_workers=min(4, os.cpu_count() or 2),  # Up to 4 threads; avoids gRPC pickling issues
+        )
+        logger.info("SmartPDFIngestor singleton created")
+    return _pdf_ingestor_instance

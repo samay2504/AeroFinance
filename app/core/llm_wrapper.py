@@ -1439,7 +1439,6 @@ class HotPromptCache:
                     # Jina AI (free tier: 1M tokens/month)
                     jina_key = os.getenv("JINA_API_KEY")
                     if jina_key:
-                        import requests
                         self._embedding_model = ("jina", jina_key)
                         self._embedding_dim = 1024
                         logger.info("L3 cache using Jina embeddings")
@@ -1475,8 +1474,8 @@ class HotPromptCache:
         
         try:
             if provider == "jina":
-                import requests
-                response = requests.post(
+                import httpx
+                response = httpx.post(
                     "https://api.jina.ai/v1/embeddings",
                     headers={"Authorization": f"Bearer {instance}"},
                     json={"model": "jina-embeddings-v3", "input": [text[:2000]], "task": "text-matching"},
@@ -1639,18 +1638,11 @@ def get_hot_prompt_cache() -> HotPromptCache:
         similarity = float(os.getenv("HOT_CACHE_SIMILARITY", "0.92"))
         embedding_provider = os.getenv("HOT_CACHE_EMBEDDING_PROVIDER", "auto")
         
-        # Try Redis for L2 (graceful fallback)
-        redis_client = None
-        redis_url = os.getenv("REDIS_URL")
-        if redis_url:
-            try:
-                import redis
-                redis_client = redis.from_url(redis_url, socket_timeout=2, socket_connect_timeout=2)
-                redis_client.ping()
-                logger.info("HotPromptCache L2 (Redis) connected")
-            except Exception as e:
-                logger.info(f"HotPromptCache L2 (Redis) unavailable: {e}")
-                redis_client = None
+        # Reuse process-level Redis/Valkey singleton (no duplicate connections)
+        from app.core.redis_client import get_redis, get_backend_type
+        redis_client = get_redis()
+        if redis_client:
+            logger.info(f"HotPromptCache L2 ({get_backend_type()}) connected via singleton")
         
         _hot_prompt_cache = HotPromptCache(
             max_entries=max_entries,
@@ -1696,16 +1688,9 @@ class LLMWrapper:
         self._cache_enabled = config.get("cache_enabled", True)
         self._redis_client = None
         
-        try:
-            if config.get("redis_enabled"):
-                import redis
-                # Read from config, then env, then fallback
-                redis_url = config.get("redis_url") or os.getenv("REDIS_URL", "redis://localhost:6379/0")
-                self._redis_client = redis.from_url(redis_url)
-                self._redis_client.ping()
-                logger.info("Redis cache connected")
-        except Exception as e:
-            logger.warning(f"Redis unavailable, using in-memory cache: {e}")
+        # Reuse process-level Redis/Valkey singleton — avoids duplicate pools
+        from app.core.redis_client import get_redis
+        self._redis_client = get_redis() if config.get("redis_enabled", True) else None
 
     def _should_trigger_fallback(self, error_str: str) -> bool:
         """Return True if error indicates provider should be rotated."""
@@ -2204,170 +2189,20 @@ class LLMWrapper:
             return f"Error: {str(e)}"
 
 
+# ─── PandasAI adapter removed ─────────────────────────────────────────────────
+# PandasAI has been deprecated in favour of Google langextract + deterministic
+# sandbox arithmetic (see app/agents/data_analyst.py :: _try_langextract).
+# The stub below is kept so that any cached .pyc that still references the
+# factory name does not raise an AttributeError at import time.
 
-# Try to import PandasAI's base LLM class for proper inheritance
-_PandasAI_LLM_Base = None
-try:
-    from pandasai.llm.base import LLM as _PandasAI_LLM_Base
-except ImportError:
-    pass
+def create_pandasai_llm_adapter(*args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+    """Deprecated: PandasAI removed. Use _try_langextract in data_analyst.py."""
+    raise NotImplementedError(
+        "PandasAI has been removed. "
+        "Schema-driven extraction is now handled by _try_langextract "
+        "in app/agents/data_analyst.py using Google langextract."
+    )
 
-
-class PandasAILLMAdapter(_PandasAI_LLM_Base if _PandasAI_LLM_Base else object):
-    """
-    Adapter class to make LLMWrapper compatible with PandasAI 3.0.
-    
-    PandasAI 3.0 expects an LLM object that inherits from pandasai.llm.base.LLM.
-    This adapter wraps our multi-provider LLMWrapper to work with PandasAI.
-    """
-    
-    def __init__(self, llm_wrapper: LLMWrapper):
-        """
-        Initialize adapter with existing LLMWrapper.
-        
-        Args:
-            llm_wrapper: The existing LLMWrapper instance
-        """
-        # Initialize base class if it exists
-        if _PandasAI_LLM_Base:
-            super().__init__()
-        self._wrapper = llm_wrapper
-        self._model = llm_wrapper.provider_name or "gemini"
-        
-    @property
-    def model(self) -> str:
-        """Return model name for PandasAI."""
-        return self._model
-    
-    @property
-    def type(self) -> str:
-        """Return LLM type for PandasAI."""
-        return "custom"
-    
-    def __call__(self, instruction: str, context: str = "", suffix: str = "") -> str:
-        """PandasAI 3.0 may call the LLM directly."""
-        return self.call(instruction, context, suffix)
-        
-    def call(self, instruction: str, context: str = "", suffix: str = "") -> str:
-        """
-        PandasAI calls this method for LLM interaction.
-        
-        Args:
-            instruction: The instruction/prompt
-            context: Optional context
-            suffix: Optional suffix
-            
-        Returns:
-            LLM response as string
-        """
-        # Combine instruction with context
-        full_prompt = instruction
-        if context:
-            full_prompt = f"{context}\n\n{instruction}"
-        if suffix:
-            full_prompt = f"{full_prompt}\n\n{suffix}"
-            
-        try:
-            response = self._wrapper.invoke(full_prompt, use_cache=True)
-            return str(response)
-        except Exception as e:
-            logger.warning(f"PandasAI LLM call failed: {e}")
-            return f"Error: {e}"
-    
-    def complete(self, prompt: str) -> str:
-        """
-        Simple completion method for PandasAI 3.0.
-        
-        Args:
-            prompt: The prompt to complete
-            
-        Returns:
-            LLM completion as string
-        """
-        try:
-            response = self._wrapper.invoke(prompt, use_cache=False)
-            return str(response)
-        except Exception as e:
-            logger.warning(f"PandasAI complete failed: {e}")
-            return f"Error: {e}"
-    
-    def chat_completion(self, messages: list) -> str:
-        """
-        Handle chat completion format used by some PandasAI versions.
-        
-        Args:
-            messages: List of message dicts with 'role' and 'content'
-            
-        Returns:
-            LLM response as string
-        """
-        # Flatten messages into a prompt
-        prompt_parts = []
-        for msg in messages:
-            role = msg.get("role", "user")
-            content = msg.get("content", "")
-            if role == "system":
-                prompt_parts.insert(0, content)
-            else:
-                prompt_parts.append(content)
-        
-        full_prompt = "\n\n".join(prompt_parts)
-        
-        try:
-            response = self._wrapper.invoke(full_prompt, use_cache=True)
-            return str(response)
-        except Exception as e:
-            logger.warning(f"PandasAI chat completion failed: {e}")
-            return f"Error: {e}"
-    
-    def generate_code(self, instruction: str, context: str = "") -> str:
-        """
-        Generate Python code - used by PandasAI for code generation.
-        
-        Args:
-            instruction: Code generation instruction
-            context: Data context
-            
-        Returns:
-            Generated Python code
-        """
-        prompt = f"""Generate Python code to answer this question about the data.
-        
-DATA CONTEXT:
-{context}
-
-INSTRUCTION: {instruction}
-
-Return ONLY valid Python code that works with a pandas DataFrame named 'df'.
-The code should print or return the final result."""
-
-        try:
-            response = self._wrapper.invoke(prompt, use_cache=False)
-            # Extract code from response if wrapped in markdown
-            code = str(response)
-            if "```python" in code:
-                code = code.split("```python")[1].split("```")[0]
-            elif "```" in code:
-                code = code.split("```")[1].split("```")[0]
-            return code.strip()
-        except Exception as e:
-            logger.warning(f"PandasAI code generation failed: {e}")
-            return f"# Error: {e}"
-
-
-def create_pandasai_llm_adapter(llm_wrapper: LLMWrapper = None) -> PandasAILLMAdapter:
-    """
-    Create a PandasAI-compatible LLM adapter.
-    
-    Args:
-        llm_wrapper: Optional LLMWrapper instance. If None, uses singleton.
-        
-    Returns:
-        PandasAILLMAdapter instance
-    """
-    if llm_wrapper is None:
-        llm_wrapper = get_llm_wrapper()
-    return PandasAILLMAdapter(llm_wrapper)
 
 
 # Singleton instance
@@ -2396,8 +2231,7 @@ def get_llm_wrapper(config: Optional[Dict[str, Any]] = None) -> LLMWrapper:
 __all__ = [
     "LLMWrapper", 
     "get_llm_wrapper", 
-    "PandasAILLMAdapter", 
-    "create_pandasai_llm_adapter",
+    "create_pandasai_llm_adapter",  # stub — raises NotImplementedError; kept for import compat
     # Structured logging
     "log_interaction",
     "build_provenance",

@@ -42,9 +42,11 @@ try:
 except ImportError:
     pass
 
-DATA_DIR = PROJECT_ROOT / "data"
-UPLOADS_DIR = DATA_DIR / "uploads"
-CACHE_DIR = DATA_DIR / "dataframe_cache"
+# Derive data directories from env with sensible fallbacks
+# DATA_DIR is the BASE data directory — not uploads or cache
+DATA_DIR = Path(os.getenv("DATA_DIR", str(PROJECT_ROOT / "data")))
+UPLOADS_DIR = Path(os.getenv("FILE_STORE_PATH", str(DATA_DIR / "uploads")))
+CACHE_DIR = Path(os.getenv("STORAGE_DATAFRAME_CACHE_PATH", str(DATA_DIR / "dataframe_cache")))
 
 # Ensure directories exist
 for d in [DATA_DIR, UPLOADS_DIR, CACHE_DIR]:
@@ -487,7 +489,13 @@ class PDFSettings(BaseSettings):
         default=True, description="Enable vision cascade for scanned/image PDFs"
     )
     vision_threshold: float = Field(
-        default=0.05, description="Text density below this triggers vision extraction"
+        default=50, description=(
+            "Minimum characters extracted by pdfplumber for a page to be "
+            "considered text-extractable. Pages with fewer chars are routed "
+            "to the vision cascade (Gemini → VLM → RapidOCR → Tesseract). "
+            "Set lower (e.g. 20) to be more aggressive with text extraction, "
+            "higher (e.g. 200) to send more pages through vision."
+        )
     )
     max_chunk_tokens: int = Field(
         default=1024, description="Max tokens per semantic chunk"
@@ -513,6 +521,24 @@ class PDFSettings(BaseSettings):
     )
     dots_ocr_min_confidence: float = Field(
         default=0.6, description="Minimum confidence to accept dots.ocr results"
+    )
+    dots_ocr_auto_docker: bool = Field(
+        default=False,
+        description="Auto-pull and manage dots.ocr Docker container. "
+                    "Detects GPU VRAM and tunes memory params to avoid OOM. "
+                    "Set via PDF_DOTS_OCR_AUTO_DOCKER.",
+    )
+    dots_ocr_docker_image: str = Field(
+        default="vllm/vllm-openai:latest",
+        description="Docker image for self-hosted VLM. "
+                    "Set via PDF_DOTS_OCR_DOCKER_IMAGE.",
+    )
+    dots_ocr_model: str = Field(
+        default="Qwen/Qwen2.5-VL-3B-Instruct",
+        description="HuggingFace model ID for self-hosted VLM OCR. "
+                    "Default is ungated (no HF token needed). "
+                    "Alternative: rednote-hilab/dots.ocr-1.5 (gated, needs HF_TOKEN). "
+                    "Set via PDF_DOTS_OCR_MODEL.",
     )
 
     # Google Vision + Gemini (L1 of vision cascade)
@@ -553,6 +579,34 @@ class PDFSettings(BaseSettings):
     rerank_model: str = Field(
         default="auto", description="Rerank strategy: auto, jina, cohere, cross_encoder, none"
     )
+    vision_concurrency: int = Field(
+        default=3,
+        description=(
+            "Maximum simultaneous cloud-vision API calls (Gemini / Cloud Vision). "
+            "Prevents 429 rate-limit cascades on large multi-page PDFs. "
+            "Tune to your API tier: free=2, standard=4, enterprise=8. "
+            "Set via PDF_VISION_CONCURRENCY."
+        ),
+    )
+    max_vision_pages: int = Field(
+        default=20,
+        description=(
+            "Maximum pages to send through the cloud-vision cascade (Gemini/VLM). "
+            "Pages beyond this cap fall through to local OCR only, regardless of text sparseness. "
+            "Prevents runaway API costs and latency on large scanned documents (e.g. 146-page annual reports). "
+            "Sorted by text sparseness — least-text pages are prioritised for vision. "
+            "Set via PDF_MAX_VISION_PAGES."
+        ),
+    )
+    vision_call_timeout: int = Field(
+        default=30,
+        description=(
+            "Per-call timeout in seconds for cloud vision API calls (Gemini / Cloud Vision). "
+            "A single stuck call beyond this limit is abandoned and the cascade falls to L2/L3. "
+            "Prevents one slow Gemini response from blocking a worker thread indefinitely. "
+            "Set via PDF_VISION_CALL_TIMEOUT."
+        ),
+    )
 
     model_config = {
         "env_prefix": "PDF_",
@@ -584,6 +638,24 @@ class Settings(BaseSettings):
     """Main application settings."""
 
     app_name: str = Field(default="AI-CA")
+    app_description: str = Field(
+        default="Agentic AI Chartered Accountant RAG System",
+        description="FastAPI app description for OpenAPI docs",
+    )
+    app_version: str = Field(default="1.0.0", description="API version string")
+    app_company: str = Field(default="Valuenaire", description="Company name for root endpoint")
+    root_path: str = Field(
+        default="/ai-ca",
+        description="ASGI root_path — set when behind a reverse proxy",
+    )
+    api_prefix: str = Field(
+        default="/v1/api",
+        description="URL prefix for all versioned API routes",
+    )
+    enable_swagger: bool = Field(
+        default=True,
+        description="Expose /docs and /redoc OpenAPI UIs",
+    )
     debug: Optional[bool] = Field(default=None)
     host: Optional[str] = Field(default=None)
     port: Optional[int] = Field(default=None)
@@ -609,6 +681,13 @@ class Settings(BaseSettings):
     compression: CompressionSettings = Field(default_factory=CompressionSettings)
     pdf: PDFSettings = Field(default_factory=PDFSettings)
     
+    # CORS
+    enable_cors: bool = Field(default=True, description="Enable CORS middleware")
+    cors_origins: List[str] = Field(
+        default=["*"],
+        description="Allowed CORS origins. Set CORS_ORIGINS in .env as JSON list.",
+    )
+
     # Concurrency / Performance
     single_flight_timeout: float = Field(
         default=120.0, 
@@ -635,9 +714,52 @@ class Settings(BaseSettings):
                 self.debug = str(debug_value).strip().lower() in ("1", "true", "yes", "on")
         if self.env is None:
             self.env = _first_env("FASTAPI_ENV")
+        # CORS origins from env (JSON list string)
+        cors_raw = _first_env("CORS_ORIGINS")
+        if cors_raw and self.cors_origins == ["*"]:
+            import json as _json
+            try:
+                parsed = _json.loads(cors_raw)
+                if isinstance(parsed, list):
+                    self.cors_origins = parsed
+            except (_json.JSONDecodeError, TypeError):
+                # Comma-separated fallback
+                self.cors_origins = [o.strip() for o in cors_raw.split(",") if o.strip()]
+        enable_cors_raw = _first_env("ENABLE_CORS")
+        if enable_cors_raw is not None:
+            self.enable_cors = str(enable_cors_raw).strip().lower() in ("1", "true", "yes", "on")
         if self.workers is None:
             workers_value = _first_env("FASTAPI_WORKERS")
             self.workers = int(workers_value) if workers_value else None
+        # ENABLE_SWAGGER from env
+        swagger_raw = _first_env("ENABLE_SWAGGER")
+        if swagger_raw is not None:
+            self.enable_swagger = str(swagger_raw).strip().lower() in ("1", "true", "yes", "on")
+        # Root path / API prefix overrides
+        rp = _first_env("FASTAPI_ROOT_PATH")
+        if rp is not None:
+            self.root_path = rp
+        ap = _first_env("FASTAPI_API_PREFIX")
+        if ap is not None:
+            self.api_prefix = ap
+
+        # ── Re-instantiate nested BaseSettings models ──
+        # pydantic-settings env_nested_delimiter="__" shadows nested models'
+        # own env_prefix, so SANDBOX_TIMEOUT_SECONDS etc. aren't read.
+        # Fix: re-instantiate each nested model so it reads its own env vars.
+        from pydantic_settings import BaseSettings as _BS
+        for field_name, field_info in self.model_fields.items():
+            field_type = field_info.annotation
+            if (
+                isinstance(field_type, type)
+                and issubclass(field_type, _BS)
+                and field_type is not type(self)
+            ):
+                try:
+                    setattr(self, field_name, field_type())
+                except Exception:
+                    pass  # Keep default_factory value if env parsing fails
+
         return self
 
 
@@ -680,17 +802,29 @@ except Exception as e:
         pdf=PDFSettings.model_construct(),
     )
 
-# Apply YAML overlay if present
+# Apply YAML overlay if present — env vars ALWAYS take precedence over YAML
 yaml_config = load_yaml_config()
 if yaml_config:
     for key, value in yaml_config.items():
-        if hasattr(settings, key):
-            # Handle nested settings (dicts)
-            if isinstance(value, dict) and hasattr(getattr(settings, key), "model_dump"):
-                sub_settings = getattr(settings, key)
-                for sub_key, sub_value in value.items():
-                    if hasattr(sub_settings, sub_key) and sub_value is not None:
-                        setattr(sub_settings, sub_key, sub_value)
-            # Handle scalar values (e.g. debug, port, single_flight_timeout)
-            elif value is not None:
-                setattr(settings, key, value)
+        if not hasattr(settings, key) or value is None:
+            continue
+        # Handle nested settings (dicts) — skip keys that have a live env var
+        if isinstance(value, dict) and hasattr(getattr(settings, key), "model_dump"):
+            sub_settings = getattr(settings, key)
+            env_prefix = ""
+            if hasattr(sub_settings, "model_config") and isinstance(sub_settings.model_config, dict):
+                env_prefix = sub_settings.model_config.get("env_prefix", "")
+            for sub_key, sub_value in value.items():
+                if sub_value is None or not hasattr(sub_settings, sub_key):
+                    continue
+                # If the env var for this field is set, env wins — skip YAML
+                env_var = f"{env_prefix}{sub_key}".upper()
+                if os.getenv(env_var) is not None:
+                    continue
+                setattr(sub_settings, sub_key, sub_value)
+        # Handle scalar values — skip if FASTAPI_{key} env var is set
+        elif value is not None:
+            env_var = f"FASTAPI_{key}".upper()
+            if os.getenv(env_var) is not None:
+                continue
+            setattr(settings, key, value)

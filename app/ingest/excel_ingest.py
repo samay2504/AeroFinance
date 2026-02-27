@@ -4,6 +4,7 @@ Excel Ingest Engine - Robust multi-sheet XLSX/CSV ingestion with:
 - Multi-sheet ingestion option
 - Column normalization and type coercion
 - Period column detection (FY21, 9MFY22, Q1FY23, etc.)
+- calamine engine fast-path for .xlsx (Rust-based, 3-5x faster than openpyxl)
 """
 
 import logging
@@ -15,6 +16,19 @@ import numpy as np
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+# ── Fast Excel engine — calamine (Rust) when available ─────────────────────
+# python-calamine is a Rust-based reader that is 3-5x faster than openpyxl
+# for .xlsx files.  We detect it once at import time and pass it via
+# _EXCEL_ENGINE_KWARGS to every pd.read_excel() call.
+_EXCEL_ENGINE_KWARGS: Dict[str, str] = {}
+try:
+    import importlib
+    if importlib.util.find_spec("python_calamine") or importlib.util.find_spec("calamine"):
+        _EXCEL_ENGINE_KWARGS = {"engine": "calamine"}
+        logger.info("Excel fast-path: calamine engine available")
+except Exception:
+    pass
 
 
 class ExcelIngestor:
@@ -230,7 +244,7 @@ class ExcelIngestor:
                     }
                 )
             else:
-                xl = pd.ExcelFile(io.BytesIO(file_content))
+                xl = pd.ExcelFile(io.BytesIO(file_content), **_EXCEL_ENGINE_KWARGS)
                 for sheet_name in xl.sheet_names:
                     try:
                         df = xl.parse(sheet_name, nrows=500)  # Read sample for scoring
@@ -286,7 +300,7 @@ class ExcelIngestor:
                     }
                 )
             else:
-                xl = pd.ExcelFile(file_path)
+                xl = pd.ExcelFile(file_path, **_EXCEL_ENGINE_KWARGS)
                 for sheet_name in xl.sheet_names:
                     try:
                         df = xl.parse(sheet_name, nrows=500)
@@ -344,7 +358,7 @@ class ExcelIngestor:
             if filename.endswith(".csv"):
                 df = pd.read_csv(io.BytesIO(file_content))
             else:
-                df = pd.read_excel(io.BytesIO(file_content), sheet_name=sheet_name)
+                df = pd.read_excel(io.BytesIO(file_content), sheet_name=sheet_name, **_EXCEL_ENGINE_KWARGS)
 
             df, report = self._preprocess_dataframe(df, sheet_name)
 
@@ -397,7 +411,7 @@ class ExcelIngestor:
             if filename.endswith(".csv"):
                 df = pd.read_csv(file_path)
             else:
-                df = pd.read_excel(file_path, sheet_name=sheet_name)
+                df = pd.read_excel(file_path, sheet_name=sheet_name, **_EXCEL_ENGINE_KWARGS)
 
             df, report = self._preprocess_dataframe(df, sheet_name)
 
@@ -427,6 +441,38 @@ class ExcelIngestor:
             logger.error(f"Failed to ingest {sheet_name}: {e}")
             return {"error": str(e), "success": False}
 
+    def _ingest_one_sheet_bytes(
+        self,
+        file_content: bytes,
+        filename: str,
+        sheet_info: Dict[str, Any],
+        client_id: str,
+        register_callback: Optional[Callable[[str, pd.DataFrame, Dict], None]],
+    ) -> Dict[str, Any]:
+        """Process a single sheet from bytes — designed to run in a thread-pool worker."""
+        sheet_name = sheet_info["name"]
+        if sheet_info.get("error"):
+            return {"sheet_name": sheet_name, "success": False, "error": sheet_info["error"]}
+        try:
+            df = (
+                pd.read_csv(io.BytesIO(file_content))
+                if filename.endswith(".csv")
+                else pd.read_excel(io.BytesIO(file_content), sheet_name=sheet_name, **_EXCEL_ENGINE_KWARGS)
+            )
+            if df.empty or df.shape[0] < 2:
+                return {"sheet_name": sheet_name, "success": False, "error": "Empty or minimal data"}
+            df, report = self._preprocess_dataframe(df, sheet_name)
+            safe_filename = re.sub(r"[^\w]", "_", Path(filename).stem.lower())
+            safe_sheet = re.sub(r"[^\w]", "_", sheet_name.lower())
+            dataset_id = f"{client_id}:{safe_filename}:{safe_sheet}"
+            metadata = {"filename": filename, "sheet_name": sheet_name, "preprocessing": report, "client_id": client_id}
+            if register_callback:
+                register_callback(dataset_id, df, metadata)
+            return {"success": True, "dataset_id": dataset_id, "sheet_name": sheet_name, "rows": len(df), "columns": list(df.columns)}
+        except Exception as e:
+            logger.error(f"Failed to ingest sheet '{sheet_name}': {e}")
+            return {"sheet_name": sheet_name, "success": False, "error": str(e)}
+
     def ingest_all_sheets(
         self,
         file_content: bytes,
@@ -435,80 +481,67 @@ class ExcelIngestor:
         register_callback: Optional[Callable[[str, pd.DataFrame, Dict], None]] = None,
     ) -> List[Dict[str, Any]]:
         """
-        Ingest all sheets from the file.
-
-        Returns:
-            List of ingestion results for each sheet
+        Ingest all sheets in parallel using a ThreadPoolExecutor.
+        Each sheet is parsed and preprocessed concurrently; results are
+        returned in original sheet order.
         """
-        results = []
-        sheets_info = self.read_sheets_info(file_content, filename)
+        from concurrent.futures import ThreadPoolExecutor, as_completed
 
+        sheets_info = self.read_sheets_info(file_content, filename)
         if not sheets_info:
             return [{"error": "No readable sheets found", "success": False}]
 
-        for sheet_info in sheets_info:
-            sheet_name = sheet_info["name"]
+        # CSV is a single-sheet case — no concurrency overhead needed
+        if filename.endswith(".csv") or len(sheets_info) == 1:
+            return [self._ingest_one_sheet_bytes(file_content, filename, sheets_info[0], client_id, register_callback)]
 
-            if sheet_info.get("error"):
-                results.append(
-                    {
-                        "sheet_name": sheet_name,
-                        "success": False,
-                        "error": sheet_info["error"],
-                    }
-                )
-                continue
+        results: Dict[int, Dict] = {}
+        max_workers = min(len(sheets_info), 8)  # cap at 8 threads; I/O bound
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = {
+                pool.submit(self._ingest_one_sheet_bytes, file_content, filename, si, client_id, register_callback): idx
+                for idx, si in enumerate(sheets_info)
+            }
+            for fut in as_completed(futures):
+                idx = futures[fut]
+                try:
+                    results[idx] = fut.result()
+                except Exception as exc:
+                    results[idx] = {"sheet_name": sheets_info[idx]["name"], "success": False, "error": str(exc)}
 
-            try:
-                if filename.endswith(".csv"):
-                    df = pd.read_csv(io.BytesIO(file_content))
-                else:
-                    df = pd.read_excel(io.BytesIO(file_content), sheet_name=sheet_name)
+        return [results[i] for i in sorted(results)]
 
-                if df.empty or df.shape[0] < 2:
-                    results.append(
-                        {
-                            "sheet_name": sheet_name,
-                            "success": False,
-                            "error": "Empty or minimal data",
-                        }
-                    )
-                    continue
-
-                df, report = self._preprocess_dataframe(df, sheet_name)
-
-                # Generate dataset ID
-                safe_filename = re.sub(r"[^\w]", "_", Path(filename).stem.lower())
-                safe_sheet = re.sub(r"[^\w]", "_", sheet_name.lower())
-                dataset_id = f"{client_id}:{safe_filename}:{safe_sheet}"
-
-                metadata = {
-                    "filename": filename,
-                    "sheet_name": sheet_name,
-                    "preprocessing": report,
-                    "client_id": client_id,
-                }
-
-                if register_callback:
-                    register_callback(dataset_id, df, metadata)
-
-                results.append(
-                    {
-                        "success": True,
-                        "dataset_id": dataset_id,
-                        "sheet_name": sheet_name,
-                        "rows": len(df),
-                        "columns": list(df.columns),
-                    }
-                )
-
-            except Exception as e:
-                logger.error(f"Failed to ingest {sheet_name}: {e}")
-                results.append(
-                    {"sheet_name": sheet_name, "success": False, "error": str(e)}
-                )
-
-        return results
+    def _ingest_one_sheet_path(
+        self,
+        file_path: Path,
+        filename: str,
+        sheet_info: Dict[str, Any],
+        client_id: str,
+        register_callback: Optional[Callable[[str, pd.DataFrame, Dict], None]],
+    ) -> Dict[str, Any]:
+        """Process a single sheet from a file path — thread-pool worker."""
+        sheet_name = sheet_info["name"]
+        if sheet_info.get("error"):
+            return {"sheet_name": sheet_name, "success": False, "error": sheet_info["error"]}
+        try:
+            df = (
+                pd.read_csv(file_path)
+                if filename.endswith(".csv")
+                else pd.read_excel(file_path, sheet_name=sheet_name, **_EXCEL_ENGINE_KWARGS)
+            )
+            if df.empty or df.shape[0] < 2:
+                return {"sheet_name": sheet_name, "success": False, "error": "Empty or minimal data"}
+            df, report = self._preprocess_dataframe(df, sheet_name)
+            safe_filename = re.sub(r"[^\w]", "_", Path(filename).stem.lower())
+            safe_sheet = re.sub(r"[^\w]", "_", sheet_name.lower())
+            dataset_id = f"{client_id}:{safe_filename}:{safe_sheet}"
+            metadata = {"filename": filename, "sheet_name": sheet_name, "preprocessing": report, "client_id": client_id}
+            if register_callback:
+                register_callback(dataset_id, df, metadata)
+            return {"success": True, "dataset_id": dataset_id, "sheet_name": sheet_name, "rows": len(df), "columns": list(df.columns)}
+        except Exception as e:
+            logger.error(f"Failed to ingest sheet '{sheet_name}' from path: {e}")
+            return {"sheet_name": sheet_name, "success": False, "error": str(e)}
 
     def ingest_all_sheets_from_path(
         self,
@@ -518,76 +551,33 @@ class ExcelIngestor:
         register_callback: Optional[Callable[[str, pd.DataFrame, Dict], None]] = None,
     ) -> List[Dict[str, Any]]:
         """
-        Ingest all sheets from a local file path.
+        Ingest all sheets from a local file path — parallel via ThreadPoolExecutor.
+        Reuses _ingest_one_sheet_path to avoid logic duplication.
         """
-        results: List[Dict[str, Any]] = []
-        sheets_info = self.read_sheets_info_from_path(file_path, filename)
+        from concurrent.futures import ThreadPoolExecutor, as_completed
 
+        sheets_info = self.read_sheets_info_from_path(file_path, filename)
         if not sheets_info:
             return [{"error": "No readable sheets found", "success": False}]
 
-        for sheet_info in sheets_info:
-            sheet_name = sheet_info["name"]
+        if filename.endswith(".csv") or len(sheets_info) == 1:
+            return [self._ingest_one_sheet_path(file_path, filename, sheets_info[0], client_id, register_callback)]
 
-            if sheet_info.get("error"):
-                results.append(
-                    {
-                        "sheet_name": sheet_name,
-                        "success": False,
-                        "error": sheet_info["error"],
-                    }
-                )
-                continue
+        results: Dict[int, Dict] = {}
+        max_workers = min(len(sheets_info), 8)
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = {
+                pool.submit(self._ingest_one_sheet_path, file_path, filename, si, client_id, register_callback): idx
+                for idx, si in enumerate(sheets_info)
+            }
+            for fut in as_completed(futures):
+                idx = futures[fut]
+                try:
+                    results[idx] = fut.result()
+                except Exception as exc:
+                    results[idx] = {"sheet_name": sheets_info[idx]["name"], "success": False, "error": str(exc)}
 
-            try:
-                if filename.endswith(".csv"):
-                    df = pd.read_csv(file_path)
-                else:
-                    df = pd.read_excel(file_path, sheet_name=sheet_name)
-
-                if df.empty or df.shape[0] < 2:
-                    results.append(
-                        {
-                            "sheet_name": sheet_name,
-                            "success": False,
-                            "error": "Empty or minimal data",
-                        }
-                    )
-                    continue
-
-                df, report = self._preprocess_dataframe(df, sheet_name)
-
-                safe_filename = re.sub(r"[^\w]", "_", Path(filename).stem.lower())
-                safe_sheet = re.sub(r"[^\w]", "_", sheet_name.lower())
-                dataset_id = f"{client_id}:{safe_filename}:{safe_sheet}"
-
-                metadata = {
-                    "filename": filename,
-                    "sheet_name": sheet_name,
-                    "preprocessing": report,
-                    "client_id": client_id,
-                }
-
-                if register_callback:
-                    register_callback(dataset_id, df, metadata)
-
-                results.append(
-                    {
-                        "success": True,
-                        "dataset_id": dataset_id,
-                        "sheet_name": sheet_name,
-                        "rows": len(df),
-                        "columns": list(df.columns),
-                    }
-                )
-
-            except Exception as e:
-                logger.error(f"Failed to ingest {sheet_name}: {e}")
-                results.append(
-                    {"sheet_name": sheet_name, "success": False, "error": str(e)}
-                )
-
-        return results
+        return [results[i] for i in sorted(results)]
 
     def get_last_sheets_info(self) -> List[Dict[str, Any]]:
         """Get info from last file read."""

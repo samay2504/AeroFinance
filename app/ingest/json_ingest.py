@@ -4,15 +4,33 @@ JSON Ingest Engine - Robust JSON ingestion with:
 - Column normalization and type coercion
 - Support for nested JSON with multiple tables
 - Direct text JSON parsing (for pasted content)
+- orjson fast-path for large payloads (5-10x faster than stdlib json)
+- ThreadPoolExecutor parallelism for multi-table structures
 """
 
 import logging
 import json
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import pandas as pd
 import numpy as np
 
 logger = logging.getLogger(__name__)
+
+# ── Fast JSON parser — orjson when available, stdlib fallback ──────────────
+try:
+    import orjson as _json_fast
+
+    def _loads(raw: Union[str, bytes]) -> Any:
+        if isinstance(raw, str):
+            raw = raw.encode("utf-8")
+        return _json_fast.loads(raw)
+
+    logger.debug("Using orjson for JSON parsing (fast path)")
+except ImportError:
+    _loads = json.loads
+    logger.debug("orjson not installed; using stdlib json")
 
 
 class JSONIngestor:
@@ -221,17 +239,51 @@ class JSONIngestor:
                     pass
         return df
 
+    # ── Thread-pool helper ────────────────────────────────────────────────
+    def _process_one_table(
+        self,
+        key: str,
+        raw_df: pd.DataFrame,
+        client_id: str,
+        safe_name: str,
+        structure: str,
+        register_callback: Optional[Callable] = None,
+    ) -> Dict[str, Any]:
+        """Process a single table: normalize, coerce, register — designed for thread-pool."""
+        try:
+            df = self._normalize_column_names(raw_df)
+            df = self._coerce_types(df)
+            safe_key = key.lower().replace(" ", "_").replace("-", "_")
+            safe_key = "".join(c if c.isalnum() or c == "_" else "_" for c in safe_key)
+            dataset_id = (
+                f"{client_id}:{safe_name}:{safe_key}" if safe_key != safe_name
+                else f"{client_id}:{safe_name}"
+            )
+            if register_callback:
+                register_callback(dataset_id, df, {"structure": structure, "table": key})
+            return {
+                "success": True,
+                "dataset_id": dataset_id,
+                "table_name": key,
+                "rows": len(df),
+                "columns": len(df.columns),
+            }
+        except Exception as e:
+            logger.error(f"Failed to process JSON table '{key}': {e}")
+            return {"success": False, "table_name": key, "error": str(e)}
+
     def parse_json_text(self, json_text: str) -> Tuple[Any, Optional[str]]:
         """
         Parse JSON text and return data.
+        Uses orjson when available for 5-10x faster parsing on large payloads.
 
         Returns:
             Tuple of (parsed_data, error_message)
         """
         try:
-            data = json.loads(json_text)
+            data = _loads(json_text)
             return data, None
-        except json.JSONDecodeError as e:
+        except (json.JSONDecodeError, Exception) as e:
             return None, f"JSON parse error: {e}"
 
     def ingest_json(
@@ -306,32 +358,40 @@ class JSONIngestor:
 
             elif structure == "nested_tables":
                 # Dict with nested arrays/objects -> multiple DataFrames
+                # Build raw DataFrames first, then process in parallel.
+                raw_tables: List[Tuple[str, pd.DataFrame]] = []
                 for key, value in data.items():
                     if isinstance(value, list) and len(value) > 0:
                         if isinstance(value[0], dict):
-                            df = pd.DataFrame(value)
+                            raw_tables.append((key, pd.DataFrame(value)))
                         else:
-                            df = pd.DataFrame({key: value})
+                            raw_tables.append((key, pd.DataFrame({key: value})))
 
-                        df = self._normalize_column_names(df)
-                        df = self._coerce_types(df)
-
-                        safe_key = key.lower().replace(" ", "_").replace("-", "_")
-                        dataset_id = f"{client_id}:{safe_name}:{safe_key}"
-
-                        if register_callback:
-                            register_callback(
-                                dataset_id, df, {"structure": structure, "table": key}
-                            )
-
-                        results["datasets"].append(
-                            {
-                                "dataset_id": dataset_id,
-                                "table_name": key,
-                                "rows": len(df),
-                                "columns": len(df.columns),
-                            }
+                if len(raw_tables) <= 1:
+                    # Single table — no concurrency overhead
+                    for key, raw_df in raw_tables:
+                        r = self._process_one_table(
+                            key, raw_df, client_id, safe_name, structure, register_callback
                         )
+                        results["datasets"].append(r)
+                else:
+                    # Parallel normalize + coerce + register across tables
+                    n_workers = min(len(raw_tables), 8)
+                    indexed: Dict[int, Dict] = {}
+                    with ThreadPoolExecutor(max_workers=n_workers) as pool:
+                        futs = {
+                            pool.submit(
+                                self._process_one_table,
+                                key, raw_df, client_id, safe_name,
+                                structure, register_callback,
+                            ): idx
+                            for idx, (key, raw_df) in enumerate(raw_tables)
+                        }
+                        for fut in as_completed(futs):
+                            indexed[futs[fut]] = fut.result()
+                    results["datasets"].extend(
+                        indexed[i] for i in sorted(indexed)
+                    )
 
             elif structure == "single_record":
                 # Single dict -> DataFrame with one row
@@ -350,34 +410,32 @@ class JSONIngestor:
 
             elif structure == "complex_nested":
                 # Complex nested structure (like corporate financial data)
-                # Use deep extraction to get all tables
+                # Deep extraction then parallel normalize + coerce + register.
                 tables = self._extract_tables_deep(data)
 
-                for table_name, df in tables:
-                    df = self._normalize_column_names(df)
-                    df = self._coerce_types(df)
-
-                    # Clean table name for dataset_id
-                    safe_table = table_name.lower().replace(" ", "_").replace("-", "_")
-                    safe_table = "".join(
-                        c if c.isalnum() or c == "_" else "_" for c in safe_table
-                    )
-                    dataset_id = f"{client_id}:{safe_name}:{safe_table}"
-
-                    if register_callback:
-                        register_callback(
-                            dataset_id,
-                            df,
-                            {"structure": structure, "table": table_name},
+                if len(tables) <= 1:
+                    for table_name, raw_df in tables:
+                        r = self._process_one_table(
+                            table_name, raw_df, client_id, safe_name,
+                            structure, register_callback,
                         )
-
-                    results["datasets"].append(
-                        {
-                            "dataset_id": dataset_id,
-                            "table_name": table_name,
-                            "rows": len(df),
-                            "columns": len(df.columns),
+                        results["datasets"].append(r)
+                else:
+                    n_workers = min(len(tables), 8)
+                    indexed: Dict[int, Dict] = {}
+                    with ThreadPoolExecutor(max_workers=n_workers) as pool:
+                        futs = {
+                            pool.submit(
+                                self._process_one_table,
+                                tname, raw_df, client_id, safe_name,
+                                structure, register_callback,
+                            ): idx
+                            for idx, (tname, raw_df) in enumerate(tables)
                         }
+                        for fut in as_completed(futs):
+                            indexed[futs[fut]] = fut.result()
+                    results["datasets"].extend(
+                        indexed[i] for i in sorted(indexed)
                     )
 
                 # If no tables extracted, fallback to flattened single record
@@ -545,6 +603,8 @@ class JSONIngestor:
     ) -> Dict[str, Any]:
         """
         Ingest JSON data into both DataFrames AND RAG vector storage.
+        Uses ThreadPoolExecutor for parallel table processing when multiple
+        tables are extracted from nested structures.
 
         Args:
             data: Parsed JSON data
@@ -561,76 +621,86 @@ class JSONIngestor:
             structure = self._detect_structure(data)
             safe_name = source_name.lower().replace(" ", "_").replace("-", "_")
 
-            dataframes = []  # Collect (name, df) tuples
+            raw_pairs: List[Tuple[str, Any]] = []  # (key, raw_data) before DF creation
 
             if structure == "records":
-                df = pd.DataFrame(data)
-                df = self._normalize_column_names(df)
-                df = self._coerce_types(df)
-                dataframes.append((safe_name, df))
-
+                raw_pairs.append((safe_name, data))
             elif structure == "columnar":
-                df = pd.DataFrame(data)
-                df = self._normalize_column_names(df)
-                df = self._coerce_types(df)
-                dataframes.append((safe_name, df))
-
+                raw_pairs.append((safe_name, data))
             elif structure == "nested_tables":
                 for key, value in data.items():
                     if isinstance(value, list) and len(value) > 0:
-                        if isinstance(value[0], dict):
-                            df = pd.DataFrame(value)
-                        else:
-                            df = pd.DataFrame({key: value})
-                        df = self._normalize_column_names(df)
-                        df = self._coerce_types(df)
                         safe_key = key.lower().replace(" ", "_").replace("-", "_")
-                        dataframes.append((f"{safe_name}:{safe_key}", df))
-
+                        raw_pairs.append((f"{safe_name}:{safe_key}", value))
             elif structure == "single_record":
-                df = pd.DataFrame([data])
-                df = self._normalize_column_names(df)
-                df = self._coerce_types(df)
-                dataframes.append((safe_name, df))
+                raw_pairs.append((safe_name, [data]))
 
-            # Process each DataFrame
-            for table_name, df in dataframes:
-                dataset_id = f"{client_id}:{table_name}"
+            def _process_rag_table(table_name: str, raw_data: Any) -> Dict[str, Any]:
+                """Worker: create DF, normalize, coerce, text repr, RAG push."""
+                try:
+                    if isinstance(raw_data, list) and raw_data and isinstance(raw_data[0], dict):
+                        df = pd.DataFrame(raw_data)
+                    elif isinstance(raw_data, dict):
+                        df = pd.DataFrame(raw_data)
+                    else:
+                        df = pd.DataFrame(raw_data)
+                    df = self._normalize_column_names(df)
+                    df = self._coerce_types(df)
 
-                results["datasets"].append(
-                    {
+                    dataset_id = f"{client_id}:{table_name}"
+                    ds_info = {
                         "dataset_id": dataset_id,
                         "rows": len(df),
                         "columns": len(df.columns),
                     }
-                )
+                    rag_chunks = 0
 
-                # Ingest into RAG if available
-                if rag_pipeline and rag_pipeline.is_available:
-                    text_repr = self.generate_text_representation(df, table_name)
+                    if rag_pipeline and rag_pipeline.is_available:
+                        text_repr = self.generate_text_representation(df, table_name)
+                        metadata = {
+                            "source_type": "json",
+                            "table_name": table_name,
+                            "structure": structure,
+                            "rows": len(df),
+                            "columns": ", ".join(str(c) for c in df.columns),
+                        }
+                        try:
+                            rag_result = rag_pipeline.ingest_document(
+                                text=text_repr,
+                                client_id=client_id,
+                                doc_id=dataset_id,
+                                metadata=metadata,
+                            )
+                            if rag_result.get("success"):
+                                rag_chunks = rag_result.get("chunks_created", 1)
+                        except Exception as e:
+                            logger.warning(f"RAG ingestion failed for {dataset_id}: {e}")
 
-                    # Create metadata for RAG (use primitive types only)
-                    metadata = {
-                        "source_type": "json",
-                        "table_name": table_name,
-                        "structure": structure,
-                        "rows": len(df),
-                        "columns": ", ".join(
-                            str(c) for c in df.columns
-                        ),  # String, not list
+                    return {"ds_info": ds_info, "rag_chunks": rag_chunks}
+                except Exception as e:
+                    logger.error(f"RAG table processing failed for {table_name}: {e}")
+                    return {"ds_info": {"table_name": table_name, "error": str(e)}, "rag_chunks": 0}
+
+            # Parallel when multiple tables, sequential otherwise
+            if len(raw_pairs) <= 1:
+                for table_name, raw_data in raw_pairs:
+                    r = _process_rag_table(table_name, raw_data)
+                    results["datasets"].append(r["ds_info"])
+                    results["rag_chunks"] += r["rag_chunks"]
+            else:
+                n_workers = min(len(raw_pairs), 8)
+                indexed: Dict[int, Dict] = {}
+                with ThreadPoolExecutor(max_workers=n_workers) as pool:
+                    futs = {
+                        pool.submit(_process_rag_table, tname, rdata): idx
+                        for idx, (tname, rdata) in enumerate(raw_pairs)
                     }
-
-                    try:
-                        rag_result = rag_pipeline.ingest_document(
-                            text=text_repr,
-                            client_id=client_id,
-                            doc_id=dataset_id,
-                            metadata=metadata,
-                        )
-                        if rag_result.get("success"):
-                            results["rag_chunks"] += rag_result.get("chunks_created", 1)
-                    except Exception as e:
-                        logger.warning(f"RAG ingestion failed for {dataset_id}: {e}")
+                    for fut in as_completed(futs):
+                        indexed[futs[fut]] = fut.result()
+                for i in sorted(indexed):
+                    r = indexed[i]
+                    results["datasets"].append(r["ds_info"])
+                    results["rag_chunks"] += r["rag_chunks"]
 
             self._last_ingest_info = results
 

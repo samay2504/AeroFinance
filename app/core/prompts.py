@@ -14,6 +14,14 @@ from pathlib import Path
 from dataclasses import dataclass
 from functools import lru_cache
 import yaml
+
+# DLL fix must run before langchain/transformers/torch import chain on Windows.
+try:
+    from app.core.dll_fix import apply_dll_fix
+    apply_dll_fix()
+except Exception:
+    pass
+
 from langchain_core.prompts import PromptTemplate
 
 logger = logging.getLogger(__name__)

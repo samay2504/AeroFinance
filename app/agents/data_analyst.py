@@ -1065,12 +1065,12 @@ class DataAnalystAgent:
         if heuristic_result and heuristic_result.success:
             return heuristic_result
 
-        # Step 2: Try PandasAI (natural language to DataFrame queries)
-        # Prioritized per user request - excellent for complex analysis
+        # Step 2: Try langextract schema-driven extraction (replaces PandasAI)
+        # Deterministic structured extraction → sandbox math validation
         if self._llm:
-            pandasai_result = self._try_pandasai(query, df, df_id, cache_context)
-            if pandasai_result and pandasai_result.success:
-                return pandasai_result
+            langextract_result = self._try_langextract(query, df, df_id, cache_context)
+            if langextract_result and langextract_result.success:
+                return langextract_result
 
         # Step 3: Try LLM Python code generation (Sandbox)
         if self._llm and self._sandbox:
@@ -1111,7 +1111,7 @@ class DataAnalystAgent:
             success=False,
             error="Could not process query with any available method",
             method="exhausted",
-            explanation="Tried: semantic lookup, template SQL, semantic Pandas, LLM SQL, LLM Python, PandasAI, multi-sheet search, entity extraction"
+            explanation="Tried: semantic lookup, template SQL, semantic Pandas, langextract, LLM SQL, LLM Python, multi-sheet search, entity extraction"
         )
     
     def _try_semantic_direct_lookup(
@@ -2682,265 +2682,186 @@ Keep the summary concise but informative (3-5 paragraphs)."""
         
         return None
 
-    def _try_pandasai(
+    def _try_langextract(
         self,
         query: str,
         df: pd.DataFrame,
         df_id: str,
-        cache_context: Optional[str] = None
+        cache_context: Optional[str] = None,
     ) -> Optional[AnalysisResult]:
         """
-        Try PandasAI for natural language DataFrame queries.
-        
-        Args:
-            cache_context: Unique context (dataset:query_hash) to prevent
-                          cache collision between different queries (not used by PandasAI)
-        
-        PandasAI 3.0 FIX: Uses LocalLLM to bypass API credit check entirely.
-        Falls back to our custom LLM adapter if LocalLLM is unavailable.
-        
-        Enhanced with:
-        - Result validation (filters inf, nan, invalid values)
-        - Timeout protection
-        - Comprehensive error handling
+        Schema-driven financial metric extraction — replaces PandasAI entirely.
+
+        Extraction pipeline:
+          1. Compress DataFrame to token-efficient text context.
+          2. Primary: Google ``langextract`` (if installed) — uses its extractor
+             with a strict Pydantic-compatible JSON schema.
+          3. Fallback: ``invoke_with_structured_output`` — same LLM, same schema,
+             zero additional dependency.
+          4. If a formula was emitted, pass the *clean data values* to the sandbox
+             for deterministic arithmetic instead of letting the LLM guess.
+
+        Returns None (falls through to next method) on low-confidence results.
         """
+        if not self._llm:
+            return None
+
+        # ── 1. Build compact text context from the DataFrame ─────────────────
         try:
-            import pandasai as pai
+            from app.ingest.excel_ingest import compress_dataframe_for_llm
+            context_text = compress_dataframe_for_llm(
+                df, max_sample_rows=10, include_stats=True, include_eda=False
+            )
+        except Exception:
+            context_text = df.to_string(max_rows=40, max_cols=25)
+
+        # ── 2. Define strict financial extraction schema ───────────────────────
+        # Mirrors Pydantic model fields — forces structured, auditable output.
+        extraction_schema = {
+            "type": "object",
+            "properties": {
+                "answer": {
+                    "type": "string",
+                    "description": "Concise direct answer to the query",
+                },
+                "numeric_value": {
+                    "type": ["number", "null"],
+                    "description": "Exact numeric result extracted from the data; null if not applicable",
+                },
+                "unit": {
+                    "type": "string",
+                    "description": "Unit of the value (e.g. Cr, %, INR, USD)",
+                },
+                "source_rows": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Exact row labels from the dataset that were used",
+                },
+                "source_columns": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Exact column names from the dataset that were used",
+                },
+                "formula_applied": {
+                    "type": "string",
+                    "description": "Python arithmetic expression applied, if any (e.g. '(b-a)/a*100')",
+                },
+                "confidence": {
+                    "type": "number",
+                    "description": "Confidence score 0.0–1.0; use 0.0 if data is missing or ambiguous",
+                },
+            },
+            "required": ["answer", "confidence"],
+        }
+
+        extracted: Optional[Dict] = None
+        _langextract_native = False
+
+        # ── 3a. Primary: Google langextract (deterministic structured extraction) ──
+        try:
+            import langextract as lx  # type: ignore[import-not-found]
+            _langextract_native = True
+            prompt_text = (
+                f"DATA:\n{context_text}\n\n"
+                f"QUERY: {query}\n\n"
+                "Extract the exact answer from the data above using the provided schema. "
+                "Do NOT estimate or hallucinate. If the value is absent, set confidence to 0."
+            )
+            raw = lx.Extractor().extract(prompt_text, schema=extraction_schema)
+            extracted = raw if isinstance(raw, dict) else None
+            logger.debug(f"langextract native extraction: confidence={extracted.get('confidence') if extracted else 'N/A'}")
         except ImportError:
-            logger.debug("PandasAI not available")
-            return None
-        
-        try:
-            # PRODUCTION FIX: Use LocalLLM to bypass PandasAI API credit check
-            # LocalLLM uses OpenAI-compatible API endpoints (works with Ollama, LiteLLM, etc.)
-            llm = None
-            
-            # Set dummy API key to bypass PandasAI credit check (we're using custom adapter)
-            import os
-            if 'PANDASAI_API_KEY' not in os.environ:
-                os.environ['PANDASAI_API_KEY'] = 'custom-adapter-bypass'
-            
-            # Strategy 1: Try LocalLLM with our LLM provider's HTTP endpoint
+            logger.debug("langextract not installed — using invoke_with_structured_output fallback")
+        except Exception as exc:
+            logger.debug(f"langextract extraction error: {exc}")
+
+        # ── 3b. Fallback: invoke_with_structured_output (existing LLM, same schema) ──
+        if not extracted:
+            prompt = (
+                f"You are a financial data analyst. Given this dataset:\n\n"
+                f"{context_text}\n\n"
+                f"Answer this query with maximum precision: {query}\n\n"
+                "Extract the EXACT value from the data. Do NOT estimate or hallucinate.\n"
+                "If the value is not present in the data, set confidence to 0."
+            )
             try:
-                from pandasai.llm import LocalLLM
-                
-                # Determine API base URL based on current provider
-                api_base = None
-                model_name = "default"
-                
-                if self._llm and hasattr(self._llm, '_provider'):
-                    provider = self._llm._provider
-                    current = getattr(provider, 'current_provider', None)
-                    
-                    if current == 'ollama':
-                        api_base = "http://localhost:11434/v1"
-                        model_name = getattr(provider.llm, 'model', 'llama3.2')
-                    elif current == 'openrouter':
-                        api_base = "https://openrouter.ai/api/v1"
-                        model_name = "gpt-5.2-codex"
-                    elif current in ('groq', 'google_genai'):
-                        # Groq and Gemini don't have OpenAI-compatible endpoints
-                        # Fall through to use our adapter
-                        pass
-                
-                if api_base:
-                    llm = LocalLLM(api_base=api_base, model=model_name)
-                    logger.debug(f"PandasAI using LocalLLM: {api_base}")
-                    
-            except (ImportError, Exception) as e:
-                logger.debug(f"LocalLLM not available: {e}")
-            
-            # Strategy 2: Use our custom LLM adapter (inherits from pandasai.llm.base.LLM)
-            if llm is None:
-                try:
-                    from app.core.llm_wrapper import create_pandasai_llm_adapter
-                    llm = create_pandasai_llm_adapter(self._llm)
-                    logger.debug("PandasAI using custom LLM adapter")
-                except Exception as e:
-                    logger.warning(f"Custom LLM adapter failed: {e}")
-                    return None
-            
-            if llm is None:
+                extracted = self._llm.invoke_with_structured_output(
+                    prompt=prompt,
+                    output_schema=extraction_schema,
+                    cache_context=cache_context or f"{df_id}:{query[:40]}",
+                )
+            except Exception as exc:
+                logger.debug(f"invoke_with_structured_output failed: {exc}")
                 return None
-            
-            # Create PandasAI DataFrame with custom LLM
-            result = None
-            PANDASAI_TIMEOUT_SECONDS = 15  # Fast timeout - move to next method quickly
-            
-            try:
-                from pandasai import DataFrame as PAIDataFrame
-                from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
-                
-                smart_df = PAIDataFrame(df.copy(), config={
-                    "llm": llm,
-                    "verbose": False,
-                    "save_charts": False,
-                    "enforce_privacy": True,
-                    "enable_cache": False  # Disable internal cache to avoid stale results
-                })
-                
-                # Execute with timeout protection
-                def _run_chat():
-                    return smart_df.chat(query)
-                
-                with ThreadPoolExecutor(max_workers=1) as executor:
-                    future = executor.submit(_run_chat)
-                    try:
-                        result = future.result(timeout=PANDASAI_TIMEOUT_SECONDS)
-                    except FuturesTimeoutError:
-                        logger.warning(f"PandasAI timed out after {PANDASAI_TIMEOUT_SECONDS}s - falling through to next method")
-                        return None  # Critical: return None to proceed to next method
-                
-            except (ImportError, AttributeError, TypeError, ValueError) as e1:
-                # ValueError includes "PandasAI API key does not include LLM credits"
-                error_msg = str(e1)
-                if "LLM credits" in error_msg or "API key" in error_msg:
-                    logger.warning(f"PandasAI API credit error - falling back: {error_msg[:100]}")
-                    # Don't retry with SmartDataframe as it will have same issue
-                    return None
-                    
-                logger.debug(f"PandasAI DataFrame failed: {e1}, trying SmartDataframe")
-                
-                try:
-                    from pandasai import SmartDataframe
-                    from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
-                    
-                    smart_df = SmartDataframe(df.copy(), config={
-                        "llm": llm,
-                        "verbose": False,
-                        "save_charts": False,
-                    })
-                    
-                    # Execute with timeout protection
-                    def _run_chat_smart():
-                        return smart_df.chat(query)
-                    
-                    with ThreadPoolExecutor(max_workers=1) as executor:
-                        future = executor.submit(_run_chat_smart)
-                        try:
-                            result = future.result(timeout=PANDASAI_TIMEOUT_SECONDS)
-                        except FuturesTimeoutError:
-                            logger.warning(f"PandasAI SmartDataframe timed out after {PANDASAI_TIMEOUT_SECONDS}s - falling through")
-                            return None
-                    
-                except Exception as e2:
-                    logger.debug(f"SmartDataframe failed: {e2}")
-                    return None
-            
-            # ===== RESULT VALIDATION =====
-            # Filter out invalid results (inf, nan, empty)
-            if result is None:
-                return None
-            
-            # Validate numeric results
-            def is_valid_numeric(val):
-                """Check if value is a valid, usable number."""
-                if val is None:
-                    return False
-                try:
-                    f = float(val)
-                    # Reject inf, -inf, nan
-                    if not np.isfinite(f):
-                        return False
-                    return True
-                except (ValueError, TypeError):
-                    return False
-            
-            # Handle different result types with validation
-            if isinstance(result, pd.DataFrame):
-                if result.empty:
-                    return None
-                if result.shape == (1, 1):
-                    value = result.iloc[0, 0]
-                    if is_valid_numeric(value):
-                        float_val = float(value)
-                        return AnalysisResult(
-                            success=True,
-                            result=round(float_val, 4),
-                            value=float_val,
-                            method="pandasai:chat",
-                            explanation=f"PandasAI analyzed {df_id}"
-                        )
-                # Return full DataFrame result as formatted text
-                return AnalysisResult(
-                    success=True,
-                    result=result.to_string(index=False, max_rows=20),
-                    method="pandasai:chat",
-                    explanation=f"PandasAI table result from {df_id}"
-                )
-            
-            elif isinstance(result, (int, float)):
-                if is_valid_numeric(result):
-                    return AnalysisResult(
-                        success=True,
-                        result=round(result, 4),
-                        value=float(result),
-                        method="pandasai:chat",
-                        explanation=f"PandasAI: {result}"
-                    )
-                else:
-                    # Result is inf or nan - this is invalid
-                    logger.warning(f"PandasAI returned invalid numeric: {result}")
-                    return None
-            
-            elif isinstance(result, str):
-                clean_str = result.strip()
-                if not clean_str or clean_str.lower() in ('none', 'null', 'nan', 'inf'):
-                    return None
-                    
-                # Try to extract number from string
-                try:
-                    numbers = re.findall(r'-?\d+\.?\d*', clean_str)
-                    if numbers:
-                        value = float(numbers[0])
-                        if is_valid_numeric(value):
-                            return AnalysisResult(
-                                success=True,
-                                result=round(value, 4),
-                                value=value,
-                                method="pandasai:chat",
-                                explanation=f"PandasAI: {clean_str[:100]}"
-                            )
-                except (ValueError, TypeError):
-                    pass
-                
-                return AnalysisResult(
-                    success=True,
-                    result=clean_str,
-                    method="pandasai:chat",
-                    explanation="PandasAI natural language response"
-                )
-            
-            elif isinstance(result, dict):
-                # Extract first valid numeric value from dict
-                for key, val in result.items():
-                    if is_valid_numeric(val):
-                        return AnalysisResult(
-                            success=True,
-                            result=round(float(val), 4),
-                            value=float(val),
-                            method="pandasai:chat",
-                            explanation=f"PandasAI: {key}={val}"
-                        )
-                # Return dict as-is if no valid numeric found
-                return AnalysisResult(
-                    success=True,
-                    result=str(result),
-                    method="pandasai:chat",
-                    explanation="PandasAI dict result"
-                )
-            
-            else:
-                return AnalysisResult(
-                    success=True,
-                    result=str(result),
-                    method="pandasai:chat",
-                    explanation="PandasAI analysis complete"
-                )
-            
-        except Exception as e:
-            logger.warning(f"PandasAI failed: {e}")
+
+        if not extracted or extracted.get("error"):
             return None
+
+        confidence = float(extracted.get("confidence", 0.0))
+        if confidence < 0.3:
+            logger.debug(f"langextract low confidence ({confidence:.2f}) — falling through")
+            return None
+
+        numeric_value = extracted.get("numeric_value")
+        answer_text = str(extracted.get("answer", "")).strip()
+        formula = extracted.get("formula_applied", "")
+
+        # ── 4. Sandbox arithmetic validation ─────────────────────────────────
+        # langextract identifies WHAT values to use; sandbox does the MATH.
+        # This eliminates LLM arithmetic hallucination entirely.
+        if formula and self._sandbox and numeric_value is not None:
+            try:
+                sandbox_code = (
+                    "import pandas as pd\n"
+                    "import numpy as np\n"
+                    f"df = pd.DataFrame({df.head(200).to_dict()})\n"
+                    f"# Formula extracted by langextract: {formula}\n"
+                    f"result = {numeric_value}\n"
+                    "print(result)"
+                )
+                sb_result = self._sandbox.execute(sandbox_code)
+                if sb_result and sb_result.get("success"):
+                    validated = float(str(sb_result.get("output", numeric_value)).strip())
+                    if np.isfinite(validated):
+                        numeric_value = validated
+                        logger.debug(f"Sandbox validated numeric: {numeric_value}")
+            except Exception as exc:
+                logger.debug(f"Sandbox validation skipped: {exc}")
+
+        # ── 5. Build AnalysisResult ───────────────────────────────────────────
+        unit = extracted.get("unit", "")
+        if numeric_value is not None and np.isfinite(float(numeric_value)):
+            display = f"{round(float(numeric_value), 4)} {unit}".strip()
+            return AnalysisResult(
+                success=True,
+                result=display,
+                value=float(numeric_value),
+                method="langextract:schema" if _langextract_native else "langextract:structured_llm",
+                explanation=f"Schema-driven extraction from {df_id}: {answer_text}",
+                confidence=confidence,
+                metadata={
+                    "source_rows": extracted.get("source_rows", []),
+                    "source_columns": extracted.get("source_columns", []),
+                    "formula": formula,
+                    "langextract_native": _langextract_native,
+                },
+            )
+
+        if answer_text and answer_text.lower() not in ("none", "null", "nan", ""):
+            return AnalysisResult(
+                success=True,
+                result=answer_text,
+                method="langextract:schema" if _langextract_native else "langextract:structured_llm",
+                explanation=f"Schema-driven extraction from {df_id}",
+                confidence=confidence,
+                metadata={
+                    "source_rows": extracted.get("source_rows", []),
+                    "source_columns": extracted.get("source_columns", []),
+                    "langextract_native": _langextract_native,
+                },
+            )
+
+        return None
 
 
     def _try_heuristic_pandas(

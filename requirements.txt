@@ -18,7 +18,7 @@ duckdb>=0.10.0
 pyarrow>=14.0.0
 openpyxl>=3.1.0
 xlrd>=2.0.0
-numpy>=1.24.0
+numpy>=2.0.0,<3.0.0
 sqlparse>=0.4.4
 
 # =============================================================================
@@ -32,11 +32,18 @@ chromadb>=0.4.0
 # =============================================================================
 langchain>=0.1.0
 langchain-core>=0.1.0
-langchain-google-genai>=1.0.0
+langchain-google-genai>=2.0.0,<4.0.0
 langchain-groq>=0.1.0
 langchain-openai>=0.1.0
 langchain-huggingface>=0.0.1
 langchain-community>=0.0.20
+
+# Google AI SDK (new unified SDK — replaces deprecated google-generativeai)
+google-genai>=1.0.0
+# Legacy low-level client required by langchain-google-genai 3.x
+google-ai-generativelanguage>=0.9.0,<1.0.0
+# Protobuf pinned to 5.x — google-ai-generativelanguage requires <6.0.0
+protobuf>=5.26.1,<6.0.0dev
 
 # =============================================================================
 # CACHING & IPC
@@ -52,13 +59,31 @@ boto3>=1.34.0
 botocore>=1.34.0
 
 # =============================================================================
-# HTTP & WEB SCRAPING
+# HIGH-PERFORMANCE ASYNC HTTP
 # =============================================================================
-httpx>=0.26.0
+# httpx[http2] — replaces requests everywhere in this codebase.
+# HTTP/2 multiplexing gives ~40% fewer connections for concurrent Jina/OpenRouter calls.
+httpx[http2]>=0.27.0
 aiohttp>=3.9.0
 beautifulsoup4>=4.12.0
 lxml>=5.0.0
+# requests kept only for transitive deps (langchain, boto3, etc.) — not used directly.
 requests>=2.31.0
+
+# =============================================================================
+# FAST ASYNC EVENT LOOP
+# =============================================================================
+# uvloop: Cython-based drop-in for asyncio — 2-4x faster on Linux/Mac/Docker.
+# Windows uses the default ProactorEventLoop (no change needed there).
+uvloop>=0.19.0; sys_platform != "win32"
+
+# =============================================================================
+# STRUCTURED EXTRACTION (replaces PandasAI)
+# =============================================================================
+# Google langextract — schema-driven deterministic extraction from text.
+# Primary extraction engine in DataAnalystAgent._try_langextract().
+# Falls back to invoke_with_structured_output if not installed.
+langextract>=0.1.0
 
 # =============================================================================
 # NLP & SEMANTIC UNDERSTANDING
@@ -107,7 +132,7 @@ Pillow>=10.1.0
 
 # Vision APIs (Google Cloud Vision: 1K units/month free)
 google-cloud-vision>=3.7.0
-google-generativeai>=0.7.0
+google-generativeai>=0.8.0,<1.0.0  # Legacy SDK, still needed by some tools
 
 # Search & Retrieval (BM25 for keyword pre-filter)
 rank-bm25>=0.2.2

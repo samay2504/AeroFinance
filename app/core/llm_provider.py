@@ -6,7 +6,7 @@ Includes intelligent fallback, retry logic, and metrics tracking.
 import os
 import logging
 import time
-from typing import Optional, Dict, Any, Union
+from typing import Optional, Dict, Any, Union, List
 import subprocess
 import shutil
 import atexit
@@ -17,11 +17,8 @@ import sys
 os.environ['TRANSFORMERS_OFFLINE'] = '1'
 os.environ['HF_HUB_DISABLE_TELEMETRY'] = '1'
 
-try:
-    import requests
-    REQUESTS_AVAILABLE = True
-except Exception:
-    REQUESTS_AVAILABLE = False
+# httpx replaces requests throughout this file (already in requirements.txt).
+import httpx
 
 # Load environment variables
 try:
@@ -43,7 +40,10 @@ except ImportError:
 HUGGINGFACE_AVAILABLE = False
 
 try:
-    from langchain_google_genai import ChatGoogleGenerativeAI
+    import warnings as _warnings
+    with _warnings.catch_warnings():
+        _warnings.simplefilter("ignore", FutureWarning)
+        import google.generativeai as _genai_module
     GOOGLE_GENAI_AVAILABLE = True
 except Exception:
     GOOGLE_GENAI_AVAILABLE = False
@@ -301,26 +301,42 @@ class LLMProvider:
         raise ValueError("All HuggingFace models failed")
 
     def _try_google_genai(self):
-        """Initialize Google Gemini LLM."""
+        """Initialize Google Gemini using native google.generativeai (no LangChain dependency)."""
         if not GOOGLE_GENAI_AVAILABLE:
-            raise ImportError("langchain_google_genai not available")
+            raise ImportError("google-generativeai not available")
 
         api_key = os.getenv("GOOGLE_API_KEY")
         if not api_key:
             raise ValueError("GOOGLE_API_KEY not set")
 
-        model = self.config.get("google_model", "gemini-2.5-flash")
-        
+        model_name = self.config.get("google_model", "gemini-2.5-flash")
+        temperature = self.config.get("temperature", 0.1)
+
+        _genai_module.configure(api_key=api_key)
+
+        class _GenAIWrapper:
+            """Thin wrapper that gives google.generativeai the .invoke() interface."""
+            def __init__(self, model: str, temp: float):
+                self.model_name = model
+                self.model = model
+                self._client = _genai_module.GenerativeModel(
+                    model,
+                    generation_config=_genai_module.GenerationConfig(temperature=temp),
+                )
+
+            def invoke(self, prompt, **kwargs):
+                resp = self._client.generate_content(str(prompt))
+                return resp.text
+
+            def stream(self, prompt, **kwargs):
+                for chunk in self._client.generate_content(str(prompt), stream=True):
+                    yield chunk
+
         try:
-            llm = ChatGoogleGenerativeAI(
-                model=model,
-                google_api_key=api_key,
-                temperature=self.config.get("temperature", 0.1),
-                max_retries=0,
-            )
-            test_response = llm.invoke("Hi")
-            if test_response:
-                return llm
+            wrapper = _GenAIWrapper(model_name, temperature)
+            test = wrapper.invoke("Hi")
+            if test is not None:
+                return wrapper
         except Exception as e:
             error_str = str(e)
             if any(x in error_str for x in ["429", "quota", "rate", "RESOURCE_EXHAUSTED"]):
@@ -465,9 +481,6 @@ class LLMProvider:
         if not api_key:
             raise ValueError("OPENROUTER_API_KEY not set")
 
-        if not REQUESTS_AVAILABLE:
-            raise ImportError("requests required for OpenRouter")
-
         class OpenRouterHTTPWrapper:
             def __init__(self, api_key: str, model_name: str):
                 self.api_key = api_key
@@ -488,7 +501,7 @@ class LLMProvider:
                     "max_tokens": kwargs.get("max_tokens", 1024),
                 }
                 try:
-                    r = requests.post(self.endpoint, headers=headers, json=payload, timeout=60)
+                    r = httpx.post(self.endpoint, headers=headers, json=payload, timeout=60)
                     r.raise_for_status()
                     data = r.json()
                     if "choices" in data and data["choices"]:
@@ -615,6 +628,50 @@ class LLMProvider:
             "circuit_open": self._circuit_open,
             "last_error": self._last_error,
         }
+
+    # ─── Embedding interface ──────────────────────────────────────────────
+    # pdf_ingest.py calls llm.embed() and llm.embed_batch() for lazy-embedding.
+    # Delegates to DocumentIngestor's CUDA SentenceTransformers model (768-dim,
+    # all-mpnet-base-v2) which is already loaded and GPU-warmed.  Falls back to
+    # GoogleVisionProvider.embed_content if DocumentIngestor is unavailable.
+
+    def _get_embedder(self):
+        """Lazily obtain DocumentIngestor for batch embedding (CUDA fast path)."""
+        if not hasattr(self, "_doc_embedder"):
+            self._doc_embedder = None
+        if self._doc_embedder is None:
+            try:
+                from app.rag.ingest import get_document_ingestor
+                self._doc_embedder = get_document_ingestor()
+            except Exception as e:
+                logger.debug(f"DocumentIngestor unavailable for embedding: {e}")
+        return self._doc_embedder
+
+    def embed(self, text: str) -> List[float]:
+        """Embed a single text string → vector."""
+        embedder = self._get_embedder()
+        if embedder is not None:
+            return embedder._generate_embedding(text)
+        # Fallback: Google genai embed_content (if Gemini provider)
+        try:
+            import google.generativeai as genai
+            result = genai.embed_content(
+                model="models/text-embedding-004",
+                content=text,
+                task_type="retrieval_document",
+            )
+            return result["embedding"]
+        except Exception as e:
+            logger.warning(f"embed() fallback failed: {e}")
+            return [0.0] * 768
+
+    def embed_batch(self, texts: List[str]) -> List[List[float]]:
+        """Batch-embed texts → list of vectors (CUDA SentenceTransformers fast path)."""
+        embedder = self._get_embedder()
+        if embedder is not None:
+            return embedder._generate_embeddings_batch(texts)
+        # Fallback: sequential Google embed_content
+        return [self.embed(t) for t in texts]
 
     def mark_provider_failure(self, provider_name: str, error_type: str = None, cooldown_seconds: int = 60):
         """Mark provider as failed with cooldown."""
@@ -825,7 +882,7 @@ class GoogleVisionProvider:
         resolved_vision_model = (
             vision_model
             or (getattr(_pdf_cfg, "vision_model", None) if _pdf_cfg else None)
-            or "gemini-2.0-flash"
+            or "gemini-2.5-flash"
         )
         resolved_embedding_model = (
             embedding_model
@@ -844,7 +901,10 @@ class GoogleVisionProvider:
             self.vision_client = None
 
         try:
-            import google.generativeai as genai
+            import warnings as _w
+            with _w.catch_warnings():
+                _w.simplefilter("ignore", FutureWarning)
+                import google.generativeai as genai
             genai.configure()  # uses GOOGLE_API_KEY env var or ADC
             self.gemini_model = genai.GenerativeModel(resolved_vision_model)
             self._genai = genai

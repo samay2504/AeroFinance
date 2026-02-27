@@ -38,18 +38,38 @@ async def stream_query_events(request) -> AsyncGenerator[str, None]:
         route_result = router.route(request.query, has_loaded_data=has_data)
         track = route_result.get("track", "TRACK_DATA")
 
+        # ── PDF summary override ──────────────────────────────────────────
+        # If dataset_id starts with "doc_" and query is summary-intent,
+        # override the track to use summarize_dataset() for PDFs.
+        _SUMMARY_KW = {"summary", "summarize", "summarise", "overview", "describe",
+                        "about", "highlights", "key points", "explain", "outline"}
+        dataset_id = getattr(request, "dataset_id", "") or ""
+        q_lower = request.query.lower()
+        _is_pdf_summary = (
+            dataset_id.startswith("doc_")
+            and any(kw in q_lower for kw in _SUMMARY_KW)
+        )
+        if _is_pdf_summary:
+            track = "TRACK_DOC_SUMMARY"
+
         yield f"event: route\ndata: {json.dumps({'track': track, 'confidence': route_result.get('confidence', 0)})}\n\n"
 
         result_text = ""
         method = "unknown"
 
-        if track == "TRACK_DOC_SUMMARY" and datasets:
+        if track == "TRACK_DOC_SUMMARY" and (datasets or _is_pdf_summary):
             summaries = []
-            for i, ds in enumerate(datasets[:3]):
+            # For PDF summary, use the specific doc_id
+            _targets = (
+                [{"dataset_id": dataset_id}]
+                if _is_pdf_summary
+                else datasets[:3]
+            )
+            for i, ds in enumerate(_targets):
                 ds_id = ds.get("dataset_id", "")
                 sheet_name = ds_id.split(":")[-1] if ":" in ds_id else ds_id
                 yield (
-                    f"event: progress\ndata: {json.dumps({'sheet': sheet_name, 'index': i+1, 'total': min(len(datasets), 3)})}\n\n"
+                    f"event: progress\ndata: {json.dumps({'sheet': sheet_name, 'index': i+1, 'total': len(_targets)})}\n\n"
                 )
 
                 summary_result = agent.summarize_dataset(ds_id, client_id=safe_client, user_query=request.query)
