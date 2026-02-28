@@ -1960,6 +1960,8 @@ class LLMWrapper:
                 try:
                     hot_cache = get_hot_prompt_cache()
                     system_context = f"provider:{self.provider_name}:structured"
+                    if cache_context:
+                        system_context += f":{cache_context}"
                     cached = hot_cache.get(
                         system_prompt=system_context,
                         user_query=formatted_prompt,
@@ -1967,7 +1969,7 @@ class LLMWrapper:
                     )
                     if cached:
                         self._cache_hits += 1
-                        logger.debug(f"Structured cache HIT (semantic): {formatted_prompt[:60]}...")
+                        logger.debug(f"Structured cache HIT (semantic, ctx={cache_context}): {formatted_prompt[:60]}...")
                         # Parse cached JSON
                         from app.core.llm_utils import RobustJSONParser
                         return RobustJSONParser.parse(cached)
@@ -1993,12 +1995,14 @@ class LLMWrapper:
                 try:
                     hot_cache = get_hot_prompt_cache()
                     system_context = f"provider:{self.provider_name}:structured"
+                    if cache_context:
+                        system_context += f":{cache_context}"
                     hot_cache.put(
                         system_prompt=system_context,
                         user_query=formatted_prompt,
                         response=content
                     )
-                    logger.debug(f"Cached structured response: {formatted_prompt[:60]}...")
+                    logger.debug(f"Cached structured response (ctx={cache_context}): {formatted_prompt[:60]}...")
                 except Exception as e:
                     logger.debug(f"Structured semantic cache store failed: {e}")
 

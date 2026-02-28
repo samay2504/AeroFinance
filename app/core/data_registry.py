@@ -1183,11 +1183,12 @@ class DataRegistry:
                 logger.warning(f"Failed to load metadata: {e}")
 
     def _save_disk_metadata(self):
-        """Persist metadata to disk."""
+        """Persist metadata to disk (snapshot to avoid dict-size-changed errors)."""
         meta_file = self.cache_dir / "_metadata.json"
         try:
+            snapshot = dict(self._metadata)
             with open(meta_file, "w") as f:
-                json.dump(self._metadata, f, indent=2, default=str)
+                json.dump(snapshot, f, indent=2, default=str)
         except Exception as e:
             logger.warning(f"Failed to save metadata: {e}")
 
